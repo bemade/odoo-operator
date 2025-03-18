@@ -5,6 +5,7 @@ import psycopg2
 import yaml
 import logging
 from passlib.context import CryptContext
+import base64
 
 
 logger = logging.getLogger("odoo-operator")
@@ -54,7 +55,7 @@ class OdooHandler:
         pass
 
     def on_delete(self):
-        # self._scale_down_deployment()
+        self._scale_down_deployment()
         self._delete_odoo_db_user()
 
     def _scale_down_deployment(self):
@@ -189,7 +190,7 @@ class OdooHandler:
             drop = bool(cur.fetchone())
         for database in databases:
             with conn.cursor() as cur:
-                cur.execute(f"DROP DATABASE {database}")
+                cur.execute(f'DROP DATABASE "{database}"')
 
         if drop:
             with conn.cursor() as cur:
@@ -285,6 +286,9 @@ class OdooHandler:
                 "data_dir": "/var/lib/odoo",
                 "proxy_mode": "True",
                 "addons_path": "/mnt/extra-addons",
+                "db_user": base64.b64decode(
+                    self.odoo_user_secret.data["username"]
+                ).decode(),
             }
             admin_pw = self.spec.get("adminPassword", "")
             if admin_pw:
@@ -485,22 +489,22 @@ class OdooHandler:
                                         path="/web/health",
                                         port=8069,
                                     ),
-                                    initial_delay_seconds=60,
-                                    period_seconds=20,
-                                    timeout_seconds=10,
+                                    initial_delay_seconds=20,
+                                    period_seconds=5,
+                                    timeout_seconds=2,
                                     success_threshold=1,
-                                    failure_threshold=6,
+                                    failure_threshold=36,
                                 ),
                                 readiness_probe=client.V1Probe(
                                     http_get=client.V1HTTPGetAction(
                                         path="/web/health",
                                         port=8069,
                                     ),
-                                    initial_delay_seconds=60,
-                                    period_seconds=20,
-                                    timeout_seconds=10,
+                                    initial_delay_seconds=20,
+                                    period_seconds=5,
+                                    timeout_seconds=2,
                                     success_threshold=1,
-                                    failure_threshold=6,
+                                    failure_threshold=20,
                                 ),
                             )
                         ],
@@ -582,7 +586,8 @@ class OdooHandler:
                     raise
         return self._ingress_route_http
 
-    def _create_ingress_route(self, suffix, entrypoint, port, middlewares):
+    def _create_ingress_route(self, suffix, entrypoint, port, middlewares, tls=True):
+        tls = {"secretName": self.tls_cert.get("metadata").get("name")} if tls else {}
         return client.CustomObjectsApi().create_namespaced_custom_object(
             group="traefik.io",
             version="v1alpha1",
@@ -614,6 +619,7 @@ class OdooHandler:
                             ],
                         }
                     ],
+                    "tls": tls,
                 },
             },
         )
@@ -630,6 +636,7 @@ class OdooHandler:
                         "namespace": self.operator_ns,
                     },
                 ],
+                tls=False,
             )
 
     @property
