@@ -10,6 +10,7 @@ spec:
   configOptions:
     limit_time_real: "0"
     limit_time_cpu: "0"
+    addons_path: "/mnt/extra-addons,/mnt/enterprise-addons"
   ingress:
     host: test.odoo.bemade.org
     issuer: letsencrypt-dns
