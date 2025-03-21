@@ -1,0 +1,43 @@
+image: docker:latest
+
+services:
+  - docker:dind
+
+stages:
+  - build
+
+# This before_script section will be used by all jobs
+before_script:
+  # Set up SSH for GitHub access
+  - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )'
+  - eval $(ssh-agent -s)
+  - mkdir -p ~/.ssh
+  - chmod 700 ~/.ssh
+  # Configure SSH to not verify host keys for both GitHub and git.bemade.org
+  - |
+    cat > ~/.ssh/config << EOF
+    Host github.com
+      StrictHostKeyChecking no
+      UserKnownHostsFile=/dev/null
+
+    Host git.bemade.org
+      StrictHostKeyChecking no
+      UserKnownHostsFile=/dev/null
+    EOF
+  - chmod 600 ~/.ssh/config
+  # Add the SSH key - copy to a temporary file with proper permissions
+  - cp "$SSH_KEY_GITHUB" ~/.ssh/github_key
+  - chmod 600 ~/.ssh/github_key
+  - ssh-add ~/.ssh/github_key
+  # Login to Docker registry
+  - echo "$HARBOR_PASSWORD" | docker login $HARBOR_URL -u $HARBOR_USERNAME --password-stdin
+  # Clean up submodules directory if it was set up by a previous run
+  - rm -rf ./.repos/*
+
+build_amd64:
+  stage: build
+  tags:
+    - docker
+  script:
+    - export BUILD_DATE=$(date +%Y-%m-%d)
+    - docker buildx build --platform linux/amd64 -t docker.bemade.org/bemade/odoo-operator:$BUILD_DATE -t docker.bemade.org/bemade/odoo-operator:latest --push .

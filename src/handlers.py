@@ -325,7 +325,7 @@ class OdooHandler:
 
     def _init_tls_cert(self):
         if not self.tls_cert:
-            host = self.spec.get("ingress").get("host")
+            hostnames = self.spec.get("ingress").get("hosts")
             apiVersion = "cert-manager.io/v1"
             metadata = client.V1ObjectMeta(
                 name=f"{host}-cert",
@@ -333,7 +333,7 @@ class OdooHandler:
             )
             cert_spec = {
                 "secretName": f"{host}-cert",
-                "dnsNames": [host],
+                "dnsNames": hostnames,
                 "issuerRef": {
                     "name": self.spec.get("ingress").get("issuer"),
                     "kind": "ClusterIssuer",
@@ -590,6 +590,7 @@ class OdooHandler:
         self, suffix, entrypoint, port, middlewares, tls=True, match_suffix=""
     ):
         tls = {"secretName": self.tls_cert.get("metadata").get("name")} if tls else {}
+        hostnames = self.spec.get("ingress", {}).get("hosts")
         return client.CustomObjectsApi().create_namespaced_custom_object(
             group="traefik.io",
             version="v1alpha1",
@@ -607,7 +608,10 @@ class OdooHandler:
                     "routes": [
                         {
                             "kind": "Rule",
-                            "match": f"Host(`{self.spec.get('ingress', {}).get('host')}`){match_suffix}",
+                            "match": " || ".join(
+                                f"Host(`{hostname}`)" for hostname in hostnames or []
+                            )
+                            + match_suffix,
                             "middlewares": middlewares,
                             "services": [
                                 {
