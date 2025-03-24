@@ -25,12 +25,12 @@ def delete_fn(body, **kwargs):
 @kopf.timer("batch", "v1", "jobs", interval=30.0, labels={"type": "upgrade-job"})
 def check_upgrade_job_completion(name, namespace, labels, **kwargs):
     """Check if an upgrade job has completed and delegate to OdooHandler for post-completion tasks."""
-    # Only process jobs with the upgrade-job label and app label
-    if "type" not in labels or labels["type"] != "upgrade-job" or "app" not in labels:
+    # Only process jobs with the upgrade-job label and app-instance label
+    if "type" not in labels or labels["type"] != "upgrade-job" or "app-instance" not in labels:
         return
 
     # Create an OdooHandler instance from the job info
-    handler = OdooHandler.from_job_info(namespace, labels["app"])
+    handler = OdooHandler.from_job_info(namespace, labels["app-instance"])
 
     # If we got a valid handler, delegate the job check to it
     if handler:

@@ -180,7 +180,7 @@ class UpgradeJob(ResourceHandler):
             name=f"{self.name}-upgrade",
             namespace=self.namespace,
             owner_references=[self.owner_reference],
-            labels={"app": self.name, "type": "upgrade-job"},
+            labels={"app-instance": self.name, "app": f"{self.name}-upgrade", "type": "upgrade-job"},
         )
 
         pull_secret = (
@@ -201,7 +201,7 @@ class UpgradeJob(ResourceHandler):
         job_spec = client.V1JobSpec(
             template=client.V1PodTemplateSpec(
                 metadata=client.V1ObjectMeta(
-                    labels={"app": self.name, "type": "upgrade-job"},
+                    labels={"app-instance": self.name, "app": f"{self.name}-upgrade", "type": "upgrade-job"},
                 ),
                 spec=client.V1PodSpec(
                     **pull_secret,
