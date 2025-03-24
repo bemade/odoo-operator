@@ -138,12 +138,7 @@ class IngressRouteHTTPS(IngressRouteBase):
             "suffix": "https",
             "entrypoint": "websecure",
             "port": 8069,
-            "middlewares": [
-                {
-                    "name": "add-request-uri",
-                    "namespace": self.operator_ns,
-                },
-            ],
+            "middlewares": [],
         }
 
     def _get_route_name(self):
@@ -161,10 +156,6 @@ class IngressRouteWebsocket(IngressRouteBase):
             "middlewares": [
                 {
                     "name": "remove-prefix",
-                    "namespace": self.operator_ns,
-                },
-                {
-                    "name": "add-request-uri",
                     "namespace": self.operator_ns,
                 },
             ],
