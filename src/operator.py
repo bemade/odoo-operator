@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configure webhook server
-webhook_host = "0.0.0.0"
+webhook_host = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 webhook_port = 443
 webhook_cert_path = "/etc/webhook/tls.crt"
 webhook_key_path = "/etc/webhook/tls.key"
