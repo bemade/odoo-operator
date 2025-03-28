@@ -131,7 +131,10 @@ class OdooHandler(ResourceHandler):
             # If the scheduled time has passed, it's time to execute the upgrade
             return current_time >= scheduled_datetime
         except Exception as e:
-            logging.error(f"Error parsing scheduled upgrade time for {self.name}: {e}")
+            logging.error(
+                f"Error parsing scheduled upgrade time for {self.name}: {e}",
+                exc_info=True,
+            )
             # If there's an error parsing the time, default to not upgrading
             return False
 
@@ -200,9 +203,7 @@ class OdooHandler(ResourceHandler):
             db_superuser_password = os.environ.get("DB_ADMIN_PASSWORD")
 
             # Get the Odoo username for ownership check
-            odoo_username = base64.b64decode(
-                self.odoo_user_secret.get("username")
-            ).decode("utf-8")
+            odoo_username = self.odoo_user_secret.username
             if not odoo_username:
                 return False, "Could not retrieve Odoo database username"
 

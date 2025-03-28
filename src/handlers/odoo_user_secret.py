@@ -3,6 +3,7 @@ from .resource_handler import ResourceHandler, update_if_exists, create_if_missi
 import secrets
 import os
 import psycopg2
+import base64
 
 
 class OdooUserSecret(ResourceHandler):
@@ -23,6 +24,14 @@ class OdooUserSecret(ResourceHandler):
     def handle_update(self):
         # We don't update the user secret as it's internal only
         return
+
+    @property
+    def username(self):
+        return base64.b64decode(self.resource.data.get("username")).decode("utf-8")
+
+    @property
+    def password(self):
+        return base64.b64decode(self.resource.data.get("password")).decode("utf-8")
 
     def handle_delete(self):
         self._delete_odoo_db_user()
