@@ -13,6 +13,7 @@ webhook_host = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 webhook_port = 443
 webhook_cert_path = "/etc/webhook/tls.crt"
 webhook_key_path = "/etc/webhook/tls.key"
+webhook_ca_path = "/etc/webhook-ca/ca.crt"  # Path to the CA certificate
 
 
 @kopf.on.startup()
@@ -35,8 +36,9 @@ def configure_webhook(settings: kopf.OperatorSettings, **_):
                 port=webhook_port,
                 certfile=webhook_cert_path,
                 pkeyfile=webhook_key_path,
+                cafile=webhook_ca_path,
             )
-            settings.admission.managed = 'auto.kopf.dev'
+            settings.admission.managed = "auto.kopf.dev"
 
             logger.info("Webhook server configured successfully")
 
@@ -82,7 +84,6 @@ def validate_fn(body, old, new, **kwargs):
     _logger.debug(f"In the validatioin webhook, body: {body}")
     _logger.debug(f"Old spec: {old}")
     _logger.debug(f"New spec: {new}")
-
 
     new_spec = new.get("spec", {})
     upgrade_spec = new_spec.get("upgrade", {})
