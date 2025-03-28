@@ -200,7 +200,9 @@ class OdooHandler(ResourceHandler):
             db_superuser_password = os.environ.get("DB_ADMIN_PASSWORD")
 
             # Get the Odoo username for ownership check
-            odoo_username = self.odoo_user_secret.get_username()
+            odoo_username = base64.b64decode(
+                self.odoo_user_secret.get("username")
+            ).decode("utf-8")
             if not odoo_username:
                 return False, "Could not retrieve Odoo database username"
 
