@@ -173,6 +173,88 @@ class OdooHandler(ResourceHandler):
         except Exception as e:
             logging.error(f"Error in upgrade job completion check for {self.name}: {e}")
 
+    def validate_database_exists(self, database_name):
+        """
+        Validate that the specified database exists and belongs to the Odoo user.
+
+        Args:
+            database_name: The name of the database to validate
+
+        Returns:
+            tuple: (exists, error_message) where exists is a boolean and error_message is None if exists is True
+        """
+        try:
+            import psycopg2
+
+            # Get database connection parameters from environment variables
+            db_host = os.environ.get("DB_HOST")
+            db_port = os.environ.get("DB_PORT")
+            db_superuser = os.environ.get("DB_ADMIN_USER")
+            db_superuser_password = os.environ.get("DB_ADMIN_PASSWORD")
+
+            # Get the Odoo username for ownership check
+            odoo_username = self.odoo_user_secret.get_username()
+            if not odoo_username:
+                return False, "Could not retrieve Odoo database username"
+
+            # Connect to the postgres database using superuser credentials
+            conn = psycopg2.connect(
+                host=db_host,
+                port=db_port,
+                database="postgres",
+                user=db_superuser,
+                password=db_superuser_password,
+            )
+
+            # Set autocommit to True to avoid transaction issues
+            conn.autocommit = True
+
+            # Create a cursor
+            cur = conn.cursor()
+
+            # Check if the database exists
+            cur.execute(
+                "SELECT datname FROM pg_database WHERE datname = %s", (database_name,)
+            )
+
+            database_exists = cur.fetchone() is not None
+
+            if not database_exists:
+                cur.close()
+                conn.close()
+                return False, f"Database '{database_name}' does not exist"
+
+            # Check if the database is owned by the Odoo user
+            cur.execute(
+                """
+                SELECT d.datname 
+                FROM pg_database d 
+                JOIN pg_roles r ON d.datdba = r.oid 
+                WHERE d.datname = %s AND r.rolname = %s
+                """,
+                (database_name, odoo_username),
+            )
+
+            owned_by_odoo_user = cur.fetchone() is not None
+
+            # Close cursor and connection
+            cur.close()
+            conn.close()
+
+            if not owned_by_odoo_user:
+                return (
+                    False,
+                    f"Database '{database_name}' is not owned by the Odoo user",
+                )
+
+            return True, None
+
+        except Exception as e:
+            logging.error(
+                f"Error validating database existence for {database_name}: {e}"
+            )
+            return False, f"Error validating database: {str(e)}"
+
     @classmethod
     def from_job_info(cls, namespace, app_name):
         """Create an OdooHandler instance from job information.
