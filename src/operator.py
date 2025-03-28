@@ -36,6 +36,8 @@ def configure_webhook(settings: kopf.OperatorSettings, **_):
                 certfile=webhook_cert_path,
                 pkeyfile=webhook_key_path,
             )
+            settings.admission.managed = 'auto.kopf.dev'
+
             logger.info("Webhook server configured successfully")
 
             # Log webhook server settings
