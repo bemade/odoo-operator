@@ -162,14 +162,17 @@ class OdooHandler(ResourceHandler):
             f"Upgrade job created for {self.name}, will check for completion periodically"
         )
 
-    def handle_upgrade_job_check(self):
+    def handle_upgrade_job_check(self, job_name=None):
         """Handle checking if the upgrade job has completed.
         This method is called by the operator's timer handler.
+
+        Args:
+            job_name: Optional name of the job being checked
 
         Returns:
             bool: True if the job was completed and handled, False otherwise
         """
-        logging.info(f"Checking upgrade job for {self.name}")
+        logging.info(f"Checking upgrade job {job_name} for {self.name}")
 
         try:
             return self.upgrade_job.handle_completion()

@@ -99,40 +99,51 @@ def check_upgrade_job_completion(name, namespace, labels, status, **kwargs):
         return
 
     # Skip jobs that have already been processed
-    # We'll add a label to the job when we process it
-    if status and status.conditions:
-        for condition in status.conditions:
-            if condition.type == "Complete" and condition.status == "True":
-                # Check if this job has already been handled by looking for our annotation
-                annotations = kwargs.get("meta", {}).get("annotations", {})
-                if annotations.get("odoo-operator/upgrade-handled") == "true":
-                    logger.debug(
-                        f"Skipping already handled upgrade job {name} in {namespace}"
-                    )
-                    return
+    # We'll add an annotation to the job when we process it
+    annotations = kwargs.get("meta", {}).get("annotations", {})
+    if annotations.get("odoo-operator/upgrade-handled") == "true":
+        logger.info(f"Skipping already handled upgrade job: {name}")
+        return
 
-    # Create an OdooHandler instance from the job info
-    handler = OdooHandler.from_job_info(namespace, labels["app-instance"])
+    # Get the app instance name from the labels
+    app_instance = labels.get("app-instance")
 
-    # If we got a valid handler, delegate the job check to it
-    if handler:
-        job_handled = handler.handle_upgrade_job_check()
+    # Check if the job is complete
+    job_complete = False
 
-        # If the job was handled successfully, mark it as processed
-        if job_handled:
-            try:
-                # Add an annotation to mark this job as handled
-                patch = {
-                    "metadata": {
-                        "annotations": {"odoo-operator/upgrade-handled": "true"}
-                    }
-                }
-                client.BatchV1Api().patch_namespaced_job(
-                    name=name, namespace=namespace, body=patch
-                )
-                logger.info(f"Marked upgrade job {name} in {namespace} as handled")
-            except Exception as e:
-                logger.warning(f"Failed to mark job as handled: {e}")
+    # The status structure can vary, so we need to handle it carefully
+    if status:
+        # Check for completion in status.conditions if it exists
+        if hasattr(status, "conditions") and status.conditions:
+            for condition in status.conditions:
+                if condition.type == "Complete" and condition.status == "True":
+                    job_complete = True
+                    break
+        # Also check status.succeeded which is more commonly available
+        elif hasattr(status, "succeeded") and status.succeeded:
+            job_complete = True
+
+    if not job_complete:
+        logger.debug(f"Job {name} in namespace {namespace} is not complete yet")
+        return
+
+    # Create an OdooHandler from the job info
+    handler = OdooHandler.from_job_info(namespace, app_instance)
+    if not handler:
+        logger.error(
+            f"Could not create OdooHandler for job {name} in namespace {namespace}"
+        )
+        return
+
+    # Handle the upgrade job completion
+    success = handler.handle_upgrade_job_check(name)
+
+    if success:
+        # Mark the job as handled with an annotation
+        patch = {"metadata": {"annotations": {"odoo-operator/upgrade-handled": "true"}}}
+        api = client.BatchV1Api()
+        api.patch_namespaced_job(name, namespace, patch)
+        logger.info(f"Marked job {name} as handled")
 
 
 @kopf.timer("bemade.org", "v1", "odooinstances", interval=60.0)
