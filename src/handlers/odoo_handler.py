@@ -13,7 +13,7 @@ from .ingress_routes import IngressRouteHTTP, IngressRouteHTTPS, IngressRouteWeb
 from .upgrade_job import UpgradeJob
 from .resource_handler import ResourceHandler
 import logging
-import time
+import base64
 
 
 class OdooHandler(ResourceHandler):
