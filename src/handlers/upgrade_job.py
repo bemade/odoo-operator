@@ -143,7 +143,10 @@ class UpgradeJob(ResourceHandler):
         if not (self.upgrade_spec 
                 and self.database 
                 and isinstance(self.modules, list) 
-                and len(self.modules) > 0):
+                and len(self.modules) > 0
+                and (not self.upgrade_spec.get("time")
+                    or datetime.fromisoformat(self.upgrade_spec.get("time")) < datetime.now()
+                )):
             return False
             
         # If we have a resource, check if it's still running
