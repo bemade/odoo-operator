@@ -4,6 +4,7 @@ from .resource_handler import ResourceHandler, update_if_exists, create_if_missi
 import os
 
 
+
 class UpgradeJob(ResourceHandler):
     """Manages the Odoo Upgrade Job."""
 
@@ -17,15 +18,73 @@ class UpgradeJob(ResourceHandler):
         self.modules = self.upgrade_spec.get("modules", [])
 
     def _read_resource(self):
+        """Read the most recent upgrade job for this OdooInstance.
+
+        This method finds all jobs with matching labels and owner references,
+        then returns the most recent active job, or the most recent completed job
+        if no active jobs are found.
+        """
         try:
-            return client.BatchV1Api().read_namespaced_job(
-                name=f"{self.name}-upgrade",
+            # Get all jobs with matching labels
+            jobs = client.BatchV1Api().list_namespaced_job(
                 namespace=self.namespace,
+                label_selector=f"app.kubernetes.io/instance={self.name},app.kubernetes.io/component=upgrade",
             )
-        except client.exceptions.ApiException as e:
-            if e.status == 404:
+
+            # Filter for jobs owned by this OdooInstance
+            owned_jobs = [j for j in jobs.items if self._verify_owner_reference(j)]
+            if not owned_jobs:
+                logging.debug(f"No upgrade jobs found for {self.name}")
                 return None
-            raise
+
+            # Filter for active jobs (not completed or failed)
+            active_jobs = [
+                j for j in owned_jobs if j.status and not (j.status.succeeded or j.status.failed)
+            ]
+            
+            if active_jobs:
+                # Sort by creation timestamp, newest first
+                active_jobs.sort(key=lambda j: j.metadata.creation_timestamp, reverse=True)
+                return active_jobs[0]
+
+            # If no active jobs, return the most recent completed job
+            owned_jobs.sort(key=lambda j: j.metadata.creation_timestamp, reverse=True)
+            return owned_jobs[0]
+            
+        except client.exceptions.ApiException as e:
+            logging.warning(f"Error listing upgrade jobs for {self.name}: {e}")
+            return None
+
+    def _verify_owner_reference(self, resource):
+        """Verify that the resource is owned by this OdooInstance.
+
+        Args:
+            resource: The Kubernetes resource to check
+
+        Returns:
+            bool: True if the resource is owned by this OdooInstance, False otherwise
+        """
+        if (
+            not resource
+            or not resource.metadata
+            or not resource.metadata.owner_references
+        ):
+            return False
+
+        # Check if any of the owner references match this OdooInstance
+        for owner_ref in resource.metadata.owner_references:
+            if (
+                owner_ref.uid == self.owner_reference.uid
+                and owner_ref.kind == self.owner_reference.kind
+                and owner_ref.name == self.owner_reference.name
+            ):
+                return True
+
+        return False
+
+    @property
+    def is_completed(self):
+        return self._check_job_completed()
 
     @update_if_exists
     def handle_create(self):
@@ -43,7 +102,7 @@ class UpgradeJob(ResourceHandler):
             body=job,
         )
 
-        logging.info(
+        logging.debug(
             f"Created upgrade job for {self.name} to upgrade modules: {self.modules}"
         )
         return self._resource
@@ -57,31 +116,23 @@ class UpgradeJob(ResourceHandler):
         # Scale down the deployment
         self.deployment.scale(0)
 
-        # Create or update the upgrade job
-        job = self._get_resource_body()
-        self._resource = client.BatchV1Api().patch_namespaced_job(
-            name=f"{self.name}-upgrade",
-            namespace=self.namespace,
-            body=job,
-        )
-
-        logging.info(
-            f"Updated upgrade job for {self.name} to upgrade modules: {self.modules}"
-        )
-        return self._resource
+        # For upgrade jobs, we don't update - we create a new one
+        # This ensures we get a clean state for each upgrade
+        logging.debug(f"Creating a new upgrade job for {self.name} instead of updating")
+        return self.handle_create()
 
     def handle_delete(self):
         # Delete the job if it exists
-        if self.resource:
+        if self.resource and self.resource.metadata and self.resource.metadata.name:
             try:
                 client.BatchV1Api().delete_namespaced_job(
-                    name=f"{self.name}-upgrade",
+                    name=self.resource.metadata.name,
                     namespace=self.namespace,
                     body=client.V1DeleteOptions(
                         propagation_policy="Foreground",
                     ),
                 )
-                logging.info(f"Deleted upgrade job for {self.name}")
+                logging.debug(f"Deleted upgrade job {self.resource.metadata.name} for {self.name}")
             except client.exceptions.ApiException as e:
                 if e.status != 404:
                     raise
@@ -93,10 +144,12 @@ class UpgradeJob(ResourceHandler):
             and self.database
             and isinstance(self.modules, list)
             and len(self.modules) > 0
+            and (not self.resource or self.is_completed)
         )
 
-    def check_job_completed(self):
+    def _check_job_completed(self):
         """Check if the upgrade job has completed successfully."""
+        # If there's no job resource, it can't be completed
         if not self.resource:
             return False
 
@@ -115,17 +168,22 @@ class UpgradeJob(ResourceHandler):
         Returns:
             bool: True if the job was completed and handled, False otherwise
         """
-        # Skip if there's no upgrade job or if it's not completed
-        if not self.resource or not self.check_job_completed():
+        # Skip if the job isn't completed
+        if not self.is_completed:
             return False
 
-        logging.info(f"Handling completion of upgrade job for {self.name}")
+        logging.debug(f"Handling completion of upgrade job for {self.name}")
 
         # Scale the deployment back up
         self._scale_deployment_up()
 
         # Remove the upgrade section from the spec to prevent re-triggering
-        self._remove_upgrade_from_spec()
+        # Only if it still exists
+        if self.spec.get("upgrade"):
+            self._remove_upgrade_from_spec()
+
+        # Delete the completed job
+        self._cleanup_completed_job()
 
         logging.info(f"Upgrade process completed for {self.name}")
         return True
@@ -139,7 +197,7 @@ class UpgradeJob(ResourceHandler):
         success = self.deployment.scale(replicas)
 
         if success:
-            logging.info(
+            logging.debug(
                 f"Scaled deployment {self.name} back up to {replicas} replicas"
             )
         else:
@@ -165,26 +223,54 @@ class UpgradeJob(ResourceHandler):
                 body=patch,
             )
 
-            logging.info(f"Removed upgrade field from {self.name} spec")
+            logging.debug(f"Removed upgrade field from {self.name} spec")
         except Exception as e:
             logging.error(f"Error removing upgrade from spec: {e}")
+
+    def _cleanup_completed_job(self):
+        """Delete the completed upgrade job to clean up resources."""
+        if not self.resource or not self.resource.metadata or not self.resource.metadata.name:
+            logging.debug(f"No job resource to delete for {self.name}")
+            return
+            
+        try:
+            # Delete the job using its actual name from the resource
+            client.BatchV1Api().delete_namespaced_job(
+                name=self.resource.metadata.name,
+                namespace=self.namespace,
+                body=client.V1DeleteOptions(
+                    propagation_policy="Background",
+                ),
+            )
+            logging.debug(f"Deleted completed upgrade job {self.resource.metadata.name} for {self.name}")
+            # Clear the resource reference
+            self._resource = None
+        except client.exceptions.ApiException as e:
+            if e.status != 404:  # Ignore if job is already gone
+                logging.error(f"Error deleting completed upgrade job: {e}")
+
+
 
     def _get_resource_body(self):
         """Create the job resource definition."""
         image = self.spec.get("image", self.defaults.get("odooImage", "odoo:18.0"))
 
+        # Add labels to make it easier to find this job later
+        labels = {
+            "app.kubernetes.io/name": "odoo",
+            "app.kubernetes.io/instance": self.name,
+            "app.kubernetes.io/component": "upgrade",
+            "app.kubernetes.io/managed-by": "odoo-operator",
+        }
+
         # Format modules list as comma-separated string
         modules_str = ",".join(self.modules)
-
+        
         metadata = client.V1ObjectMeta(
-            name=f"{self.name}-upgrade",
+            generate_name=f"{self.name}-upgrade-",  # Kubernetes will append a unique suffix
             namespace=self.namespace,
             owner_references=[self.owner_reference],
-            labels={
-                "app-instance": self.name,
-                "app": f"{self.name}-upgrade",
-                "type": "upgrade-job",
-            },
+            labels=labels,  # Use our standardized labels
         )
 
         pull_secret = (
@@ -205,11 +291,7 @@ class UpgradeJob(ResourceHandler):
         job_spec = client.V1JobSpec(
             template=client.V1PodTemplateSpec(
                 metadata=client.V1ObjectMeta(
-                    labels={
-                        "app-instance": self.name,
-                        "app": f"{self.name}-upgrade",
-                        "type": "upgrade-job",
-                    },
+                    labels=labels,  # Use our standardized labels
                 ),
                 spec=client.V1PodSpec(
                     **pull_secret,

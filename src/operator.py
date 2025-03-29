@@ -117,67 +117,10 @@ def validate(body, old, new, **kwargs):
         raise kopf.AdmissionError(error_message)
 
 
-@kopf.timer("batch", "v1", "jobs", interval=30.0, labels={"type": "upgrade-job"})
-def check_upgrade_job_completion(name, namespace, labels, status, **kwargs):
-    """Check if an upgrade job has completed and delegate to OdooHandler for post-completion tasks."""
-    # Only process jobs with the upgrade-job label and app-instance label
-    if (
-        "type" not in labels
-        or labels["type"] != "upgrade-job"
-        or "app-instance" not in labels
-    ):
-        return
-
-    # Skip jobs that have already been processed
-    # We'll add an annotation to the job when we process it
-    annotations = kwargs.get("meta", {}).get("annotations", {})
-    if annotations.get("odoo-operator/upgrade-handled") == "true":
-        logger.info(f"Skipping already handled upgrade job: {name}")
-        return
-
-    # Get the app instance name from the labels
-    app_instance = labels.get("app-instance")
-
-    # Check if the job is complete
-    job_complete = False
-
-    # The status structure can vary, so we need to handle it carefully
-    if status:
-        # Check for completion in status.conditions if it exists
-        if hasattr(status, "conditions") and status.conditions:
-            for condition in status.conditions:
-                if condition.type == "Complete" and condition.status == "True":
-                    job_complete = True
-                    break
-        # Also check status.succeeded which is more commonly available
-        elif hasattr(status, "succeeded") and status.succeeded:
-            job_complete = True
-
-    if not job_complete:
-        logger.debug(f"Job {name} in namespace {namespace} is not complete yet")
-        return
-
-    # Create an OdooHandler from the job info
-    handler = OdooHandler.from_job_info(namespace, app_instance)
-    if not handler:
-        logger.error(
-            f"Could not create OdooHandler for job {name} in namespace {namespace}"
-        )
-        return
-
-    # Handle the upgrade job completion
-    success = handler.handle_upgrade_job_check(name)
-
-    if success:
-        # Mark the job as handled with an annotation
-        patch = {"metadata": {"annotations": {"odoo-operator/upgrade-handled": "true"}}}
-        api = client.BatchV1Api()
-        api.patch_namespaced_job(name, namespace, patch)
-        logger.info(f"Marked job {name} as handled")
-
-
-@kopf.timer("bemade.org", "v1", "odooinstances", interval=60.0)
-def check_scheduled_upgrades(body, **kwargs):
-    """Check if any OdooInstances have scheduled upgrades that need to be executed."""
+@kopf.timer("bemade.org", "v1", "odooinstances", interval=30.0)
+def check_odoo_instance_periodic(body, **kwargs):
+    """Periodic check for OdooInstances to handle any time-based operations.
+    This delegates to the OdooHandler to perform all periodic checks.
+    """
     handler = OdooHandler(body, **kwargs)
-    handler.check_scheduled_upgrade()
+    handler.check_periodic()

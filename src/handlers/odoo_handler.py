@@ -81,7 +81,7 @@ class OdooHandler(ResourceHandler):
 
     def on_update(self):
         # Check if this is an upgrade request
-        if self._is_upgrade_request():
+        if self._is_upgrade_request() and self._should_execute_upgrade():
             self._handle_upgrade()
         else:
             # Regular update - update all resources in the correct order
@@ -95,19 +95,31 @@ class OdooHandler(ResourceHandler):
             handler.handle_delete()
 
     def _is_upgrade_request(self):
-        """Check if the update is an upgrade request that should be executed now."""
+        """Check if the spec contains a valid upgrade request."""
         upgrade_spec = self.spec.get("upgrade", {})
         database = upgrade_spec.get("database", "")
         modules = upgrade_spec.get("modules", [])
-        scheduled_time = upgrade_spec.get("time", "")
 
         # Basic validation that this is an upgrade request
-        is_valid_request = (
-            upgrade_spec and database and isinstance(modules, list) and len(modules) > 0
-        )
+        return upgrade_spec and database and isinstance(modules, list) and len(modules) > 0
 
-        # If it's not a valid request, return False
-        if not is_valid_request:
+    def _should_execute_upgrade(self):
+        """Determine if an upgrade request should be executed now.
+        
+        This checks:
+        1. If an upgrade job is already running
+        2. If a scheduled time is specified and has passed
+        """
+        # If it's not a valid upgrade request, don't execute
+        if not self._is_upgrade_request():
+            return False
+            
+        upgrade_spec = self.spec.get("upgrade", {})
+        scheduled_time = upgrade_spec.get("time", "")
+            
+        # If an upgrade job exists and is not completed, don't trigger a new one
+        if self.upgrade_job.resource and not self.upgrade_job.is_completed:
+            logging.debug(f"Upgrade job for {self.name} is already running, skipping new upgrade request")
             return False
 
         # If no scheduled time is specified, execute immediately
@@ -138,15 +150,32 @@ class OdooHandler(ResourceHandler):
             # If there's an error parsing the time, default to not upgrading
             return False
 
-    def check_scheduled_upgrade(self):
+    def check_periodic(self):
+        """
+        Perform all periodic checks for this OdooInstance.
+        This method is called periodically by the operator's timer handler.
+        
+        This centralizes all time-based operations that need to be performed on the OdooInstance.
+        """
+        logging.debug(f"Performing periodic checks for {self.name}")
+        
+        # Check for scheduled upgrades
+        self._check_scheduled_upgrade()
+        
+        # Check for upgrade job completion
+        self._check_upgrade_job_completion()
+        
+        # Add any future periodic checks here
+        # ...
+
+    def _check_scheduled_upgrade(self):
         """
         Check if this instance has a scheduled upgrade that should be executed now.
-        This method is called periodically by the operator's timer handler.
         """
         logging.debug(f"Checking for scheduled upgrades for {self.name}")
 
         # Check if this is an upgrade request that should be executed now
-        if self._is_upgrade_request():
+        if self._is_upgrade_request() and self._should_execute_upgrade():
             logging.info(f"Executing scheduled upgrade for {self.name}")
             self._handle_upgrade()
         else:
@@ -161,28 +190,24 @@ class OdooHandler(ResourceHandler):
 
         # The job will run asynchronously, and we'll check for completion
         # in the check_upgrade_job_completion method that will be called periodically
-        logging.info(
+        logging.debug(
             f"Upgrade job created for {self.name}, will check for completion periodically"
         )
 
-    def handle_upgrade_job_check(self, job_name=None):
-        """Handle checking if the upgrade job has completed.
-        This method is called by the operator's timer handler.
-
-        Args:
-            job_name: Optional name of the job being checked
-
-        Returns:
-            bool: True if the job was completed and handled, False otherwise
-        """
-        logging.info(f"Checking upgrade job {job_name} for {self.name}")
+    def _check_upgrade_job_completion(self):
+        """Check if the upgrade job has completed and handle completion tasks."""
+        # Skip if there's no upgrade job at all
+        if not self.upgrade_job.resource or self.upgrade_job.is_completed:
+            return
+            
+        logging.debug(f"Checking upgrade job completion for {self.name}")
 
         try:
-            return self.upgrade_job.handle_completion()
+            self.upgrade_job.handle_completion()
         except Exception as e:
             logging.error(f"Error in upgrade job completion check for {self.name}: {e}")
-            return False
-
+            return
+            
     def validate_database_exists(self, database_name):
         """
         Validate that the specified database exists and belongs to the Odoo user.
