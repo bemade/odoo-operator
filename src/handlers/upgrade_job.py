@@ -2,7 +2,7 @@ from kubernetes import client
 import logging
 from .resource_handler import ResourceHandler, update_if_exists, create_if_missing
 import os
-
+from datetime import datetime
 
 
 class UpgradeJob(ResourceHandler):
@@ -39,18 +39,22 @@ class UpgradeJob(ResourceHandler):
 
             # Filter for active jobs (not completed or failed)
             active_jobs = [
-                j for j in owned_jobs if j.status and not (j.status.succeeded or j.status.failed)
+                j
+                for j in owned_jobs
+                if j.status and not (j.status.succeeded or j.status.failed)
             ]
-            
+
             if active_jobs:
                 # Sort by creation timestamp, newest first
-                active_jobs.sort(key=lambda j: j.metadata.creation_timestamp, reverse=True)
+                active_jobs.sort(
+                    key=lambda j: j.metadata.creation_timestamp, reverse=True
+                )
                 return active_jobs[0]
 
             # If no active jobs, return the most recent completed job
             owned_jobs.sort(key=lambda j: j.metadata.creation_timestamp, reverse=True)
             return owned_jobs[0]
-            
+
         except client.exceptions.ApiException as e:
             logging.warning(f"Error listing upgrade jobs for {self.name}: {e}")
             return None
@@ -132,7 +136,9 @@ class UpgradeJob(ResourceHandler):
                         propagation_policy="Foreground",
                     ),
                 )
-                logging.debug(f"Deleted upgrade job {self.resource.metadata.name} for {self.name}")
+                logging.debug(
+                    f"Deleted upgrade job {self.resource.metadata.name} for {self.name}"
+                )
             except client.exceptions.ApiException as e:
                 if e.status != 404:
                     raise
@@ -140,15 +146,19 @@ class UpgradeJob(ResourceHandler):
     def should_upgrade(self):
         """Check if an upgrade should be performed."""
         # Basic validation that this is a valid upgrade request
-        if not (self.upgrade_spec 
-                and self.database 
-                and isinstance(self.modules, list) 
-                and len(self.modules) > 0
-                and (not self.upgrade_spec.get("time")
-                    or datetime.fromisoformat(self.upgrade_spec.get("time")) < datetime.now()
-                )):
+        if not (
+            self.upgrade_spec
+            and self.database
+            and isinstance(self.modules, list)
+            and len(self.modules) > 0
+            and (
+                not self.upgrade_spec.get("time")
+                or datetime.fromisoformat(self.upgrade_spec.get("time"))
+                < datetime.now()
+            )
+        ):
             return False
-            
+
         # If we have a resource, check if it's still running
         if self.resource:
             # If the job is completed, we can proceed with cleanup
@@ -156,10 +166,10 @@ class UpgradeJob(ResourceHandler):
             # after the upgrade spec is removed and then added again
             if self.is_completed:
                 return False
-                
+
             # If the job is still running, don't create a new one
             return False
-            
+
         # No existing job, so we can create one
         return True
 
@@ -200,7 +210,7 @@ class UpgradeJob(ResourceHandler):
 
         # Delete the completed job
         self._cleanup_completed_job()
-        
+
         # Clear the resource reference to prevent re-processing
         self._resource = None
 
@@ -248,10 +258,14 @@ class UpgradeJob(ResourceHandler):
 
     def _cleanup_completed_job(self):
         """Delete the completed upgrade job to clean up resources."""
-        if not self.resource or not self.resource.metadata or not self.resource.metadata.name:
+        if (
+            not self.resource
+            or not self.resource.metadata
+            or not self.resource.metadata.name
+        ):
             logging.debug(f"No job resource to delete for {self.name}")
             return
-            
+
         try:
             # Delete the job using its actual name from the resource
             client.BatchV1Api().delete_namespaced_job(
@@ -261,14 +275,14 @@ class UpgradeJob(ResourceHandler):
                     propagation_policy="Background",
                 ),
             )
-            logging.debug(f"Deleted completed upgrade job {self.resource.metadata.name} for {self.name}")
+            logging.debug(
+                f"Deleted completed upgrade job {self.resource.metadata.name} for {self.name}"
+            )
             # Clear the resource reference
             self._resource = None
         except client.exceptions.ApiException as e:
             if e.status != 404:  # Ignore if job is already gone
                 logging.error(f"Error deleting completed upgrade job: {e}")
-
-
 
     def _get_resource_body(self):
         """Create the job resource definition."""
@@ -284,7 +298,7 @@ class UpgradeJob(ResourceHandler):
 
         # Format modules list as comma-separated string
         modules_str = ",".join(self.modules)
-        
+
         metadata = client.V1ObjectMeta(
             generate_name=f"{self.name}-upgrade-",  # Kubernetes will append a unique suffix
             namespace=self.namespace,
