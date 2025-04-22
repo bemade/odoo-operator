@@ -9,7 +9,7 @@ from .odoo_conf import OdooConf
 from .tls_cert import TLSCert
 from .deployment import Deployment
 from .service import Service
-from .ingress_routes import IngressRouteHTTP, IngressRouteHTTPS, IngressRouteWebsocket
+from .ingress_routes import IngressRouteHTTPS, IngressRouteWebsocket
 from .upgrade_job import UpgradeJob
 from .resource_handler import ResourceHandler
 import logging
