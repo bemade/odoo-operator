@@ -56,7 +56,7 @@ class OdooConf(ResourceHandler):
         admin_pw = self.spec.get("adminPassword", "")
         if admin_pw:
             admin_pw = crypt_context.hash(admin_pw)
-            config_options.update(admin_password=admin_pw)
+            config_options.update(admin_passwd=admin_pw)
         config_options.update(self.spec.get("configOptions", {}))
 
         conf_text = "[options]\n"
