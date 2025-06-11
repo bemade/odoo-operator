@@ -14,9 +14,7 @@ class GitSyncHandler(ResourceHandler):
     """
 
     def __init__(self, body: Any = None, job: client.V1Job = None, **kwargs):
-        super().__init__(body, **kwargs)
-        self.batch_v1 = client.BatchV1Api()
-        self.core_v1 = client.CoreV1Api()
+        super().__init__(body)
         self._resource = job
 
     def _read_resource(self):
@@ -87,7 +85,9 @@ class GitSyncHandler(ResourceHandler):
         )
 
         # Create the job
-        job = self.batch_v1.create_namespaced_job(namespace=self.namespace, body=job)
+        job = client.BatchV1Api().create_namespaced_job(
+            namespace=self.namespace, body=job
+        )
         logging.info(f"Created Git sync job: {self.name}")
 
         return job
