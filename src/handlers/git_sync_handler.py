@@ -23,6 +23,7 @@ class GitSyncHandler(ResourceHandler):
             self.namespace = self.meta.get("namespace")
             self.name = self.meta.get("name")
             self.uid = self.meta.get("uid")
+            self.owner_reference = self._get_owner_reference()
         else:
             self.body = {}
             self.spec = {}
@@ -38,6 +39,22 @@ class GitSyncHandler(ResourceHandler):
         except (FileNotFoundError, PermissionError):
             self.defaults = {}
         self._resource = job
+
+    def _get_owner_reference(self):
+        odoo_instance = client.CustomObjectsApi().get_namespaced_custom_object(
+            group="bemade.org",
+            version="v1",
+            namespace=self.namespace,
+            plural="odooinstances",
+            name=self.spec.get("odooInstance"),
+        )
+        return client.V1OwnerReference(
+            api_version="bemade.org/v1",
+            kind="OdooInstance",
+            name=self.spec.get("odooInstance"),
+            uid=odoo_instance.get("metadata").get("uid"),
+            block_owner_deletion=True,
+        )
 
     def _read_resource(self):
         return client.BatchV1Api().read_namespaced_job(
