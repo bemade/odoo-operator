@@ -147,7 +147,7 @@ def check_odoo_instance_periodic(body, **kwargs):
     handler.check_periodic()
 
 
-def _is_gitsync_job(labels):
+def _is_gitsync_job(labels, **kwargs):
     """Check if the job is managed by GitSync."""
     return labels and "git-sync" in labels
 
