@@ -3,8 +3,8 @@ kind: OdooInstance
 metadata:
   name: my-odoo
 spec:
-  image: docker.bemade.org/bemade/odoo18.0e-bemade-bemade-site:latest
-  adminPassword: my-test-password
+  image: docker.bemade.org/bemade/odoo18.0e
+  adminPassword: abc123
   filestore:
     storageSize: 2Gi
   configOptions:

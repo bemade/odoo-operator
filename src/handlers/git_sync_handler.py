@@ -26,17 +26,13 @@ class GitSyncHandler(ResourceHandler):
 
     @property
     def odoo_handler(self):
-        ref = [
-            ref
-            for ref in self.spec.get("ownerReferences")
-            if ref.get("kind") == "OdooInstance"
-        ][0]
+        name = self.spec.get("odooInstance")
         body = client.CustomObjectsApi().get_namespaced_custom_object(
             group="bemade.org",
             version="v1",
             namespace=self.namespace,
             plural="odooinstances",
-            name=ref["name"],
+            name=name,
         )
         return OdooHandler(body=body)
 

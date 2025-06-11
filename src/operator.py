@@ -98,6 +98,8 @@ def validate(body, old, new, **kwargs):
     _logger.debug(f"New spec: {new}")
 
     new_spec = new.get("spec", {})
+    if not new_spec:
+        return
     upgrade_spec = new_spec.get("upgrade", {})
     database = upgrade_spec.get("database", "")
     modules = upgrade_spec.get("modules", [])
