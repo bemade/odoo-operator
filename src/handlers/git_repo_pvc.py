@@ -1,7 +1,6 @@
 import logging
 from kubernetes import client
 from .pvc_handler import PVCHandler
-from .git_sync_handler import GitSyncHandler
 
 
 class GitRepoPVC(PVCHandler):
@@ -57,6 +56,8 @@ class GitRepoPVC(PVCHandler):
             return
 
         try:
+            # Import here to avoid circular import
+            from .git_sync_handler import GitSyncHandler
             # Create GitSync using the parent's body - GitSyncHandler expects the full CR
             git_sync_body = {
                 "apiVersion": "odoo.bemade.org/v1",
