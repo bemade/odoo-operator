@@ -217,17 +217,51 @@ echo "Git sync completed successfully"
 
         This includes redeploying the OdooInstance to pick up the new code.
         """
-        # Find the deployment
-        deployment = self.odoo_handler.deployment
-        # Scale the deployment back up
-        deployment.resource.metadata.labels["bemade.org/last_sync"] = datetime.now(
-            tz=timezone.utc
-        ).isoformat()
-        deployment.resource.metadata.labels["bemade.org/last_sync_status"] = (
-            "succeeded" if self.resource.status.succeeded else "failed"
-        )
-        client.AppsV1Api().patch_namespaced_deployment(
-            name=deployment.name,
-            namespace=deployment.namespace,
-            body=deployment.resource,
-        )
+        try:
+            logging.info("Handling completion for Git sync job")
+            # Get the job resource if not already available
+            if not hasattr(self, '_resource') or self._resource is None:
+                self._resource = self._read_resource()
+                
+            # Find the deployment through OdooHandler
+            try:
+                # Access odoo_handler as property as in original code
+                deployment = self.odoo_handler.deployment
+                
+                if not deployment or not hasattr(deployment, 'resource'):
+                    logging.error("Deployment not found or deployment.resource is None")
+                    return
+                    
+                # Ensure labels dict exists
+                if not hasattr(deployment.resource.metadata, 'labels') or deployment.resource.metadata.labels is None:
+                    deployment.resource.metadata.labels = {}
+                    
+                # Add sync timestamp    
+                deployment.resource.metadata.labels["bemade.org/last_sync"] = datetime.now(
+                    tz=timezone.utc
+                ).isoformat()
+                
+                # Determine job success status
+                job_succeeded = False
+                if hasattr(self._resource, 'status') and hasattr(self._resource.status, 'succeeded'):
+                    job_succeeded = self._resource.status.succeeded > 0
+                
+                deployment.resource.metadata.labels["bemade.org/last_sync_status"] = (
+                    "succeeded" if job_succeeded else "failed"
+                )
+                
+                logging.info(f"Patching deployment {deployment.name} after Git sync completion (status: {job_succeeded})")
+                
+                # Patch the deployment to trigger a restart
+                client.AppsV1Api().patch_namespaced_deployment(
+                    name=deployment.name,
+                    namespace=deployment.namespace,
+                    body=deployment.resource,
+                )
+                
+                logging.info(f"Successfully patched deployment {deployment.name} after Git sync")
+            except Exception as e:
+                logging.error(f"Error getting deployment: {str(e)}")
+        except Exception as e:
+            logging.error(f"Error in handle_completion: {str(e)}")
+            raise e

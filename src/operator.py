@@ -147,10 +147,13 @@ def check_odoo_instance_periodic(body, **kwargs):
     handler.check_periodic()
 
 
-def _is_gitsync_job(labels, **kwargs):
+def _is_gitsync_job(body, **kwargs):
     """Check if the job is managed by GitSync."""
-    logging.debug(f"In _is_gitsync_job:\nlabels:{labels}\nkwargs:{kwargs}")
-    return labels and "git-sync" in labels
+    labels = body.get('metadata', {}).get('labels', {})
+    logging.debug(f"In _is_gitsync_job: labels={labels}")
+    # Check if job-name contains git-sync
+    job_name = labels.get('job-name', '')
+    return job_name and 'git-sync' in job_name
 
 
 @kopf.on.field("batch", "v1", "jobs", when=_is_gitsync_job, field="status.succeeded")
