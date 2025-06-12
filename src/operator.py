@@ -4,6 +4,7 @@ import os
 from kubernetes import client
 from handlers.odoo_handler import OdooHandler
 from handlers.git_sync_job_handler import GitSyncJobHandler
+from handlers.git_sync_handler import GitSyncHandler
 from webhook_server import ServiceModeWebhookServer
 
 # Configure logging
