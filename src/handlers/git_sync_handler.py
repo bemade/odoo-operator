@@ -15,7 +15,7 @@ class GitSyncHandler(ResourceHandler):
     The job's status is tracked by Kubernetes, so we don't need to manage status here.
     """
 
-    def __init__(self, body: Any = None, job: client.V1Job = None, **kwargs):
+    def __init__(self, body: Any = None, **kwargs):
         if body:
             self.body = body
             self.spec = body.get("spec", {})
@@ -38,7 +38,6 @@ class GitSyncHandler(ResourceHandler):
                 self.defaults = yaml.safe_load(f)
         except (FileNotFoundError, PermissionError):
             self.defaults = {}
-        self._resource = job
 
     def _get_owner_reference(self):
         try:
@@ -83,6 +82,12 @@ class GitSyncHandler(ResourceHandler):
         """Create a job to sync the Git repository."""
         self._resource = self._create_sync_job()
 
+    @create_if_missing
+    def handle_update(self):
+        """Update a job to sync the Git repository."""
+        if self.resource.status.succeeded or self.resource.status.failed:
+            self.handle_completion()
+
     def _create_sync_job(self) -> client.V1Job:
         """Create a Kubernetes Job to sync the Git repository."""
 
@@ -104,9 +109,7 @@ class GitSyncHandler(ResourceHandler):
             volumes.append(
                 client.V1Volume(
                     name="git-secret",
-                    secret=client.V1SecretVolumeSource(
-                        secret_name=ssh_secret_name
-                    ),
+                    secret=client.V1SecretVolumeSource(secret_name=ssh_secret_name),
                 )
             )
 
@@ -220,46 +223,55 @@ echo "Git sync completed successfully"
         try:
             logging.info("Handling completion for Git sync job")
             # Get the job resource if not already available
-            if not hasattr(self, '_resource') or self._resource is None:
+            if not hasattr(self, "_resource") or self._resource is None:
                 self._resource = self._read_resource()
-                
+
             # Find the deployment through OdooHandler
             try:
                 # Access odoo_handler as property as in original code
                 deployment = self.odoo_handler.deployment
-                
-                if not deployment or not hasattr(deployment, 'resource'):
+
+                if not deployment or not hasattr(deployment, "resource"):
                     logging.error("Deployment not found or deployment.resource is None")
                     return
-                    
+
                 # Ensure labels dict exists
-                if not hasattr(deployment.resource.metadata, 'labels') or deployment.resource.metadata.labels is None:
+                if (
+                    not hasattr(deployment.resource.metadata, "labels")
+                    or deployment.resource.metadata.labels is None
+                ):
                     deployment.resource.metadata.labels = {}
-                    
-                # Add sync timestamp    
-                deployment.resource.metadata.labels["bemade.org/last_sync"] = datetime.now(
-                    tz=timezone.utc
-                ).isoformat()
-                
+
+                # Add sync timestamp
+                deployment.resource.metadata.labels["bemade.org/last_sync"] = (
+                    datetime.now(tz=timezone.utc).isoformat()
+                )
+
                 # Determine job success status
                 job_succeeded = False
-                if hasattr(self._resource, 'status') and hasattr(self._resource.status, 'succeeded'):
+                if hasattr(self._resource, "status") and hasattr(
+                    self._resource.status, "succeeded"
+                ):
                     job_succeeded = self._resource.status.succeeded > 0
-                
+
                 deployment.resource.metadata.labels["bemade.org/last_sync_status"] = (
                     "succeeded" if job_succeeded else "failed"
                 )
-                
-                logging.info(f"Patching deployment {deployment.name} after Git sync completion (status: {job_succeeded})")
-                
+
+                logging.info(
+                    f"Patching deployment {deployment.name} after Git sync completion (status: {job_succeeded})"
+                )
+
                 # Patch the deployment to trigger a restart
                 client.AppsV1Api().patch_namespaced_deployment(
                     name=deployment.name,
                     namespace=deployment.namespace,
                     body=deployment.resource,
                 )
-                
-                logging.info(f"Successfully patched deployment {deployment.name} after Git sync")
+
+                logging.info(
+                    f"Successfully patched deployment {deployment.name} after Git sync"
+                )
             except Exception as e:
                 logging.error(f"Error getting deployment: {str(e)}")
         except Exception as e:
