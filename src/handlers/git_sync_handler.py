@@ -148,10 +148,14 @@ class GitSyncHandler(ResourceHandler):
                 )
             )
 
+        # Define the job with timestamp to ensure unique name
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        job_name = f"{self.name}-{timestamp}"
+
         # Define the job
         job = client.V1Job(
             metadata=client.V1ObjectMeta(
-                name=self.name,
+                name=job_name,
                 namespace=self.namespace,
                 owner_references=[self.owner_reference],
             ),
@@ -275,20 +279,20 @@ echo "Git sync completed successfully"
                 # Get timestamp in a format valid for labels
                 now = datetime.now(tz=timezone.utc)
                 timestamp = now.strftime("%Y%m%d-%H%M%S")
-                
+
                 # Determine job success status
                 job_succeeded = False
                 if hasattr(self._resource, "status") and hasattr(
                     self._resource.status, "succeeded"
                 ):
                     job_succeeded = self._resource.status.succeeded > 0
-                    
+
                 status_value = "succeeded" if job_succeeded else "failed"
-                
+
                 logger.info(
                     f"Restarting deployment {deployment.name} after Git sync completion (status: {status_value})"
                 )
-                
+
                 # Method 1: Use a strategic merge patch to update annotations on the pod template
                 # This is equivalent to kubectl rollout restart
                 restart_patch = {
@@ -297,28 +301,35 @@ echo "Git sync completed successfully"
                             "metadata": {
                                 "annotations": {
                                     "bemade.org/git-sync-timestamp": timestamp,
-                                    "bemade.org/git-sync-status": status_value
+                                    "bemade.org/git-sync-status": status_value,
                                 },
                                 "labels": {
                                     "bemade.org/last_sync": timestamp,
-                                    "bemade.org/last_sync_status": status_value
-                                }
+                                    "bemade.org/last_sync_status": status_value,
+                                },
                             }
                         }
                     },
                     "metadata": {
                         "labels": {
                             "bemade.org/last_sync": timestamp,
-                            "bemade.org/last_sync_status": status_value
+                            "bemade.org/last_sync_status": status_value,
                         }
-                    }
+                    },
                 }
-                
+
                 # Patch the deployment to trigger a restart
                 client.AppsV1Api().patch_namespaced_deployment(
                     name=deployment.name,
                     namespace=deployment.namespace,
-                    body=restart_patch
+                    body=restart_patch,
+                )
+                client.CustomObjectsApi().delete_namespaced_custom_object(
+                    group="bemade.org",
+                    version="v1",
+                    namespace=self.namespace,
+                    plural="gitsyncs",
+                    name=self.name,
                 )
 
                 logger.info(

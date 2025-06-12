@@ -1,0 +1,10 @@
+---
+apiVersion: bemade.org/v1
+kind: GitSync
+metadata:
+  name: odoo-git-sync
+spec:
+  odooInstance: odoo
+  repository: "git@git.bemade.org:bemade/bemade-site"
+  branch: "18.0"
+  sshSecret: "ssh-key"
