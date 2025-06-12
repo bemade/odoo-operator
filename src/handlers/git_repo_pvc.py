@@ -51,8 +51,20 @@ class GitRepoPVC(PVCHandler):
             ),
         )
 
+    def _should_create(self):
+        """Check if this PVC should be created."""
+        git_project = self.spec.get("gitProject")
+        if not git_project:
+            logging.info(f"No gitProject configured for {self.name}, skipping repo PVC creation")
+            return False
+        return True
+
     def handle_create(self):
         """Create the PVC and initialize Git sync."""
+        # Only create if gitProject is specified
+        if not self._should_create():
+            return
+
         super().handle_create()
         self._init_git_sync()
 
