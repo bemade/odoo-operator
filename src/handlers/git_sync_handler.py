@@ -272,9 +272,10 @@ echo "Git sync completed successfully"
                 ):
                     deployment.resource.metadata.labels = {}
 
-                # Add sync timestamp
+                # Add sync timestamp - format it in a way that's valid for Kubernetes labels
+                now = datetime.now(tz=timezone.utc)
                 deployment.resource.metadata.labels["bemade.org/last_sync"] = (
-                    datetime.now(tz=timezone.utc).isoformat()
+                    now.strftime("%Y%m%d-%H%M%S")
                 )
 
                 # Determine job success status
