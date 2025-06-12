@@ -21,6 +21,7 @@ class GitSyncJobHandler(ResourceHandler):
         )
 
     def handle_update(self):
+        logger.debug(f"Handling Git Sync Job update.")
         job: client.V1Job = self.resource
         status = job.status
         succeeded = status.succeeded and status.succeeded > 0
@@ -29,6 +30,9 @@ class GitSyncJobHandler(ResourceHandler):
             owner_refs = job.metadata.owner_references
             for ref in owner_refs:
                 if ref.kind.lower() == "gitsync":
+                    logger.debug(
+                        f"Found GitSync owner reference: {ref}. Patching status."
+                    )
                     client.CustomObjectsApi().patch_namespaced_custom_object(
                         group="bemade.org",
                         version="v1",

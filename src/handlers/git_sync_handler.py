@@ -64,7 +64,11 @@ class GitSyncHandler(ResourceHandler):
     def handle_update(self):
         """Update a job to sync the Git repository."""
         status = self.resource.get("status", {})
-        if status.get("succeeded") or status.get("failed"):
+        succeeded, failed = status.get("succeeded"), status.get("failed")
+        logger.debug(
+            f"Handling update for git sync: {self.body} with succeeded={succeeded}, failed={failed}"
+        )
+        if succeeded or failed:
             logger.debug(f"GitSync Job completed with status: {status}")
             self.handle_completion()
 
