@@ -149,12 +149,14 @@ def check_odoo_instance_periodic(body, **kwargs):
 
 def _is_gitsync_job(body, **kwargs):
     """Check if the job is managed by GitSync."""
+    logger.debug(f"Checking if job is managed by GitSync: {body}")
     name = body.get("metadata", {}).get("name", {})
     return "git-sync" in name
 
 
-@kopf.on.update("batch", "v1", "jobs", when=_is_gitsync_job)
-def on_job_status_change(body, old, new, **kwargs):
+@kopf.on.field("batch", "v1", "jobs", when=_is_gitsync_job, field="status.succeeded")
+@kopf.on.field("batch", "v1", "jobs", when=_is_gitsync_job, field="status.failed")
+def on_job_status_change(body, **kwargs):
     """Handle GitSync job completion and trigger Odoo deployment update."""
     handler = GitSyncHandler(body, **kwargs)
     logger.debug(f"GitSync job status changed: {body}")
