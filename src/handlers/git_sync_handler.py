@@ -97,7 +97,9 @@ class GitSyncHandler(ResourceHandler):
 
     @property
     def odoo_handler(self):
-        name = self.spec.get("odooInstance")
+        name = self.spec.get("odooInstance") or self.meta.get("ownerReferences")[0].get(
+            "name"
+        )
         body = client.CustomObjectsApi().get_namespaced_custom_object(
             group="bemade.org",
             version="v1",
@@ -122,15 +124,16 @@ class GitSyncHandler(ResourceHandler):
 
     def _create_sync_job(self) -> client.V1Job:
         """Create a Kubernetes Job to sync the Git repository."""
+        name = self.spec.get("odooInstance") or self.meta.get("ownerReferences")[0].get(
+            "name"
+        )
 
         # Prepare volumes for the pod
         volumes = [
             client.V1Volume(
                 name="repo-volume",
                 persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                    claim_name=self.spec.get(
-                        "pvcName", f"{self.spec.get('odooInstance')}-repo-pvc"
-                    )
+                    claim_name=self.spec.get("pvcName", f"{name}-repo-pvc")
                 ),
             )
         ]
