@@ -1,6 +1,9 @@
 from .resource_handler import ResourceHandler
 from kubernetes import client
 import kopf
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class GitSyncJobHandler(ResourceHandler):
