@@ -4,7 +4,7 @@ import kopf
 
 
 class GitSyncJobHandler(ResourceHandler):
-    def __init__(self, body: Any = None, **kwargs):
+    def __init__(self, body, **kwargs):
         self.body = body
         self.spec = body.get("spec", {})
         self.meta = body.get("meta", body.get("metadata"))
