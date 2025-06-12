@@ -3,7 +3,7 @@ import logging
 import os
 from kubernetes import client
 from handlers.odoo_handler import OdooHandler
-from handlers.git_sync_handler import GitSyncHandler
+from handlers.git_sync_job_handler import GitSyncJobHandler
 from webhook_server import ServiceModeWebhookServer
 
 # Configure logging
@@ -158,6 +158,6 @@ def _is_gitsync_job(body, **kwargs):
 @kopf.on.field("batch", "v1", "jobs", when=_is_gitsync_job, field="status.failed")
 def on_job_status_change(body, **kwargs):
     """Handle GitSync job completion and trigger Odoo deployment update."""
-    handler = GitSyncHandler(body, **kwargs)
+    handler = GitSyncJobHandler(body=body, **kwargs)
     logger.debug(f"GitSync job status changed: {body}")
     handler.handle_update()

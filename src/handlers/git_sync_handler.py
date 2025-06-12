@@ -18,21 +18,12 @@ class GitSyncHandler(ResourceHandler):
     """
 
     def __init__(self, body: Any = None, **kwargs):
-        if body:
-            self.body = body
-            self.spec = body.get("spec", {})
-            self.meta = body.get("meta", body.get("metadata"))
-            self.namespace = self.meta.get("namespace")
-            self.name = self.meta.get("name")
-            self.uid = self.meta.get("uid")
-            self.owner_reference = self._get_owner_reference()
-        else:
-            self.body = {}
-            self.spec = {}
-            self.meta = {}
-            self.namespace = None
-            self.name = None
-            self.uid = None
+        self.body = body
+        self.spec = body.get("spec", {})
+        self.meta = body.get("meta", body.get("metadata"))
+        self.namespace = self.meta.get("namespace")
+        self.name = self.meta.get("name")
+        self.uid = self.meta.get("uid")
         self._resource = None
         self.operator_ns = os.environ.get("OPERATOR_NAMESPACE")
         # Load defaults if available
@@ -42,57 +33,13 @@ class GitSyncHandler(ResourceHandler):
         except (FileNotFoundError, PermissionError):
             self.defaults = {}
 
-    def _get_owner_reference(self):
-        # First check if we're dealing with a Job object
-        # If so, extract the OdooInstance name from the ownerReferences
-        odoo_instance_name = None
-        owner_refs = self.meta.get("ownerReferences", [])
-
-        for ref in owner_refs:
-            if (
-                ref.get("kind") == "OdooInstance"
-                and ref.get("apiVersion") == "bemade.org/v1"
-            ):
-                odoo_instance_name = ref.get("name")
-                # Return owner reference directly if we already have all needed info
-                if ref.get("uid"):
-                    return client.V1OwnerReference(
-                        api_version="bemade.org/v1",
-                        kind="OdooInstance",
-                        name=odoo_instance_name,
-                        uid=ref.get("uid"),
-                        block_owner_deletion=True,
-                    )
-
-        # If no name found in ownerReferences, try the spec
-        if not odoo_instance_name:
-            odoo_instance_name = self.spec.get("odooInstance")
-
-        if not odoo_instance_name:
-            logger.warning(
-                f"Unable to determine OdooInstance name for {self.namespace}/{self.name}"
-            )
-            return None
-
-        odoo_instance = client.CustomObjectsApi().get_namespaced_custom_object(
+    def _read_resource(self):
+        return client.CustomObjectsApi().get_namespaced_custom_object(
             group="bemade.org",
             version="v1",
             namespace=self.namespace,
-            plural="odooinstances",
-            name=odoo_instance_name,
-        )
-        return client.V1OwnerReference(
-            api_version="bemade.org/v1",
-            kind="OdooInstance",
-            name=odoo_instance_name,
-            uid=odoo_instance.get("metadata").get("uid"),
-            block_owner_deletion=True,
-        )
-
-    def _read_resource(self):
-        return client.BatchV1Api().read_namespaced_job(
+            plural="gitsyncs",
             name=self.name,
-            namespace=self.namespace,
         )
 
     @property
@@ -117,7 +64,6 @@ class GitSyncHandler(ResourceHandler):
     @create_if_missing
     def handle_update(self):
         """Update a job to sync the Git repository."""
-        logger.debug(f"In handle_update for GitSync Job")
         if self.resource.status.succeeded or self.resource.status.failed:
             logger.debug(f"GitSync Job completed with status: {self.resource.status}")
             self.handle_completion()
@@ -157,7 +103,15 @@ class GitSyncHandler(ResourceHandler):
             metadata=client.V1ObjectMeta(
                 name=job_name,
                 namespace=self.namespace,
-                owner_references=[self.owner_reference],
+                owner_references=[
+                    client.V1OwnerReference(
+                        api_version="bemade.org/v1",
+                        kind="GitSync",
+                        name=self.name,
+                        uid=self.uid,
+                        block_owner_deletion=True,
+                    ),
+                ],
             ),
             spec=client.V1JobSpec(
                 template=client.V1PodTemplateSpec(

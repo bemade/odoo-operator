@@ -55,7 +55,9 @@ class GitRepoPVC(PVCHandler):
         """Check if this PVC should be created."""
         git_project = self.spec.get("gitProject")
         if not git_project:
-            logging.info(f"No gitProject configured for {self.name}, skipping repo PVC creation")
+            logging.info(
+                f"No gitProject configured for {self.name}, skipping repo PVC creation"
+            )
             return False
         return True
 
@@ -85,7 +87,7 @@ class GitRepoPVC(PVCHandler):
                 "apiVersion": "bemade.org/v1",
                 "kind": "GitSync",
                 "metadata": {
-                    "name": f"{self.name}-git-sync",
+                    # "name": f"{self.name}-git-sync",
                     "namespace": self.namespace,
                     "ownerReferences": [
                         {
