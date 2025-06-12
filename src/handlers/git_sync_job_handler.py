@@ -15,7 +15,7 @@ class GitSyncJobHandler(ResourceHandler):
         self._resource = None
 
     def _read_resource(self):
-        return client.BatchV1Api.read_namespaced_job(
+        return client.BatchV1Api().read_namespaced_job(
             name=self.name,
             namespace=self.namespace,
         )
