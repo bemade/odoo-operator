@@ -41,21 +41,48 @@ class GitSyncHandler(ResourceHandler):
             self.defaults = {}
 
     def _get_owner_reference(self):
-        try:
-            odoo_instance = client.CustomObjectsApi().get_namespaced_custom_object(
-                group="bemade.org",
-                version="v1",
-                namespace=self.namespace,
-                plural="odooinstances",
-                name=self.spec.get("odooInstance"),
+        # First check if we're dealing with a Job object
+        # If so, extract the OdooInstance name from the ownerReferences
+        odoo_instance_name = None
+        owner_refs = self.meta.get("ownerReferences", [])
+
+        for ref in owner_refs:
+            if (
+                ref.get("kind") == "OdooInstance"
+                and ref.get("apiVersion") == "bemade.org/v1"
+            ):
+                odoo_instance_name = ref.get("name")
+                # Return owner reference directly if we already have all needed info
+                if ref.get("uid"):
+                    return client.V1OwnerReference(
+                        api_version="bemade.org/v1",
+                        kind="OdooInstance",
+                        name=odoo_instance_name,
+                        uid=ref.get("uid"),
+                        block_owner_deletion=True,
+                    )
+
+        # If no name found in ownerReferences, try the spec
+        if not odoo_instance_name:
+            odoo_instance_name = self.spec.get("odooInstance")
+
+        if not odoo_instance_name:
+            logging.warning(
+                f"Unable to determine OdooInstance name for {self.namespace}/{self.name}"
             )
-        except client.exceptions.ApiException as e:
-            if e.status == 404:
-                return
+            return None
+
+        odoo_instance = client.CustomObjectsApi().get_namespaced_custom_object(
+            group="bemade.org",
+            version="v1",
+            namespace=self.namespace,
+            plural="odooinstances",
+            name=odoo_instance_name,
+        )
         return client.V1OwnerReference(
             api_version="bemade.org/v1",
             kind="OdooInstance",
-            name=self.spec.get("odooInstance"),
+            name=odoo_instance_name,
             uid=odoo_instance.get("metadata").get("uid"),
             block_owner_deletion=True,
         )
