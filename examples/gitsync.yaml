@@ -1,6 +1,8 @@
 ---
 apiVersion: bemade.org/v1
 kind: GitSync
+metadata:
+  generateName: true
 spec:
   odooInstance: odoo
   repository: "git@git.bemade.org:bemade/bemade-site"

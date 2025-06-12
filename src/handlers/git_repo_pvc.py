@@ -89,6 +89,7 @@ class GitRepoPVC(PVCHandler):
                 "metadata": {
                     # "name": f"{self.name}-git-sync",
                     "namespace": self.namespace,
+                    "generateName": True,
                     "ownerReferences": [
                         {
                             "apiVersion": "bemade.org/v1",
