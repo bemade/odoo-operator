@@ -166,6 +166,42 @@ class Deployment(ResourceHandler):
                     tolerations=self.spec.get(
                         "tolerations", self.defaults.get("tolerations", [])
                     ),
+                    init_containers=[
+                        # Init container to install Python requirements if present
+                        client.V1Container(
+                            name="install-requirements",
+                            image=image,  # Use the same Odoo image as main container
+                            command=["/bin/sh", "-c"],
+                            args=["""
+                                set -e
+                                REQUIREMENTS_FILE="/mnt/repo/requirements.txt"
+                                if [ -f "$REQUIREMENTS_FILE" ]; then
+                                    echo "Found requirements.txt, installing Python dependencies..."
+                                    # Check pip version to determine if we need --break-system-packages
+                                    # Extract just the first number from pip version (e.g., 25 from "pip 25.0.1")
+                                    MAJOR_VERSION=$(pip --version | awk '{print $2}' | cut -d. -f1)
+                                    
+                                    if [ "$MAJOR_VERSION" -ge 23 ]; then
+                                        echo "Using pip $MAJOR_VERSION.x with --break-system-packages"
+                                        pip install --break-system-packages -r "$REQUIREMENTS_FILE"
+                                    else
+                                        echo "Using pip $MAJOR_VERSION.x"
+                                        pip install -r "$REQUIREMENTS_FILE"
+                                    fi
+                                    echo "Python requirements installed successfully"
+                                else
+                                    echo "No requirements.txt found, skipping Python dependencies installation"
+                                fi
+                            """],
+                            volume_mounts=[
+                                # Only mount the repo volume for the init container
+                                client.V1VolumeMount(
+                                    name="repo-volume",
+                                    mount_path="/mnt/repo"
+                                )
+                            ],
+                        )
+                    ],
                     containers=[
                         client.V1Container(
                             name=f"odoo-{self.name}",
