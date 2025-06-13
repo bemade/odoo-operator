@@ -118,9 +118,7 @@ class Deployment(ResourceHandler):
         if self.spec.get("gitProject"):
             # Mount the entire git repo to /mnt/repo
             volume_mounts.append(
-                client.V1VolumeMount(
-                    name="repo-volume", mount_path="/mnt/repo"
-                )
+                client.V1VolumeMount(name="repo-volume", mount_path="/mnt/repo")
             )
 
         metadata = client.V1ObjectMeta(
@@ -166,21 +164,23 @@ class Deployment(ResourceHandler):
                     tolerations=self.spec.get(
                         "tolerations", self.defaults.get("tolerations", [])
                     ),
-                    init_containers=[
-                        # Init container to install Python requirements if present
+                    containers=[
                         client.V1Container(
-                            name="install-requirements",
-                            image=image,  # Use the same Odoo image as main container
-                            command=["/bin/sh", "-c"],
-                            args=["""
-                                set -e
+                            name=f"odoo-{self.name}",
+                            image=image,
+                            command=["/bin/bash", "-c"],
+                            args=[
+                                """
+                                # Check for requirements.txt and install if present
                                 REQUIREMENTS_FILE="/mnt/repo/requirements.txt"
                                 if [ -f "$REQUIREMENTS_FILE" ]; then
                                     echo "Found requirements.txt, installing Python dependencies..."
+                                    
                                     # Check pip version to determine if we need --break-system-packages
-                                    # Extract just the first number from pip version (e.g., 25 from "pip 25.0.1")
                                     MAJOR_VERSION=$(pip --version | awk '{print $2}' | cut -d. -f1)
                                     
+                                    # Install requirements
+                                    set -e  # Exit immediately if a command fails
                                     if [ "$MAJOR_VERSION" -ge 23 ]; then
                                         echo "Using pip $MAJOR_VERSION.x with --break-system-packages"
                                         pip install --break-system-packages -r "$REQUIREMENTS_FILE"
@@ -188,24 +188,16 @@ class Deployment(ResourceHandler):
                                         echo "Using pip $MAJOR_VERSION.x"
                                         pip install -r "$REQUIREMENTS_FILE"
                                     fi
+                                    
                                     echo "Python requirements installed successfully"
                                 else
                                     echo "No requirements.txt found, skipping Python dependencies installation"
                                 fi
-                            """],
-                            volume_mounts=[
-                                # Only mount the repo volume for the init container
-                                client.V1VolumeMount(
-                                    name="repo-volume",
-                                    mount_path="/mnt/repo"
-                                )
+                                # Start Odoo with the original entrypoint
+                                echo "Starting Odoo..."
+                                exec /entrypoint.sh odoo
+                            """
                             ],
-                        )
-                    ],
-                    containers=[
-                        client.V1Container(
-                            name=f"odoo-{self.name}",
-                            image=image,
                             ports=[
                                 client.V1ContainerPort(
                                     container_port=8069,
