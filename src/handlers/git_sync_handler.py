@@ -78,71 +78,85 @@ class GitSyncHandler(ResourceHandler):
 
     def _stop_odoo_deployment(self, max_retries=10, initial_delay=2, max_delay=30):
         """Stop the Odoo deployment.
-        
+
         Will retry if the deployment doesn't exist yet, using exponential backoff.
-        
+
         Args:
             max_retries: Maximum number of retries before giving up
             initial_delay: Initial delay in seconds between retries
             max_delay: Maximum delay in seconds between retries
         """
         logger.debug(f"Stopping Odoo deployment: {self.body}")
-        
+
         attempt = 0
         delay = initial_delay
-        
+
         while attempt < max_retries:
             try:
                 # Get the Odoo handler and deployment fresh each time
                 odoo_handler = self.odoo_handler
                 deployment = odoo_handler.deployment
-                
+
                 # Check if deployment exists and has necessary attributes
-                if not deployment or not hasattr(deployment, "name") or not hasattr(deployment, "namespace"):
+                if (
+                    not deployment
+                    or not hasattr(deployment, "name")
+                    or not hasattr(deployment, "namespace")
+                ):
                     attempt += 1
                     if attempt >= max_retries:
-                        logger.warning(f"Deployment not ready after {max_retries} attempts, giving up")
+                        logger.warning(
+                            f"Deployment not ready after {max_retries} attempts, giving up"
+                        )
                         return
-                    
+
                     wait_time = min(delay, max_delay)
-                    logger.info(f"Deployment not ready, retrying in {wait_time}s (attempt {attempt}/{max_retries})")
+                    logger.info(
+                        f"Deployment not ready, retrying in {wait_time}s (attempt {attempt}/{max_retries})"
+                    )
                     time.sleep(wait_time)
                     delay *= 2  # Exponential backoff
                     continue
-                
-                logger.info(f"Scaling down deployment {deployment.name} in namespace {deployment.namespace}")
+
+                logger.info(
+                    f"Scaling down deployment {deployment.name} in namespace {deployment.namespace}"
+                )
                 stop_patch = {
                     "spec": {
                         "replicas": 0,
                     }
                 }
-                
+
                 client.AppsV1Api().patch_namespaced_deployment(
                     name=deployment.name,
                     namespace=deployment.namespace,
                     body=stop_patch,
                 )
-                
+
                 logger.info(f"Successfully scaled down deployment {deployment.name}")
                 return  # Success! Exit the retry loop
-                
+
             except ApiException as e:
                 if e.status == 404:
                     # Deployment not found, retry
                     attempt += 1
                     if attempt >= max_retries:
-                        logger.warning(f"Deployment not found after {max_retries} attempts, giving up")
+                        logger.warning(
+                            f"Deployment not found after {max_retries} attempts, giving up"
+                        )
                         return
-                    
+
                     wait_time = min(delay, max_delay)
-                    logger.info(f"Deployment not found (404), retrying in {wait_time}s (attempt {attempt}/{max_retries})")
+                    logger.info(
+                        f"Deployment not found (404), retrying in {wait_time}s (attempt {attempt}/{max_retries})"
+                    )
                     time.sleep(wait_time)
                     delay *= 2  # Exponential backoff
                 else:
                     # Other API errors
                     logger.error(f"Kubernetes API error when stopping deployment: {e}")
                     return
-                    
+
             except Exception as e:
                 logger.error(f"Failed to stop Odoo deployment: {e}")
                 return
@@ -339,13 +353,13 @@ echo "Git sync completed successfully"
             namespace=deployment.namespace,
             body=start_patch,
         )
-        # Delete the GitSync custom object to clean up
-        client.CustomObjectsApi().delete_namespaced_custom_object(
-            group="bemade.org",
-            version="v1",
-            namespace=self.namespace,
-            plural="gitsyncs",
-            name=self.name,
-        )
+        # # Delete the GitSync custom object to clean up
+        # client.CustomObjectsApi().delete_namespaced_custom_object(
+        #     group="bemade.org",
+        #     version="v1",
+        #     namespace=self.namespace,
+        #     plural="gitsyncs",
+        #     name=self.name,
+        # )
 
         logger.info(f"Successfully patched deployment {deployment.name} after Git sync")
