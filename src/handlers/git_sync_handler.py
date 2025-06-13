@@ -247,14 +247,17 @@ class GitSyncHandler(ResourceHandler):
         ssh_setup = ""
         if ssh_secret_name:
             ssh_setup = """
-# Set up SSH configuration
-mkdir -p ~/.ssh
-cp /etc/git-secret/ssh-privatekey ~/.ssh/id_rsa
-chmod 600 ~/.ssh/id_rsa
-ssh-keyscan -t rsa github.com gitlab.com bitbucket.org >> ~/.ssh/known_hosts
+# Create a writable directory for SSH config that the odoo user can access
+SSH_DIR="/tmp/ssh-config"
+mkdir -p "$SSH_DIR"
+cp /etc/git-secret/ssh-privatekey "$SSH_DIR/id_rsa"
+chmod 600 "$SSH_DIR/id_rsa"
+ssh-keyscan -t rsa github.com gitlab.com bitbucket.org > "$SSH_DIR/known_hosts"
 
-# Set git to use the SSH key
-git config --global core.sshCommand 'ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=accept-new'
+# Set git to use the SSH key with the custom SSH directory
+GIT_SSH_COMMAND="ssh -i $SSH_DIR/id_rsa -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$SSH_DIR/known_hosts"
+export GIT_SSH_COMMAND
+git config --global core.sshCommand "$GIT_SSH_COMMAND"
 """
 
         git_script = f"""#!/bin/sh
