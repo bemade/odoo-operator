@@ -61,6 +61,7 @@ class GitSyncHandler(ResourceHandler):
         """Create a job to sync the Git repository."""
         logger.debug(f"Handling creation for git sync: {self.body}")
         self._resource = self._create_sync_job()
+        self._stop_odoo_deployment()
 
     def handle_update(self):
         """Update a job to sync the Git repository."""
@@ -72,6 +73,26 @@ class GitSyncHandler(ResourceHandler):
         if succeeded or failed:
             logger.debug(f"GitSync Job completed with status: {status}")
             self.handle_completion()
+
+    def _stop_odoo_deployment(self):
+        """Stop the Odoo deployment."""
+        logger.debug(f"Stopping Odoo deployment: {self.body}")
+        deployment = self.odoo_handler.deployment
+        stop_patch = {
+            "spec": {
+                "replicas": 0,
+            }
+        }
+        client.AppsV1Api().patch_namespaced_deployment(
+            name=deployment.name,
+            namespace=deployment.namespace,
+            body=stop_patch,
+        )
+
+    def _start_odoo_deployment(self):
+        """Start the Odoo deployment."""
+        logger.debug(f"Starting Odoo deployment: {self.body}")
+        self.odoo_handler.start_deployment()
 
     def _create_sync_job(self) -> client.V1Job:
         """Create a Kubernetes Job to sync the Git repository."""
@@ -243,29 +264,18 @@ echo "Git sync completed successfully"
         logger.info(
             f"Restarting deployment {deployment.name} after Git sync completion (status: {success_label})"
         )
-        stop_patch = {
-            "spec": {
-                "replicas": 0,
-            }
-        }
         start_patch = {
             "spec": {
                 "replicas": 1,
             }
         }
 
-        # Patch the deployment to trigger a restart
-        client.AppsV1Api().patch_namespaced_deployment(
-            name=deployment.name,
-            namespace=deployment.namespace,
-            body=stop_patch,
-        )
-        time.sleep(5)
         client.AppsV1Api().patch_namespaced_deployment(
             name=deployment.name,
             namespace=deployment.namespace,
             body=start_patch,
         )
+        # Delete the GitSync custom object to clean up
         client.CustomObjectsApi().delete_namespaced_custom_object(
             group="bemade.org",
             version="v1",
