@@ -1,6 +1,8 @@
 import logging
+import time
 from typing import Any
 from kubernetes import client
+from kubernetes.client.rest import ApiException
 from .resource_handler import ResourceHandler, update_if_exists, create_if_missing
 from datetime import datetime, timezone
 from .odoo_handler import OdooHandler
@@ -74,20 +76,76 @@ class GitSyncHandler(ResourceHandler):
             logger.debug(f"GitSync Job completed with status: {status}")
             self.handle_completion()
 
-    def _stop_odoo_deployment(self):
-        """Stop the Odoo deployment."""
+    def _stop_odoo_deployment(self, max_retries=10, initial_delay=2, max_delay=30):
+        """Stop the Odoo deployment.
+        
+        Will retry if the deployment doesn't exist yet, using exponential backoff.
+        
+        Args:
+            max_retries: Maximum number of retries before giving up
+            initial_delay: Initial delay in seconds between retries
+            max_delay: Maximum delay in seconds between retries
+        """
         logger.debug(f"Stopping Odoo deployment: {self.body}")
-        deployment = self.odoo_handler.deployment
-        stop_patch = {
-            "spec": {
-                "replicas": 0,
-            }
-        }
-        client.AppsV1Api().patch_namespaced_deployment(
-            name=deployment.name,
-            namespace=deployment.namespace,
-            body=stop_patch,
-        )
+        
+        attempt = 0
+        delay = initial_delay
+        
+        while attempt < max_retries:
+            try:
+                # Get the Odoo handler and deployment fresh each time
+                odoo_handler = self.odoo_handler
+                deployment = odoo_handler.deployment
+                
+                # Check if deployment exists and has necessary attributes
+                if not deployment or not hasattr(deployment, "name") or not hasattr(deployment, "namespace"):
+                    attempt += 1
+                    if attempt >= max_retries:
+                        logger.warning(f"Deployment not ready after {max_retries} attempts, giving up")
+                        return
+                    
+                    wait_time = min(delay, max_delay)
+                    logger.info(f"Deployment not ready, retrying in {wait_time}s (attempt {attempt}/{max_retries})")
+                    time.sleep(wait_time)
+                    delay *= 2  # Exponential backoff
+                    continue
+                
+                logger.info(f"Scaling down deployment {deployment.name} in namespace {deployment.namespace}")
+                stop_patch = {
+                    "spec": {
+                        "replicas": 0,
+                    }
+                }
+                
+                client.AppsV1Api().patch_namespaced_deployment(
+                    name=deployment.name,
+                    namespace=deployment.namespace,
+                    body=stop_patch,
+                )
+                
+                logger.info(f"Successfully scaled down deployment {deployment.name}")
+                return  # Success! Exit the retry loop
+                
+            except ApiException as e:
+                if e.status == 404:
+                    # Deployment not found, retry
+                    attempt += 1
+                    if attempt >= max_retries:
+                        logger.warning(f"Deployment not found after {max_retries} attempts, giving up")
+                        return
+                    
+                    wait_time = min(delay, max_delay)
+                    logger.info(f"Deployment not found (404), retrying in {wait_time}s (attempt {attempt}/{max_retries})")
+                    time.sleep(wait_time)
+                    delay *= 2  # Exponential backoff
+                else:
+                    # Other API errors
+                    logger.error(f"Kubernetes API error when stopping deployment: {e}")
+                    return
+                    
+            except Exception as e:
+                logger.error(f"Failed to stop Odoo deployment: {e}")
+                return
 
     def _start_odoo_deployment(self):
         """Start the Odoo deployment."""
@@ -232,6 +290,12 @@ echo "Git sync completed successfully"
             image="alpine/git:latest",
             command=["/bin/sh", "-c", git_script],
             volume_mounts=volume_mounts,
+            security_context=client.V1SecurityContext(
+                run_as_user=100,  # Run as odoo user
+                run_as_group=101,  # Run as odoo group
+                privileged=False,
+                allow_privilege_escalation=False,
+            ),
         )
 
     def handle_completion(self):
