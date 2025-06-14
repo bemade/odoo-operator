@@ -290,42 +290,6 @@ class OdooHandler(ResourceHandler):
             f"Upgrade job created for {self.name}, will check for completion periodically"
         )
 
-    def _stop_deployment_for_sync(self):
-        """Scale down the deployment to avoid conflicts during git sync."""
-        logging.info(f"Scaling down deployment for {self.name} before git sync")
-
-        # Use the deployment handler to scale down to 0 replicas
-        # This prevents any active processes from accessing the repo during sync
-        try:
-            api = client.AppsV1Api()
-            deployment = api.read_namespaced_deployment(
-                name=self.name, namespace=self.namespace
-            )
-
-            # Store the current replica count for later restoration
-            current_replicas = deployment.spec.replicas
-
-            # Update the status with the current replica count for later restoration
-            client.CustomObjectsApi().patch_namespaced_custom_object_status(
-                group="bemade.org",
-                version="v1",
-                namespace=self.namespace,
-                plural="odooinstances",
-                name=self.name,
-                body={"status": {"syncStatus": {"previousReplicas": current_replicas}}},
-            )
-
-            # Scale down to 0
-            deployment.spec.replicas = 0
-            api.replace_namespaced_deployment(
-                name=self.name, namespace=self.namespace, body=deployment
-            )
-            logging.info(f"Scaled down deployment {self.name} to 0 replicas")
-
-        except client.exceptions.ApiException as e:
-            logging.error(f"Failed to scale down deployment {self.name}: {e}")
-            # Continue with sync anyway - the deployment might not exist yet
-
     def _handle_sync(self):
         """Handle the git synchronization process."""
         logging.info(f"Starting git sync process for {self.name}")
@@ -337,7 +301,7 @@ class OdooHandler(ResourceHandler):
             return
 
         # First, scale down the deployment to avoid conflicts
-        self._stop_deployment_for_sync()
+        self.deployment.scale(0)
 
         # Create the sync job using the GitSyncJobHandler
         self.git_sync_job_handler.handle_create()
@@ -369,92 +333,6 @@ class OdooHandler(ResourceHandler):
             logging.error(f"Error in upgrade job completion check for {self.name}: {e}")
             return
 
-    def restart_deployment_after_sync(self):
-        """Restart the deployment after a git sync has completed.
-
-        This restores the original replica count and triggers a deployment update
-        to ensure the new code is used.
-        """
-        logging.info(f"Restarting deployment for {self.name} after git sync")
-
-        try:
-            # Get the previous replica count from status
-            odoo_instance = kopf.get_by_name(
-                "bemade.org", "v1", "odooinstances", self.name, namespace=self.namespace
-            )
-
-            sync_status = odoo_instance.get("status", {}).get("syncStatus", {})
-            previous_replicas = sync_status.get(
-                "previousReplicas", 1
-            )  # Default to 1 if not found
-
-            # Use the deployment handler to scale back up
-            api = client.AppsV1Api()
-            deployment = api.read_namespaced_deployment(
-                name=self.name, namespace=self.namespace
-            )
-
-            deployment.spec.replicas = previous_replicas
-            api.replace_namespaced_deployment(
-                name=self.name, namespace=self.namespace, body=deployment
-            )
-            logging.info(
-                f"Scaled up deployment {self.name} to {previous_replicas} replicas"
-            )
-
-            # Reset the sync.enabled flag to false since sync is completed
-            client.CustomObjectsApi().patch_namespaced_custom_object_status(
-                group="bemade.org",
-                version="v1",
-                namespace=self.namespace,
-                plural="odooinstances",
-                name=self.name,
-                body={
-                    "status": {
-                        "syncStatus": {
-                            "lastSync": datetime.now().isoformat(),
-                            "previousReplicas": None,
-                        }
-                    }
-                },
-            )
-
-            # Reset the sync.enabled flag to false in spec
-            # First get current spec to avoid overwriting other fields
-            instance = client.CustomObjectsApi().get_namespaced_custom_object(
-                group="bemade.org",
-                version="v1",
-                namespace=self.namespace,
-                plural="odooinstances",
-                name=self.name,
-            )
-
-            spec = instance.get("spec", {})
-            if "sync" in spec:
-                spec["sync"]["enabled"] = False
-            else:
-                spec["sync"] = {"enabled": False}
-
-            client.CustomObjectsApi().patch_namespaced_custom_object(
-                group="bemade.org",
-                version="v1",
-                namespace=self.namespace,
-                plural="odooinstances",
-                name=self.name,
-                body={"spec": spec},
-            )
-
-            # Trigger a deployment update to ensure the new code is used
-            self.deployment_handler.handle_update()
-
-        except client.exceptions.ApiException as e:
-            logging.error(
-                f"Failed to restart deployment {self.name}: {e}", exc_info=True
-            )
-        except Exception as e:
-            logging.error(
-                f"Error restarting deployment {self.name}: {e}", exc_info=True
-            )
 
     def validate_database_exists(self, database_name):
         """

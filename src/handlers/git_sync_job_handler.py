@@ -176,14 +176,6 @@ echo "Git sync completed successfully"
 
         patch = {"spec": {"sync": {"enabled": False}}}
 
-        # Scale down the deployment
-        patch = {"spec": {"replicas": 0}}
-        client.AppsV1Api().patch_namespaced_deployment(
-            name=self.handler.deployment.name,
-            namespace=self.handler.deployment.namespace,
-            body=patch,
-        )
-
         # Create the job
         job = client.BatchV1Api().create_namespaced_job(
             namespace=self.namespace, body=job
@@ -246,50 +238,18 @@ echo "Git sync completed successfully"
                 logger.error(f"Git sync job failed for {self.name}")
 
             # Update status and spec via k8s client API
-            try:
-                # Update the status
-                client.CustomObjectsApi().patch_namespaced_custom_object_status(
-                    group="bemade.org",
-                    version="v1",
-                    namespace=self.namespace,
-                    plural="odooinstances",
-                    name=self.handler.name,
-                    body={"status": status_patch},
-                )
+            # Update the status
+            client.CustomObjectsApi().patch_namespaced_custom_object_status(
+                group="bemade.org",
+                version="v1",
+                namespace=self.namespace,
+                plural="odooinstances",
+                name=self.handler.name,
+                body={"status": status_patch},
+            )
 
-                # Get current spec to avoid overwriting other fields
-                current = client.CustomObjectsApi().get_namespaced_custom_object(
-                    group="bemade.org",
-                    version="v1",
-                    namespace=self.namespace,
-                    plural="odooinstances",
-                    name=self.handler.name,
-                )
-
-                # Update spec to reset sync.enabled
-                spec = current.get("spec", {})
-                if "sync" in spec:
-                    spec["sync"]["enabled"] = False
-                else:
-                    spec["sync"] = {"enabled": False}
-
-                client.CustomObjectsApi().patch_namespaced_custom_object(
-                    group="bemade.org",
-                    version="v1",
-                    namespace=self.namespace,
-                    plural="odooinstances",
-                    name=self.handler.name,
-                    body={"spec": spec},
-                )
-
-                # Restart the deployment
-                self.handler.restart_deployment_after_sync()
-
-            except Exception as e:
-                logger.error(
-                    f"Error updating status after sync job completion: {e}",
-                    exc_info=True,
-                )
+            # Restart the deployment
+            self.handler.deployment.scale(1)
 
     def handle_delete(self):
         """Handle deletion of a sync job."""
