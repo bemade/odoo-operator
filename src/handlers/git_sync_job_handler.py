@@ -157,7 +157,7 @@ echo "Git sync completed successfully"
             metadata=client.V1ObjectMeta(
                 name=job_name,
                 namespace=self.namespace,
-                owner_references=self.owner_reference,
+                owner_references=[self.owner_reference],
                 labels={"app": self.name, "type": "git-sync-job"},
             ),
             spec=client.V1JobSpec(
