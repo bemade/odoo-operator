@@ -19,7 +19,7 @@ class GitRepoPVC(PVCHandler):
     def _read_resource(self):
         """Read the resource from the API."""
         try:
-            return client.PersistentVolumeClaimApi().get_namespaced_persistent_volume_claim(
+            return client.CoreV1Api().read_namespaced_persistent_volume_claim(
                 namespace=self.namespace,
                 name=self._get_pvc_name(),
             )

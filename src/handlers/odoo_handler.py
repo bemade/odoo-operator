@@ -84,7 +84,7 @@ class OdooHandler(ResourceHandler):
         for handler in self.handlers:
             handler.handle_create()
 
-        # Initialize git sync if the git repo PVC was created
+        # Initialize git sync if the git repo PVC was created.
         # This is done after all the other creations so that we are sure the deployment
         # has already been created.
         if self.git_repo_pvc.resource:
