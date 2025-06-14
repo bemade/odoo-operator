@@ -87,7 +87,7 @@ class GitRepoPVC(PVCHandler):
         deployment_exists = False
         while not deployment_exists:
             try:
-                deployment_exists = handler.deployment.resource
+                deployment_exists = self.handler.deployment.resource
             except client.exceptions.ApiException as e:
                 if e.status == 404:
                     logging.info(
