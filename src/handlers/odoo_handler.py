@@ -94,15 +94,10 @@ class OdooHandler(ResourceHandler):
         """Handle update events for this OdooInstance."""
         logging.info(f"Handling update for OdooInstance {self.name}")
 
-        # Track whether we just processed a sync for this update
-        sync_was_processed = False
-
         # Check if this is a sync request that should be executed now
         if self._is_sync_request() and self._should_execute_sync():
             logging.info(f"Sync requested for {self.name}")
             self._handle_sync()
-            sync_was_processed = True
-            # Note: We don't return here - continue to check for upgrade after sync
 
         # Check if this is an upgrade request that should be executed now
         # May run after a sync operation if both are requested
@@ -112,10 +107,9 @@ class OdooHandler(ResourceHandler):
 
         # Always update resource handlers unless we just processed a sync
         # (Skip if sync was processed to avoid duplicate updates during sync operations)
-        if not sync_was_processed:
-            logging.debug(f"Running regular update for handlers of {self.name}")
-            for handler in self.handlers:
-                handler.handle_update()
+        logging.debug(f"Running regular update for handlers of {self.name}")
+        for handler in self.handlers:
+            handler.handle_update()
 
     def on_delete(self):
         # Delete resources in reverse order

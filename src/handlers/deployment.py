@@ -28,6 +28,8 @@ class Deployment(ResourceHandler):
     @create_if_missing
     def handle_update(self):
         deployment = self._get_resource_body()
+        if self.handler.git_sync_job_handler.is_running:
+            deployment.spec.replicas = 0
         self._resource = client.AppsV1Api().patch_namespaced_deployment(
             name=self.name,
             namespace=self.namespace,
@@ -175,10 +177,10 @@ class Deployment(ResourceHandler):
                                 REQUIREMENTS_FILE="/mnt/repo/requirements.txt"
                                 if [ -f "$REQUIREMENTS_FILE" ]; then
                                     echo "Found requirements.txt, installing Python dependencies..."
-                                    
+
                                     # Check pip version to determine if we need --break-system-packages
                                     MAJOR_VERSION=$(pip --version | awk '{print $2}' | cut -d. -f1)
-                                    
+
                                     # Install requirements
                                     set -e  # Exit immediately if a command fails
                                     if [ "$MAJOR_VERSION" -ge 23 ]; then
@@ -188,7 +190,7 @@ class Deployment(ResourceHandler):
                                         echo "Using pip $MAJOR_VERSION.x"
                                         pip install -r "$REQUIREMENTS_FILE"
                                     fi
-                                    
+
                                     echo "Python requirements installed successfully"
                                 else
                                     echo "No requirements.txt found, skipping Python dependencies installation"

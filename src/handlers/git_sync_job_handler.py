@@ -275,3 +275,8 @@ echo "Git sync completed successfully"
                 logger.error(f"Error deleting sync job: {e}")
         else:
             logger.debug(f"No sync job found to delete for {self.name}")
+
+    @property
+    def is_running(self):
+        status = self.resource and self.resource.status
+        return status and (status.succeeded or status.failed)
