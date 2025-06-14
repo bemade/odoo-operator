@@ -15,7 +15,6 @@ from .git_secret import GitSecret
 from .upgrade_job import UpgradeJob
 from .resource_handler import ResourceHandler
 from .git_sync_job_handler import GitSyncJobHandler
-from datetime import datetime
 import logging
 
 
@@ -140,9 +139,13 @@ class OdooHandler(ResourceHandler):
         """Determine if a sync request should be executed now.
 
         This checks:
-        1. If enabled was just toggled on (regardless of scheduled time)
-        2. If a scheduled time is specified and has passed
+        1. If the git sync job is already running
+        2. If enabled was just toggled on (regardless of scheduled time)
+        3. If a scheduled time is specified and has passed
         """
+        if self.git_sync_job_handler.is_running:
+            return False
+
         # If it's not a valid sync request, don't execute
         if not self._is_sync_request():
             return False
@@ -188,29 +191,11 @@ class OdooHandler(ResourceHandler):
         3. If a scheduled time is specified and has passed
         """
         # If it's not a valid upgrade request, don't execute
-        if not self._is_upgrade_request():
+        if not self._is_upgrade_request() or self.git_sync_job_handler.is_running:
             return False
 
         upgrade_spec = self.spec.get("upgrade", {})
         scheduled_time = upgrade_spec.get("time", "")
-
-        # If an upgrade job exists and is not completed, don't trigger a new one
-        if self.upgrade_job.resource and not self.upgrade_job.is_completed:
-            logging.debug(
-                f"Upgrade job for {self.name} is already running, skipping new upgrade request"
-            )
-            return False
-
-        # If a sync job is running, defer the upgrade until the sync is complete
-        # Check if there's an active sync job
-        if (
-            self.git_sync_job_handler.resource
-            and not self.git_sync_job_handler.is_completed
-        ):
-            logging.info(
-                f"Git sync job for {self.name} is running, deferring upgrade until sync completes"
-            )
-            return False
 
         # If no scheduled time is specified, execute immediately
         if not scheduled_time:

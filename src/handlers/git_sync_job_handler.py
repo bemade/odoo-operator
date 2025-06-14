@@ -171,11 +171,6 @@ echo "Git sync completed successfully"
                 backoff_limit=2,
             ),
         )
-        # Prepare the patch for the OdooInstance to disable sync, so we don't
-        # re-trigger the job on timer checks
-
-        patch = {"spec": {"sync": {"enabled": False}}}
-
         # First, scale down the deployment to avoid conflicts
         self.handler.deployment.scale(0)
 
@@ -184,15 +179,6 @@ echo "Git sync completed successfully"
             namespace=self.namespace, body=job
         )
         logger.info(f"Created Git sync job: {job_name} in namespace {self.namespace}")
-        # Patch the OdooInstance
-        client.CustomObjectsApi().patch_namespaced_custom_object(
-            group="bemade.org",
-            version="v1",
-            namespace=self.handler.namespace,
-            plural="odooinstances",
-            name=self.handler.name,
-            body=patch,
-        )
 
         # Store the reference to the created job
         self._resource = job

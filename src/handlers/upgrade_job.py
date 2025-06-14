@@ -96,6 +96,7 @@ class UpgradeJob(ResourceHandler):
         if not self.should_upgrade():
             return None
 
+        logging.debug(f"Creating a new upgrade job for {self.name} instead of updating")
         # Scale down the deployment
         self.deployment.scale(0)
 
@@ -113,16 +114,8 @@ class UpgradeJob(ResourceHandler):
 
     @create_if_missing
     def handle_update(self):
-        # Only create/update the job if there's an upgrade request
-        if not self.should_upgrade():
-            return None
-
-        # Scale down the deployment
-        self.deployment.scale(0)
-
         # For upgrade jobs, we don't update - we create a new one
         # This ensures we get a clean state for each upgrade
-        logging.debug(f"Creating a new upgrade job for {self.name} instead of updating")
         return self.handle_create()
 
     def handle_delete(self):
@@ -157,6 +150,9 @@ class UpgradeJob(ResourceHandler):
                 < datetime.now(tz=timezone.utc)
             )
         ):
+            return False
+
+        if self.handler.git_sync_job_handler.is_running:
             return False
 
         # If we have a resource, check if it's still running
