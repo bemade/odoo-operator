@@ -84,6 +84,12 @@ class OdooHandler(ResourceHandler):
         for handler in self.handlers:
             handler.handle_create()
 
+        # Initialize git sync if the git repo PVC was created
+        # This is done after all the other creations so that we are sure the deployment
+        # has already been created.
+        if self.git_repo_pvc.resource:
+            self.git_repo_pvc.init_git_sync()
+
     def on_update(self):
         """Handle update events for this OdooInstance."""
         logging.info(f"Handling update for OdooInstance {self.name}")
@@ -329,7 +335,6 @@ class OdooHandler(ResourceHandler):
         except Exception as e:
             logging.error(f"Error in upgrade job completion check for {self.name}: {e}")
             return
-
 
     def validate_database_exists(self, database_name):
         """

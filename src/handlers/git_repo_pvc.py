@@ -16,6 +16,18 @@ class GitRepoPVC(PVCHandler):
             default_size="1Gi",
         )
 
+    def _read_resource(self):
+        """Read the resource from the API."""
+        try:
+            return client.PersistentVolumeClaimApi().get_namespaced_persistent_volume_claim(
+                namespace=self.namespace,
+                name=self._get_pvc_name(),
+            )
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
     def _get_storage_spec(self):
         """Get the storage specification from the CRD."""
         git_project = self.spec.get("gitProject", {})
@@ -68,9 +80,8 @@ class GitRepoPVC(PVCHandler):
             return
 
         super().handle_create()
-        self._init_git_sync()
 
-    def _init_git_sync(self):
+    def init_git_sync(self):
         """Initialize Git sync for the newly created PVC if gitProject is specified.
 
         This directly updates the OdooInstance spec to enable sync, which will trigger
@@ -83,19 +94,6 @@ class GitRepoPVC(PVCHandler):
             return
 
         logging.info(f"Initializing Git sync for {self.name}")
-
-        deployment_exists = False
-        while not deployment_exists:
-            try:
-                deployment_exists = self.handler.deployment.resource
-            except client.exceptions.ApiException as e:
-                if e.status == 404:
-                    logging.info(
-                        f"Deployment {self.name} not found, waiting before running sync..."
-                    )
-                    time.sleep(1)
-                else:
-                    raise
 
         # Get the current OdooInstance resource
         api = client.CustomObjectsApi()
