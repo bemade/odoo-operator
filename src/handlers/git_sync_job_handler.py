@@ -21,8 +21,7 @@ class GitSyncJobHandler(ResourceHandler):
             # For an existing running job, use the name pattern with timestamp
             # Query by label selector to find all jobs related to this OdooInstance
             jobs = client.BatchV1Api().list_namespaced_job(
-                namespace=self.namespace,
-                label_selector=f"app={self.name}"
+                namespace=self.namespace, label_selector=f"app={self.name}"
             )
 
             # If any active jobs exist, return the most recent one
@@ -31,7 +30,7 @@ class GitSyncJobHandler(ResourceHandler):
                 sorted_jobs = sorted(
                     jobs.items,
                     key=lambda job: job.metadata.creation_timestamp,
-                    reverse=True
+                    reverse=True,
                 )
                 # Return the most recent job
                 return sorted_jobs[0]
@@ -46,7 +45,9 @@ class GitSyncJobHandler(ResourceHandler):
 
         This uses information from the OdooInstance's gitProject field to determine what to sync.
         """
-        logger.debug(f"Creating git sync job for {self.name} in namespace {self.namespace}")
+        logger.debug(
+            f"Creating git sync job for {self.name} in namespace {self.namespace}"
+        )
 
         # Get git project information from the OdooInstance spec
         git_project = self.spec.get("gitProject", {})
@@ -156,11 +157,8 @@ echo "Git sync completed successfully"
             metadata=client.V1ObjectMeta(
                 name=job_name,
                 namespace=self.namespace,
-                owner_references=self.owner_references,
-                labels={
-                    "app": self.name,
-                    "type": "git-sync-job"
-                }
+                owner_references=self.owner_reference,
+                labels={"app": self.name, "type": "git-sync-job"},
             ),
             spec=client.V1JobSpec(
                 template=client.V1PodTemplateSpec(
@@ -179,7 +177,9 @@ echo "Git sync completed successfully"
             job = client.BatchV1Api().create_namespaced_job(
                 namespace=self.namespace, body=job
             )
-            logger.info(f"Created Git sync job: {job_name} in namespace {self.namespace}")
+            logger.info(
+                f"Created Git sync job: {job_name} in namespace {self.namespace}"
+            )
 
             # Store the reference to the created job
             self._resource = job
@@ -209,8 +209,10 @@ echo "Git sync completed successfully"
             return
 
         # Get success and failure conditions
-        succeeded = job_status.succeeded == 1 if hasattr(job_status, 'succeeded') else False
-        failed = job_status.failed == 1 if hasattr(job_status, 'failed') else False
+        succeeded = (
+            job_status.succeeded == 1 if hasattr(job_status, "succeeded") else False
+        )
+        failed = job_status.failed == 1 if hasattr(job_status, "failed") else False
 
         if succeeded or failed:
             # Update OdooInstance status
@@ -237,43 +239,42 @@ echo "Git sync completed successfully"
                     namespace=self.namespace,
                     plural="odooinstances",
                     name=self.handler.name,
-                    body={
-                        "status": status_patch
-                    }
+                    body={"status": status_patch},
                 )
-                
+
                 # Get current spec to avoid overwriting other fields
                 current = client.CustomObjectsApi().get_namespaced_custom_object(
                     group="bemade.org",
                     version="v1",
                     namespace=self.namespace,
                     plural="odooinstances",
-                    name=self.handler.name
+                    name=self.handler.name,
                 )
-                
+
                 # Update spec to reset sync.enabled
                 spec = current.get("spec", {})
                 if "sync" in spec:
                     spec["sync"]["enabled"] = False
                 else:
                     spec["sync"] = {"enabled": False}
-                
+
                 client.CustomObjectsApi().patch_namespaced_custom_object(
                     group="bemade.org",
                     version="v1",
                     namespace=self.namespace,
                     plural="odooinstances",
                     name=self.handler.name,
-                    body={
-                        "spec": spec
-                    }
+                    body={"spec": spec},
                 )
-                
+
                 # Restart the deployment
                 self.handler.restart_deployment_after_sync()
 
             except Exception as e:
-                logger.error(f"Error updating status after sync job completion: {e}", exc_info=True)
+                logger.error(
+                    f"Error updating status after sync job completion: {e}",
+                    exc_info=True,
+                )
 
     def handle_delete(self):
         """Handle deletion of a sync job."""
@@ -284,9 +285,7 @@ echo "Git sync completed successfully"
                 client.BatchV1Api().delete_namespaced_job(
                     name=job.metadata.name,
                     namespace=self.namespace,
-                    body=client.V1DeleteOptions(
-                        propagation_policy="Foreground"
-                    )
+                    body=client.V1DeleteOptions(propagation_policy="Foreground"),
                 )
                 logger.info(f"Deleted sync job {job.metadata.name}")
             except client.exceptions.ApiException as e:

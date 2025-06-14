@@ -82,36 +82,27 @@ class GitRepoPVC(PVCHandler):
             logging.info(f"No git repository specified in spec, skipping Git sync")
             return
 
-        try:
-            logging.info(f"Initializing Git sync for {self.name}")
+        logging.info(f"Initializing Git sync for {self.name}")
 
-            # Get the current OdooInstance resource
-            api = client.CustomObjectsApi()
-            try:
-                sync_spec = {
-                    "spec": {
-                        "sync": {
-                            "enabled": True,
-                        }
-                    }
+        # Get the current OdooInstance resource
+        api = client.CustomObjectsApi()
+        sync_spec = {
+            "spec": {
+                "sync": {
+                    "enabled": True,
                 }
+            }
+        }
 
-                # Patch the OdooInstance to enable sync
-                api.patch_namespaced_custom_object(
-                    group="bemade.org",
-                    version="v1",
-                    namespace=self.namespace,
-                    plural="odooinstances",
-                    name=self.handler.name,
-                    body=sync_spec,
-                )
-                logging.info(
-                    f"Enabled sync on OdooInstance {self.name} for initial git repo setup"
-                )
-
-            except client.exceptions.ApiException as e:
-                logging.error(f"Error enabling sync on OdooInstance: {e}")
-
-        except Exception as e:
-            logging.error(f"Unexpected error initializing git sync: {e}", exc_info=True)
-            raise
+        # Patch the OdooInstance to enable sync
+        api.patch_namespaced_custom_object(
+            group="bemade.org",
+            version="v1",
+            namespace=self.namespace,
+            plural="odooinstances",
+            name=self.handler.name,
+            body=sync_spec,
+        )
+        logging.info(
+            f"Enabled sync on OdooInstance {self.name} for initial git repo setup"
+        )
