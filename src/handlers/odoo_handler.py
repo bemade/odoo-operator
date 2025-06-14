@@ -300,9 +300,6 @@ class OdooHandler(ResourceHandler):
             logging.error(f"No git repository configured for {self.name}")
             return
 
-        # First, scale down the deployment to avoid conflicts
-        self.deployment.scale(0)
-
         # Create the sync job using the GitSyncJobHandler
         self.git_sync_job_handler.handle_create()
 

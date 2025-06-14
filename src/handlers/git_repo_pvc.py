@@ -84,6 +84,19 @@ class GitRepoPVC(PVCHandler):
 
         logging.info(f"Initializing Git sync for {self.name}")
 
+        deployment_exists = False
+        while not deployment_exists:
+            try:
+                deployment_exists = handler.deployment.resource
+            except client.exceptions.ApiException as e:
+                if e.status == 404:
+                    logging.info(
+                        f"Deployment {self.name} not found, waiting before running sync..."
+                    )
+                    time.sleep(1)
+                else:
+                    raise
+
         # Get the current OdooInstance resource
         api = client.CustomObjectsApi()
         sync_spec = {
