@@ -182,7 +182,7 @@ echo "Git sync completed successfully"
         )
         logger.info(f"Created Git sync job: {job_name} in namespace {self.namespace}")
         # Patch the OdooInstance
-        client.CustomObjectsApi().patch_namespaced_custom_object_status(
+        client.CustomObjectsApi().patch_namespaced_custom_object(
             group="bemade.org",
             version="v1",
             namespace=self.handler.namespace,
