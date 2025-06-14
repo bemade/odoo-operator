@@ -1,10 +1,10 @@
 import kopf
 import logging
 import os
+from datetime import datetime
 from kubernetes import client
 from handlers.odoo_handler import OdooHandler
 from handlers.git_sync_job_handler import GitSyncJobHandler
-from handlers.git_sync_handler import GitSyncHandler
 from webhook_server import ServiceModeWebhookServer
 
 # Configure logging
@@ -121,31 +121,8 @@ def validate(body, old, new, **kwargs):
         raise kopf.AdmissionError(error_message)
 
 
-@kopf.on.create("bemade.org", "v1", "gitsyncs")
-def create_gitsync_fn(body, **kwargs):
-    handler = GitSyncHandler(body, **kwargs)
-    handler.handle_create()
-
-
-@kopf.on.update("bemade.org", "v1", "gitsyncs")
-def update_gitsync_fn(body, **kwargs):
-    handler = GitSyncHandler(body, **kwargs)
-    handler.handle_update()
-
-
-@kopf.on.field("bemade.org", "v1", "gitsyncs", field="status.succeeded")
-@kopf.on.field("bemade.org", "v1", "gitsyncs", field="status.failed")
-def on_gitsync_status_change(body, **kwargs):
-    """Handle GitSync status change and trigger Odoo deployment update."""
-    handler = GitSyncHandler(body=body, **kwargs)
-    logger.debug(f"GitSync status changed: {body}")
-    handler.handle_update()
-
-
-@kopf.on.delete("bemade.org", "v1", "gitsyncs")
-def delete_gitsync_fn(body, **kwargs):
-    handler = GitSyncHandler(body, **kwargs)
-    handler.handle_delete()
+# GitSync CRD handlers removed - GitSync CRD is deprecated
+# Sync jobs are now owned directly by OdooInstance CR and handled by GitSyncJobHandler
 
 
 @kopf.timer("bemade.org", "v1", "odooinstances", interval=30.0)
@@ -157,17 +134,58 @@ def check_odoo_instance_periodic(body, **kwargs):
     handler.check_periodic()
 
 
-def _is_gitsync_job(body, **kwargs):
-    """Check if the job is managed by GitSync."""
-    logger.debug(f"Checking if job is managed by GitSync: {body}")
-    name = body.get("metadata", {}).get("name", {})
-    return "git-sync" in name
+def _is_odooinstance_sync_job(body, **kwargs):
+    """Check if the job is a git sync job owned by an OdooInstance."""
+    logger.debug(f"Checking if job is an OdooInstance git sync job")
+    
+    # Check job name pattern
+    name = body.get("metadata", {}).get("name", "")
+    if not (name and "-gitsync-" in name):
+        return False
+        
+    # Check owner references to confirm it's owned by an OdooInstance
+    owner_refs = body.get("metadata", {}).get("ownerReferences", [])
+    for owner in owner_refs:
+        if owner.get("kind") == "OdooInstance" and owner.get("apiVersion") == "bemade.org/v1":
+            return True
+            
+    return False
 
 
-@kopf.on.field("batch", "v1", "jobs", when=_is_gitsync_job, field="status.succeeded")
-@kopf.on.field("batch", "v1", "jobs", when=_is_gitsync_job, field="status.failed")
-def on_job_status_change(body, **kwargs):
-    """Handle GitSync job completion and update GitSync status."""
-    handler = GitSyncJobHandler(body=body, **kwargs)
-    logger.debug(f"GitSync job status changed: {body}")
-    handler.handle_update()
+@kopf.on.field("batch", "v1", "jobs", when=_is_odooinstance_sync_job, field="status.succeeded")
+@kopf.on.field("batch", "v1", "jobs", when=_is_odooinstance_sync_job, field="status.failed")
+def on_sync_job_status_change(body, **kwargs):
+    """Handle completion (success or failure) of git sync job owned by OdooInstance."""
+    name = body['metadata']['name']
+    is_success = body.get("status", {}).get("succeeded", 0) > 0
+    
+    if is_success:
+        logger.info(f"Git sync job succeeded: {name}")
+    else:
+        logger.error(f"Git sync job failed: {name}")
+    
+    # Get the OdooInstance that owns this job and use GitSyncJobHandler to update status
+    owner_refs = body.get("metadata", {}).get("ownerReferences", [])
+    for owner in owner_refs:
+        if owner.get("kind") == "OdooInstance":
+            try:
+                # Get the OdooInstance custom resource
+                instance = client.CustomObjectsApi().get_namespaced_custom_object(
+                    "bemade.org", "v1", 
+                    body.get("metadata", {}).get("namespace"), 
+                    "odooinstances", 
+                    owner.get("name")
+                )
+                
+                # Initialize OdooHandler
+                odoo_handler = OdooHandler(body=instance, **kwargs)
+                
+                # Handle the job update through GitSyncJobHandler
+                job_handler = GitSyncJobHandler(odoo_handler)
+                job_handler.handle_update()
+                
+                return
+            except Exception as e:
+                logger.error(f"Error processing {'successful' if is_success else 'failed'} sync job: {e}")
+    
+    logger.warning(f"Could not find OdooInstance owner for sync job {name}")

@@ -14,6 +14,8 @@ from .ingress_routes import IngressRouteHTTPS, IngressRouteWebsocket
 from .git_secret import GitSecret
 from .upgrade_job import UpgradeJob
 from .resource_handler import ResourceHandler
+from .git_sync_job_handler import GitSyncJobHandler
+from datetime import datetime
 import logging
 
 
@@ -59,6 +61,7 @@ class OdooHandler(ResourceHandler):
         self.ingress_route_websocket = IngressRouteWebsocket(self)
         self.upgrade_job = UpgradeJob(self)
         self.git_secret = GitSecret(self)
+        self.git_sync_job_handler = GitSyncJobHandler(self)
 
         # Create handlers list in the correct order for creation/update
         self.handlers = [
@@ -82,11 +85,29 @@ class OdooHandler(ResourceHandler):
             handler.handle_create()
 
     def on_update(self):
-        # Check if this is an upgrade request
+        """Handle update events for this OdooInstance."""
+        logging.info(f"Handling update for OdooInstance {self.name}")
+
+        # Track whether we just processed a sync for this update
+        sync_was_processed = False
+
+        # Check if this is a sync request that should be executed now
+        if self._is_sync_request() and self._should_execute_sync():
+            logging.info(f"Sync requested for {self.name}")
+            self._handle_sync()
+            sync_was_processed = True
+            # Note: We don't return here - continue to check for upgrade after sync
+
+        # Check if this is an upgrade request that should be executed now
+        # May run after a sync operation if both are requested
         if self._is_upgrade_request() and self._should_execute_upgrade():
+            logging.info(f"Upgrade requested for {self.name}")
             self._handle_upgrade()
-        else:
-            # Regular update - update all resources in the correct order
+
+        # Always update resource handlers unless we just processed a sync
+        # (Skip if sync was processed to avoid duplicate updates during sync operations)
+        if not sync_was_processed:
+            logging.debug(f"Running regular update for handlers of {self.name}")
             for handler in self.handlers:
                 handler.handle_update()
 
@@ -107,12 +128,64 @@ class OdooHandler(ResourceHandler):
             upgrade_spec and database and isinstance(modules, list) and len(modules) > 0
         )
 
+    def _is_sync_request(self):
+        """Check if the spec contains a valid git sync request."""
+        sync_spec = self.spec.get("sync", {})
+        git_project = self.spec.get("gitProject", {})
+
+        # Check if sync is enabled and if there is a git project configured
+        return sync_spec.get("enabled", False) and git_project.get("repository", "")
+
+    def _should_execute_sync(self):
+        """Determine if a sync request should be executed now.
+
+        This checks:
+        1. If enabled was just toggled on (regardless of scheduled time)
+        2. If a scheduled time is specified and has passed
+        """
+        # If it's not a valid sync request, don't execute
+        if not self._is_sync_request():
+            return False
+
+        sync_spec = self.spec.get("sync", {})
+        scheduled_time = sync_spec.get("time", "")
+
+        # If no scheduled time is specified, execute immediately
+        if not scheduled_time:
+            return True
+
+        # If a scheduled time is specified, check if it's time to execute
+        try:
+            # Parse the scheduled time
+            from datetime import datetime
+            import pytz
+
+            # Parse the ISO format time string
+            scheduled_datetime = datetime.fromisoformat(
+                scheduled_time.replace("Z", "+00:00")
+            )
+
+            # Get the current time in UTC
+            current_time = datetime.now(pytz.UTC)
+
+            # If the scheduled time has passed, it's time to execute the sync
+            return current_time >= scheduled_datetime
+        except Exception as e:
+            logging.error(
+                f"Error parsing scheduled sync time for {self.name}: {e}",
+                exc_info=True,
+            )
+            # If there's an error parsing the time, default to not syncing
+            return False
+
     def _should_execute_upgrade(self):
-        """Determine if an upgrade request should be executed now.
+        """
+        Determine if an upgrade request should be executed now.
 
         This checks:
         1. If an upgrade job is already running
-        2. If a scheduled time is specified and has passed
+        2. If a sync job is already running (upgrades should wait for syncs to complete)
+        3. If a scheduled time is specified and has passed
         """
         # If it's not a valid upgrade request, don't execute
         if not self._is_upgrade_request():
@@ -125,6 +198,14 @@ class OdooHandler(ResourceHandler):
         if self.upgrade_job.resource and not self.upgrade_job.is_completed:
             logging.debug(
                 f"Upgrade job for {self.name} is already running, skipping new upgrade request"
+            )
+            return False
+
+        # If a sync job is running, defer the upgrade until the sync is complete
+        # Check if there's an active sync job
+        if self.git_sync_job_handler.resource and not self.git_sync_job_handler.is_completed:
+            logging.info(
+                f"Git sync job for {self.name} is running, deferring upgrade until sync completes"
             )
             return False
 
@@ -158,18 +239,13 @@ class OdooHandler(ResourceHandler):
 
     def check_periodic(self):
         """
-        Perform all periodic checks for this OdooInstance.
-        This method is called periodically by the operator's timer handler.
-
-        This centralizes all time-based operations that need to be performed on the OdooInstance.
+        Periodic checks for this instance.
         """
-        logging.debug(f"Performing periodic checks for {self.name}")
-
         # Check for scheduled upgrades
         self._check_scheduled_upgrade()
 
-        # Check for upgrade job completion
-        self._check_upgrade_job_completion()
+        # Check for scheduled git syncs
+        self._check_scheduled_sync()
 
         # Add any future periodic checks here
         # ...
@@ -184,8 +260,19 @@ class OdooHandler(ResourceHandler):
         if self._is_upgrade_request() and self._should_execute_upgrade():
             logging.info(f"Executing scheduled upgrade for {self.name}")
             self._handle_upgrade()
+
+    def _check_scheduled_sync(self):
+        """
+        Check if this instance has a scheduled git sync that should be executed now.
+        """
+        logging.debug(f"Checking for scheduled git sync for {self.name}")
+
+        # Check if this is a sync request that should be executed now
+        if self._is_sync_request() and self._should_execute_sync():
+            logging.info(f"Executing scheduled git sync for {self.name}")
+            self._handle_sync()
         else:
-            logging.debug(f"No scheduled upgrade to execute for {self.name}")
+            logging.debug(f"No scheduled git sync to execute for {self.name}")
 
     def _handle_upgrade(self):
         """Handle the upgrade process."""
@@ -199,6 +286,74 @@ class OdooHandler(ResourceHandler):
         logging.debug(
             f"Upgrade job created for {self.name}, will check for completion periodically"
         )
+
+    def _stop_deployment_for_sync(self):
+        """Scale down the deployment to avoid conflicts during git sync."""
+        logging.info(f"Scaling down deployment for {self.name} before git sync")
+
+        # Use the deployment handler to scale down to 0 replicas
+        # This prevents any active processes from accessing the repo during sync
+        try:
+            api = client.AppsV1Api()
+            deployment = api.read_namespaced_deployment(
+                name=self.name,
+                namespace=self.namespace
+            )
+
+            # Store the current replica count for later restoration
+            current_replicas = deployment.spec.replicas
+
+            # Update the status with the current replica count for later restoration
+            client.CustomObjectsApi().patch_namespaced_custom_object_status(
+                group="bemade.org",
+                version="v1",
+                namespace=self.namespace,
+                plural="odooinstances",
+                name=self.name,
+                body={
+                    "status": {
+                        "syncStatus": {
+                            "previousReplicas": current_replicas
+                        }
+                    }
+                }
+            )
+
+            # Scale down to 0
+            deployment.spec.replicas = 0
+            api.replace_namespaced_deployment(
+                name=self.name,
+                namespace=self.namespace,
+                body=deployment
+            )
+            logging.info(f"Scaled down deployment {self.name} to 0 replicas")
+
+        except client.exceptions.ApiException as e:
+            logging.error(f"Failed to scale down deployment {self.name}: {e}")
+            # Continue with sync anyway - the deployment might not exist yet
+
+    def _handle_sync(self):
+        """Handle the git synchronization process."""
+        logging.info(f"Starting git sync process for {self.name}")
+
+        # Check if we have a git project configured
+        git_project = self.spec.get("gitProject", {})
+        if not git_project.get("repository"):
+            logging.error(f"No git repository configured for {self.name}")
+            return
+
+        # First, scale down the deployment to avoid conflicts
+        self._stop_deployment_for_sync()
+
+        # Create the sync job using the GitSyncJobHandler
+        self.git_sync_job_handler.handle_create()
+
+        # The job status will be handled by the Kopf event hook in operator.py
+        logging.debug(
+            f"Git sync job created for {self.name}, completion will be handled by event hooks"
+        )
+
+        # After the job completes, the operator.py with its hooks will handle restarting the deployment
 
     def _check_upgrade_job_completion(self):
         """Check if the upgrade job has completed and handle completion tasks."""
@@ -219,6 +374,91 @@ class OdooHandler(ResourceHandler):
         except Exception as e:
             logging.error(f"Error in upgrade job completion check for {self.name}: {e}")
             return
+
+    def restart_deployment_after_sync(self):
+        """Restart the deployment after a git sync has completed.
+
+        This restores the original replica count and triggers a deployment update
+        to ensure the new code is used.
+        """
+        logging.info(f"Restarting deployment for {self.name} after git sync")
+
+        try:
+            # Get the previous replica count from status
+            odoo_instance = kopf.get_by_name(
+                "bemade.org", "v1", "odooinstances",
+                self.name, namespace=self.namespace
+            )
+
+            sync_status = odoo_instance.get('status', {}).get('syncStatus', {})
+            previous_replicas = sync_status.get('previousReplicas', 1)  # Default to 1 if not found
+
+            # Use the deployment handler to scale back up
+            api = client.AppsV1Api()
+            deployment = api.read_namespaced_deployment(
+                name=self.name,
+                namespace=self.namespace
+            )
+
+            deployment.spec.replicas = previous_replicas
+            api.replace_namespaced_deployment(
+                name=self.name,
+                namespace=self.namespace,
+                body=deployment
+            )
+            logging.info(f"Scaled up deployment {self.name} to {previous_replicas} replicas")
+
+            # Reset the sync.enabled flag to false since sync is completed
+            client.CustomObjectsApi().patch_namespaced_custom_object_status(
+                group="bemade.org",
+                version="v1",
+                namespace=self.namespace,
+                plural="odooinstances",
+                name=self.name,
+                body={
+                    "status": {
+                        "syncStatus": {
+                            "lastSync": datetime.now().isoformat(),
+                            "previousReplicas": None
+                        }
+                    }
+                }
+            )
+
+            # Reset the sync.enabled flag to false in spec
+            # First get current spec to avoid overwriting other fields
+            instance = client.CustomObjectsApi().get_namespaced_custom_object(
+                group="bemade.org",
+                version="v1",
+                namespace=self.namespace,
+                plural="odooinstances",
+                name=self.name
+            )
+
+            spec = instance.get("spec", {})
+            if "sync" in spec:
+                spec["sync"]["enabled"] = False
+            else:
+                spec["sync"] = {"enabled": False}
+
+            client.CustomObjectsApi().patch_namespaced_custom_object(
+                group="bemade.org",
+                version="v1",
+                namespace=self.namespace,
+                plural="odooinstances",
+                name=self.name,
+                body={
+                    "spec": spec
+                }
+            )
+
+            # Trigger a deployment update to ensure the new code is used
+            self.deployment_handler.handle_update()
+
+        except client.exceptions.ApiException as e:
+            logging.error(f"Failed to restart deployment {self.name}: {e}", exc_info=True)
+        except Exception as e:
+            logging.error(f"Error restarting deployment {self.name}: {e}", exc_info=True)
 
     def validate_database_exists(self, database_name):
         """

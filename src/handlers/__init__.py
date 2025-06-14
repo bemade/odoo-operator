@@ -1,6 +1,5 @@
 from . import deployment
 from . import filestore_pvc
-from . import git_sync_handler
 from . import git_repo_pvc
 from . import ingress_routes
 from . import odoo_conf
