@@ -171,22 +171,29 @@ echo "Git sync completed successfully"
                 backoff_limit=2,
             ),
         )
+        # Prepare the patch for the OdooInstance to disable sync, so we don't
+        # re-trigger the job on timer checks
+
+        patch = {"spec": {"sync": {"enabled": False}}}
 
         # Create the job
-        try:
-            job = client.BatchV1Api().create_namespaced_job(
-                namespace=self.namespace, body=job
-            )
-            logger.info(
-                f"Created Git sync job: {job_name} in namespace {self.namespace}"
-            )
+        job = client.BatchV1Api().create_namespaced_job(
+            namespace=self.namespace, body=job
+        )
+        logger.info(f"Created Git sync job: {job_name} in namespace {self.namespace}")
+        # Patch the OdooInstance
+        client.CustomObjectsApi().patch_namespaced_custom_object_status(
+            group="bemade.org",
+            version="v1",
+            namespace=self.handler.namespace,
+            plural="odooinstances",
+            name=self.handler.name,
+            body=patch,
+        )
 
-            # Store the reference to the created job
-            self._resource = job
-            return job
-        except client.exceptions.ApiException as e:
-            logger.error(f"Failed to create Git sync job: {e}")
-            return None
+        # Store the reference to the created job
+        self._resource = job
+        return job
 
     def handle_update(self):
         """Handle job updates, including completion processing.
