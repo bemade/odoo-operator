@@ -3,7 +3,7 @@ from .job_handler import JobHandler
 from datetime import datetime
 from kubernetes import client
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from .odoo_handler import OdooHandler
@@ -34,8 +34,7 @@ class GitSyncJob(JobHandler):
         ssh_secret_name = git_project.get("sshSecret")
 
         if not repository:
-            logger.error(f"No repository specified in gitProject for {self.name}")
-            return
+            raise ValueError(f"No repository specified in gitProject for {self.name}")
 
         # Generate a timestamp for the job name to ensure uniqueness
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -78,9 +77,13 @@ git config --global core.sshCommand 'ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecki
         git_script = f"""#!/bin/sh
 set -e
 
-REPO_DIR="/repo"
+MOUNT_DIR="/repo"
+REPO_DIR="/repo/odoo-code"
 BRANCH="{branch}"
 REPOSITORY="{repository}"
+
+# Create the subdirectory if it doesn't exist
+mkdir -p "$REPO_DIR"
 
 {ssh_setup}
 
@@ -102,19 +105,8 @@ if [ -d "$REPO_DIR/.git" ]; then
     git submodule update --init --recursive --depth=1 --force
 else
     echo "Cloning repository..."
-    
-    # Check for lost+found directory and handle it
-    if [ -d "$REPO_DIR" ] && [ "$(ls -A "$REPO_DIR" | grep -v lost+found | wc -l)" -eq 0 ]; then
-        echo "Directory contains only lost+found, preparing for clone"
-        mkdir -p "$REPO_DIR/tmp"
-        git clone --depth=1 --branch "$BRANCH" --recurse-submodules --shallow-submodules "$REPOSITORY" "$REPO_DIR/tmp"
-        mv "$REPO_DIR/tmp/.git" "$REPO_DIR/"
-        cp -r "$REPO_DIR/tmp/"* "$REPO_DIR/" 2>/dev/null || true
-        rm -rf "$REPO_DIR/tmp"
-    else
-        # Normal clone if directory doesn't exist or is completely empty
-        git clone --depth=1 --branch "$BRANCH" --recurse-submodules --shallow-submodules "$REPOSITORY" "$REPO_DIR"
-    fi
+    # Normal clone into the subdirectory
+    git clone --depth=1 --branch "$BRANCH" --recurse-submodules --shallow-submodules "$REPOSITORY" "$REPO_DIR"
 
     # Ensure submodules are at the correct commits
     cd "$REPO_DIR"

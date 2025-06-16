@@ -24,15 +24,19 @@ class JobHandler(ResourceHandler):
         self.status_phase = status_phase
         self.completion_patch = completion_patch
 
-    def _read_resource(self):
+    def _read_resource(self) -> client.V1Job:
         # Get the job name from the OdooInstance status, if running
         job_name = self.handler.resource.get("status", {}).get(self.status_key)
         if job_name:
-            return client.BatchV1Api().read_namespaced_job(
-                name=job_name,
-                namespace=self.namespace,
+            return cast(
+                client.V1Job,
+                client.BatchV1Api().read_namespaced_job(
+                    name=job_name,
+                    namespace=self.namespace,
+                ),
             )
-        return None
+        else:
+            raise ValueError(f"No job name found in status for {self.name}")
 
     def handle_create(self):
         if not self._should_run():
