@@ -107,16 +107,15 @@ if [ -d "$REPO_DIR/.git" ]; then
 
     # Reset any local changes in main repo and submodules
     git reset --hard
-    git clean -fd
+    git stash && git stash clear
 
     # Fetch and reset to the remote branch
     git fetch origin "$BRANCH"
     git reset --hard "origin/$BRANCH"
 
     # Update submodules to their recorded commits
-    git submodule foreach --recursive 'git clean -fd'
-    # Use shallow depth for submodules to save space
-    git submodule update --init --recursive
+    git submodule foreach --recursive 'git stash && git stash clear'
+    git submodule update --init --recursive --recommend-shallow
 else
     echo "Cloning repository..."
     # Use full clone for main repo (no depth limit) but shallow submodules
