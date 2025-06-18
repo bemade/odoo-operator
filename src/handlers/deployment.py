@@ -307,6 +307,9 @@ class Deployment(ResourceHandler):
             command=["/bin/bash", "-c"],
             args=[
                 """
+                # Copy system packages into persisted volume
+                cp -r /usr/lib/python3/dist-packages/* "%(python_path)s/"
+
                 # Check for requirements.txt and install if present
                 REQUIREMENTS_FILE="/mnt/repo/odoo-code/requirements.txt"
                 if [ -f "$REQUIREMENTS_FILE" ]; then
