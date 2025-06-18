@@ -209,9 +209,7 @@ class Deployment(ResourceHandler):
                         "tolerations", self.defaults.get("tolerations", [])
                     ),
                     init_containers=[
-                        self._get_init_container_spec(
-                            volumes, volume_mounts, python_path_var
-                        )
+                        self._get_init_container_spec(volume_mounts, python_path_var)
                     ],
                     containers=[
                         client.V1Container(
