@@ -90,6 +90,9 @@ class UpgradeJob(JobHandler):
                     tolerations=self.spec.get(
                         "tolerations", self.defaults.get("tolerations", [])
                     ),
+                    init_containers=[
+                        self.handler.deployment._get_init_container_spec()
+                    ],
                     containers=[
                         client.V1Container(
                             name=f"odoo-upgrade-{self.name}",

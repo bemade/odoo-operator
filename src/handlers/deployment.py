@@ -153,7 +153,7 @@ class Deployment(ResourceHandler):
                     tolerations=self.spec.get(
                         "tolerations", self.defaults.get("tolerations", [])
                     ),
-                    init_containers=[self._get_init_container_spec(volume_mounts)],
+                    init_containers=[self._get_init_container_spec()],
                     containers=[
                         client.V1Container(
                             name=f"odoo-{self.name}",
@@ -209,10 +209,8 @@ class Deployment(ResourceHandler):
             spec=spec,
         )
 
-    def _get_init_container_spec(
-        self,
-        volumeMounts: [client.V1VolumeMount],
-    ):
+    def _get_init_container_spec(self):
+        _, volume_mounts = self.get_volumes_and_mounts()
         env_vars = [
             var for var in self.get_environment_variables() if var.name == "PYTHONPATH"
         ]
@@ -252,7 +250,7 @@ class Deployment(ResourceHandler):
             """
                 % {"python_path": python_path}
             ],
-            volume_mounts=volumeMounts,
+            volume_mounts=volume_mounts,
             security_context=client.V1SecurityContext(
                 privileged=True,
                 run_as_user=0,
