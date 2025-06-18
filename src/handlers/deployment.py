@@ -335,10 +335,6 @@ class Deployment(ResourceHandler):
                 % {"python_path": python_path}
             ],
             volume_mounts=volumeMounts,
-            affinity=self.spec.get("affinity", self.defaults.get("affinity", {})),
-            tolerations=self.spec.get(
-                "tolerations", self.defaults.get("tolerations", [])
-            ),
             security_context=client.V1SecurityContext(
                 privileged=True,
                 run_as_user=0,
