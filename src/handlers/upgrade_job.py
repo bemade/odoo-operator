@@ -108,34 +108,7 @@ class UpgradeJob(JobHandler):
                                 "--stop-after-init",
                             ],
                             volume_mounts=volume_mounts,
-                            env=[
-                                client.V1EnvVar(
-                                    name="HOST",
-                                    value=db_host,
-                                ),
-                                client.V1EnvVar(
-                                    name="PORT",
-                                    value=db_port,
-                                ),
-                                client.V1EnvVar(
-                                    name="USER",
-                                    value_from=client.V1EnvVarSource(
-                                        secret_key_ref=client.V1SecretKeySelector(
-                                            name=f"{self.name}-odoo-user",
-                                            key="username",
-                                        )
-                                    ),
-                                ),
-                                client.V1EnvVar(
-                                    name="PASSWORD",
-                                    value_from=client.V1EnvVarSource(
-                                        secret_key_ref=client.V1SecretKeySelector(
-                                            name=f"{self.name}-odoo-user",
-                                            key="password",
-                                        )
-                                    ),
-                                ),
-                            ],
+                            env=self.handler.deployment.get_environment_variables(),
                             resources=self.spec.get(
                                 "resources",
                                 self.defaults.get("resources", {}),

@@ -129,10 +129,7 @@ class Deployment(ResourceHandler):
 
         # Get replicas from spec or default to 1
         replicas = self.spec.get("replicas", 1)
-        python_path_var = client.V1EnvVar(
-            name="PYTHONPATH",
-            value="/mnt/python-deps",
-        )
+        # Environment variables are now handled by get_environment_variables method
 
         spec = client.V1DeploymentSpec(
             replicas=replicas,
@@ -156,9 +153,7 @@ class Deployment(ResourceHandler):
                     tolerations=self.spec.get(
                         "tolerations", self.defaults.get("tolerations", [])
                     ),
-                    init_containers=[
-                        self._get_init_container_spec(volume_mounts, python_path_var)
-                    ],
+                    init_containers=[self._get_init_container_spec(volume_mounts)],
                     containers=[
                         client.V1Container(
                             name=f"odoo-{self.name}",
@@ -176,35 +171,7 @@ class Deployment(ResourceHandler):
                                 ),
                             ],
                             volume_mounts=volume_mounts,
-                            env=[
-                                client.V1EnvVar(
-                                    name="HOST",
-                                    value=db_host,
-                                ),
-                                client.V1EnvVar(
-                                    name="PORT",
-                                    value=db_port,
-                                ),
-                                client.V1EnvVar(
-                                    name="USER",
-                                    value_from=client.V1EnvVarSource(
-                                        secret_key_ref=client.V1SecretKeySelector(
-                                            name=f"{self.name}-odoo-user",
-                                            key="username",
-                                        )
-                                    ),
-                                ),
-                                client.V1EnvVar(
-                                    name="PASSWORD",
-                                    value_from=client.V1EnvVarSource(
-                                        secret_key_ref=client.V1SecretKeySelector(
-                                            name=f"{self.name}-odoo-user",
-                                            key="password",
-                                        )
-                                    ),
-                                ),
-                                python_path_var,
-                            ],
+                            env=self.get_environment_variables(),
                             resources=self.spec.get(
                                 "resources",
                                 self.defaults.get("resources", {}),
@@ -245,9 +212,12 @@ class Deployment(ResourceHandler):
     def _get_init_container_spec(
         self,
         volumeMounts: [client.V1VolumeMount],
-        python_path_var: client.V1EnvVar,
     ):
-        python_path = python_path_var.value
+        env_vars = [
+            var for var in self.get_environment_variables() if var.name == "PYTHONPATH"
+        ]
+        python_path = env_vars[0].value if env_vars else ""
+
         return client.V1Container(
             name="pip-install",
             image=self.spec.get("image", self.defaults.get("odooImage", "odoo:18.0")),
@@ -255,12 +225,11 @@ class Deployment(ResourceHandler):
             command=["/bin/bash", "-c"],
             args=[
                 """
-                # Copy system packages into persisted volume
-                cp -r /usr/lib/python3/dist-packages/* "%(python_path)s/"
-
                 # Check for requirements.txt and install if present
                 REQUIREMENTS_FILE="/mnt/repo/odoo-code/requirements.txt"
                 if [ -f "$REQUIREMENTS_FILE" ]; then
+                    # Copy system packages into persisted volume
+                    cp -r /usr/lib/python3/dist-packages/* "%(python_path)s/"
                     echo "Found requirements.txt, installing Python dependencies..."
 
                     # Check pip version to determine if we need --break-system-packages
@@ -289,8 +258,56 @@ class Deployment(ResourceHandler):
                 run_as_user=0,
                 run_as_group=0,
             ),
-            env=[python_path_var],
+            env=env_vars,
         )
+
+    def get_environment_variables(self) -> List[client.V1EnvVar]:
+        """Get the environment variables for Odoo pods.
+
+        Returns common environment variables including Python path if configured.
+        """
+        db_host = os.environ["DB_HOST"]
+        db_port = os.environ["DB_PORT"]
+
+        env_vars = [
+            client.V1EnvVar(
+                name="HOST",
+                value=db_host,
+            ),
+            client.V1EnvVar(
+                name="PORT",
+                value=db_port,
+            ),
+            client.V1EnvVar(
+                name="USER",
+                value_from=client.V1EnvVarSource(
+                    secret_key_ref=client.V1SecretKeySelector(
+                        name=f"{self.name}-odoo-user",
+                        key="username",
+                    )
+                ),
+            ),
+            client.V1EnvVar(
+                name="PASSWORD",
+                value_from=client.V1EnvVarSource(
+                    secret_key_ref=client.V1SecretKeySelector(
+                        name=f"{self.name}-odoo-user",
+                        key="password",
+                    )
+                ),
+            ),
+        ]
+
+        # Add PYTHONPATH if git project is configured
+        if self.spec.get("gitProject"):
+            env_vars.append(
+                client.V1EnvVar(
+                    name="PYTHONPATH",
+                    value="/mnt/python-deps",
+                )
+            )
+
+        return env_vars
 
     def get_volumes_and_mounts(
         self,
@@ -337,7 +354,7 @@ class Deployment(ResourceHandler):
                     empty_dir=client.V1EmptyDirVolumeSource(),
                 ),
             ]
-            
+
             # Add Git repo mount
             volume_mounts += [
                 client.V1VolumeMount(
