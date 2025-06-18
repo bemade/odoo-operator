@@ -298,7 +298,6 @@ class Deployment(ResourceHandler):
 
     def _get_init_container_spec(
         self,
-        volumes: [client.V1Volume],
         volumeMounts: [client.V1VolumeMount],
         python_path_var: client.V1EnvVar,
     ):
@@ -335,7 +334,6 @@ class Deployment(ResourceHandler):
             """
                 % {"python_path": python_path}
             ],
-            volumes=volumes,
             volume_mounts=volumeMounts,
             affinity=self.spec.get("affinity", self.defaults.get("affinity", {})),
             tolerations=self.spec.get(
