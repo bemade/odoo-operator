@@ -65,8 +65,6 @@ class UpgradeJob(JobHandler):
             else {}
         )
 
-        db_host = os.environ["DB_HOST"]
-        db_port = os.environ["DB_PORT"]
         volumes, volume_mounts = self.handler.deployment.get_volumes_and_mounts()
 
         # Create the job spec
