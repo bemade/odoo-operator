@@ -58,13 +58,6 @@ class OdooConf(ResourceHandler):
             admin_pw = crypt_context.hash(admin_pw)
             config_options.update(admin_passwd=admin_pw)
         config_options.update(self.spec.get("configOptions", {}))
-        # Add git repo's addons directory to addons_path if gitProject is configured
-        if self.spec.get("gitProject"):
-            if "addons_path" in config_options:
-                config_options["addons_path"] += ",/mnt/repo/odoo-code/addons"
-            else:
-                config_options["addons_path"] = "/mnt/repo/odoo-code/addons"
-
         conf_text = "[options]\n"
         for key, value in config_options.items():
             conf_text += f"{key} = {value}\n"

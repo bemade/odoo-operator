@@ -132,12 +132,12 @@ def check_odoo_instance_periodic(body, *args, **kwargs):
     handler.check_periodic()
 
 
-def _is_odooinstance_sync_job(body, *args, **kwargs):
-    """Check if the job is a git sync job owned by an OdooInstance."""
+def _is_odoo_job(body, *args, **kwargs):
+    """Check if the job is a job owned by an OdooInstance."""
     logger.debug(f"Checking if job is an OdooInstance git sync job")
 
     # Check job name pattern
-    name = body.get("metadata", {}).get("name", "")
+    name = body.get("metadata", {}).get("ownerReferences", "")
     if not (name and "-git-sync-" in name):
         return False
 
@@ -149,48 +149,30 @@ def _is_odooinstance_sync_job(body, *args, **kwargs):
             and owner.get("apiVersion") == "bemade.org/v1"
         ):
             return True
-
     return False
 
 
-@kopf.on.field(
-    "batch", "v1", "jobs", when=_is_odooinstance_sync_job, field="status.succeeded"
-)
-@kopf.on.field(
-    "batch", "v1", "jobs", when=_is_odooinstance_sync_job, field="status.failed"
-)
-def on_sync_job_status_change(body, *args, **kwargs):
+@kopf.on.field("batch", "v1", "jobs", when=_is_odoo_job, field="status.completionTime")
+def on_job_completion(body, *args, **kwargs):
     """Handle completion (success or failure) of git sync job owned by OdooInstance."""
-    name = body["metadata"]["name"]
-    is_success = body.get("status", {}).get("succeeded", 0) > 0
-
-    if is_success:
-        logger.info(f"Git sync job succeeded: {name}")
-    else:
-        logger.error(f"Git sync job failed: {name}")
-
-    # Get the OdooInstance that owns this job and use GitSyncJobHandler to update status
-    owner_refs = body.get("metadata", {}).get("ownerReferences", [])
+    owner_refs = [
+        ref
+        for ref in body.get("metadata", {}).get("ownerReferences", [])
+        if ref.get("kind") == "OdooInstance"
+    ]
     for owner in owner_refs:
-        if owner.get("kind") == "OdooInstance":
-            try:
-                # Get the OdooInstance custom resource
-                instance = client.CustomObjectsApi().get_namespaced_custom_object(
-                    "bemade.org",
-                    "v1",
-                    body.get("metadata", {}).get("namespace"),
-                    "odooinstances",
-                    owner.get("name"),
-                )
+        try:
+            # Get the OdooInstance custom resource
+            instance = client.CustomObjectsApi().get_namespaced_custom_object(
+                "bemade.org",
+                "v1",
+                body.get("metadata", {}).get("namespace"),
+                "odooinstances",
+                owner.get("name"),
+            )
 
-                # Initialize OdooHandler
-                odoo_handler = OdooHandler(body=instance, *args, **kwargs)
-                odoo_handler.git_sync_job.handle_update()
-
-                return
-            except Exception as e:
-                logger.error(
-                    f"Error processing {'successful' if is_success else 'failed'} sync job: {e}"
-                )
-
-    logger.warning(f"Could not find OdooInstance owner for sync job {name}")
+            # Initialize OdooHandler
+            odoo_handler = OdooHandler(body=instance, *args, **kwargs)
+            odoo_handler.handle_job_completion(body)
+        except Exception as e:
+            logger.error(f"Error processing sync job: {e}")

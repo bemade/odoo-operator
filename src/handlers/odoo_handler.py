@@ -6,23 +6,19 @@ from typing import cast
 from .pull_secret import PullSecret
 from .odoo_user_secret import OdooUserSecret
 from .filestore_pvc import FilestorePVC
-from .git_repo_pvc import GitRepoPVC
 from .odoo_conf import OdooConf
 from .tls_cert import TLSCert
 from .deployment import Deployment
 from .service import Service
 from .ingress_routes import IngressRouteHTTPS, IngressRouteWebsocket
-from .git_secret import GitSecret
 from .upgrade_job import UpgradeJob
 from .resource_handler import ResourceHandler
-from .git_sync_job import GitSyncJob
 import logging
 from enum import Enum
 
 
 class Stage(Enum):
     RUNNING = "Running"
-    SYNCING = "Syncing"
     UPGRADING = "Upgrading"
 
 
@@ -59,7 +55,6 @@ class OdooHandler(ResourceHandler):
         self.pull_secret = PullSecret(self)
         self.odoo_user_secret = OdooUserSecret(self)
         self.filestore_pvc = FilestorePVC(self)
-        self.git_repo_pvc = GitRepoPVC(self)
         self.odoo_conf = OdooConf(self)
         self.tls_cert = TLSCert(self)
         self.deployment = Deployment(self)
@@ -67,15 +62,12 @@ class OdooHandler(ResourceHandler):
         self.ingress_route_https = IngressRouteHTTPS(self)
         self.ingress_route_websocket = IngressRouteWebsocket(self)
         self.upgrade_job = UpgradeJob(self)
-        self.git_secret = GitSecret(self)
-        self.git_sync_job = GitSyncJob(self)
 
         # Create handlers list in the correct order for creation/update
         self.handlers = [
             self.pull_secret,
             self.odoo_user_secret,
             self.filestore_pvc,
-            self.git_repo_pvc,  # Git repo PVC before config since config might need it
             self.odoo_conf,
             self.tls_cert,
             self.deployment,
@@ -91,29 +83,16 @@ class OdooHandler(ResourceHandler):
         for handler in self.handlers:
             handler.handle_create()
 
-        # Initialize git sync if the git repo PVC was created.
-        # This is done after all the other creations so that we are sure the deployment
-        # has already been created.
-        if self.git_repo_pvc.resource:
-            self.git_repo_pvc.init_git_sync()
-
     def on_update(self):
         """Handle update events for this OdooInstance."""
         logging.info(f"Handling update for OdooInstance {self.name}")
 
-        # Check if this is a sync request that should be executed now
-        if self._is_sync_request() and self._should_execute_sync():
-            logging.info(f"Sync requested for {self.name}")
-            self._handle_sync()
-
         # Check if this is an upgrade request that should be executed now
-        # May run after a sync operation if both are requested
         if self._is_upgrade_request() and self._should_execute_upgrade():
             logging.info(f"Upgrade requested for {self.name}")
             self._handle_upgrade()
 
-        # Always update resource handlers unless we just processed a sync
-        # (Skip if sync was processed to avoid duplicate updates during sync operations)
+        # Always update resource handlers
         logging.debug(f"Running regular update for handlers of {self.name}")
         for handler in self.handlers:
             handler.handle_update()
@@ -135,70 +114,16 @@ class OdooHandler(ResourceHandler):
             upgrade_spec and database and isinstance(modules, list) and len(modules) > 0
         )
 
-    def _is_sync_request(self):
-        """Check if the spec contains a valid git sync request."""
-        sync_spec = self.spec.get("sync", {})
-        git_project = self.spec.get("gitProject", {})
-
-        # Check if sync is enabled and if there is a git project configured
-        return sync_spec.get("enabled", False) and git_project.get("repository", "")
-
-    def _should_execute_sync(self):
-        """Determine if a sync request should be executed now.
-
-        This checks:
-        1. If the git sync job is already running
-        2. If enabled was just toggled on (regardless of scheduled time)
-        3. If a scheduled time is specified and has passed
-        """
-        if self.git_sync_job.is_running:
-            return False
-
-        # If it's not a valid sync request, don't execute
-        if not self._is_sync_request():
-            return False
-
-        sync_spec = self.spec.get("sync", {})
-        scheduled_time = sync_spec.get("time", "")
-
-        # If no scheduled time is specified, execute immediately
-        if not scheduled_time:
-            return True
-
-        # If a scheduled time is specified, check if it's time to execute
-        try:
-            # Parse the scheduled time
-            from datetime import datetime, timezone
-
-            # Parse the ISO format time string
-            scheduled_datetime = datetime.fromisoformat(
-                scheduled_time.replace("Z", "+00:00")
-            )
-
-            # Get the current time in UTC
-            current_time = datetime.now(timezone.utc)
-
-            # If the scheduled time has passed, it's time to execute the sync
-            return current_time >= scheduled_datetime
-        except Exception as e:
-            logging.error(
-                f"Error parsing scheduled sync time for {self.name}: {e}",
-                exc_info=True,
-            )
-            # If there's an error parsing the time, default to not syncing
-            return False
-
     def _should_execute_upgrade(self):
         """
         Determine if an upgrade request should be executed now.
 
         This checks:
         1. If an upgrade job is already running
-        2. If a sync job is already running (upgrades should wait for syncs to complete)
-        3. If a scheduled time is specified and has passed
+        2. If a scheduled time is specified and has passed
         """
         # If it's not a valid upgrade request, don't execute
-        if not self._is_upgrade_request() or self.git_sync_job.is_running:
+        if not self._is_upgrade_request():
             return False
 
         upgrade_spec = self.spec.get("upgrade", {})
@@ -238,9 +163,6 @@ class OdooHandler(ResourceHandler):
         # Check for scheduled upgrades
         self._check_scheduled_upgrade()
 
-        # Check for scheduled git syncs
-        self._check_scheduled_sync()
-
         # Add any future periodic checks here
         # ...
 
@@ -255,19 +177,6 @@ class OdooHandler(ResourceHandler):
             logging.info(f"Executing scheduled upgrade for {self.name}")
             self._handle_upgrade()
 
-    def _check_scheduled_sync(self):
-        """
-        Check if this instance has a scheduled git sync that should be executed now.
-        """
-        logging.debug(f"Checking for scheduled git sync for {self.name}")
-
-        # Check if this is a sync request that should be executed now
-        if self._is_sync_request() and self._should_execute_sync():
-            logging.info(f"Executing scheduled git sync for {self.name}")
-            self._handle_sync()
-        else:
-            logging.debug(f"No scheduled git sync to execute for {self.name}")
-
     def _handle_upgrade(self):
         """Handle the upgrade process."""
         logging.info(f"Starting upgrade process for {self.name}")
@@ -280,26 +189,6 @@ class OdooHandler(ResourceHandler):
         logging.debug(
             f"Upgrade job created for {self.name}, will check for completion periodically"
         )
-
-    def _handle_sync(self):
-        """Handle the git synchronization process."""
-        logging.info(f"Starting git sync process for {self.name}")
-
-        # Check if we have a git project configured
-        git_project = self.spec.get("gitProject", {})
-        if not git_project.get("repository"):
-            logging.error(f"No git repository configured for {self.name}")
-            return
-
-        # Create the sync job using the GitSyncJobHandler
-        self.git_sync_job.handle_create()
-
-        # The job status will be handled by the Kopf event hook in operator.py
-        logging.debug(
-            f"Git sync job created for {self.name}, completion will be handled by event hooks"
-        )
-
-        # After the job completes, the operator.py with its hooks will handle restarting the deployment
 
     def validate_database_exists(self, database_name):
         """
@@ -459,3 +348,10 @@ class OdooHandler(ResourceHandler):
     @property
     def stage(self) -> Stage:
         return Stage(self.status.get("phase", "Running"))
+
+    def handle_job_completion(self, body: dict):
+        """Handle completion of various types of jobs for this instance."""
+
+        match body.get("metadata", {}).get("name"):
+            case name if "upgrade" in name:
+                self.upgrade_job.handle_update()

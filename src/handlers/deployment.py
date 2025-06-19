@@ -53,7 +53,7 @@ class Deployment(ResourceHandler):
 
         logger.debug(f"Deployment {self.name} checking OdooInstance phase: {phase}")
 
-        if phase in ["Syncing", "Upgrading"]:
+        if phase == "Upgrading":
             deployment.spec.replicas = 0
             logger.debug(f"Deployment {self.name} scaled down to 0 replicas")
 
@@ -102,9 +102,6 @@ class Deployment(ResourceHandler):
             return False
 
     def _get_resource_body(self) -> client.V1Deployment:
-        db_host = os.environ["DB_HOST"]
-        db_port = os.environ["DB_PORT"]
-
         image = self.spec.get("image", self.defaults.get("odooImage", "odoo:18.0"))
 
         volumes, volume_mounts = self.get_volumes_and_mounts()
@@ -153,7 +150,6 @@ class Deployment(ResourceHandler):
                     tolerations=self.spec.get(
                         "tolerations", self.defaults.get("tolerations", [])
                     ),
-                    init_containers=[self._get_init_container_spec()],
                     containers=[
                         client.V1Container(
                             name=f"odoo-{self.name}",
@@ -209,56 +205,6 @@ class Deployment(ResourceHandler):
             spec=spec,
         )
 
-    def _get_init_container_spec(self):
-        _, volume_mounts = self.get_volumes_and_mounts()
-        env_vars = [
-            var for var in self.get_environment_variables() if var.name == "PYTHONPATH"
-        ]
-        python_path = env_vars[0].value if env_vars else ""
-
-        return client.V1Container(
-            name="pip-install",
-            image=self.spec.get("image", self.defaults.get("odooImage", "odoo:18.0")),
-            image_pull_policy="IfNotPresent",
-            command=["/bin/bash", "-c"],
-            args=[
-                """
-                # Check for requirements.txt and install if present
-                REQUIREMENTS_FILE="/mnt/repo/odoo-code/requirements.txt"
-                if [ -f "$REQUIREMENTS_FILE" ]; then
-                    # Copy system packages into persisted volume
-                    cp -r /usr/lib/python3/dist-packages/* "%(python_path)s/"
-                    echo "Found requirements.txt, installing Python dependencies..."
-
-                    # Check pip version to determine if we need --break-system-packages
-                    MAJOR_VERSION=$(pip --version | awk '{print $2}' | cut -d. -f1)
-
-                    # Install requirements
-                    set -e  # Exit immediately if a command fails
-                    if [ "$MAJOR_VERSION" -ge 23 ]; then
-                        echo "Using pip $MAJOR_VERSION.x with --break-system-packages"
-                        pip install --break-system-packages -r "$REQUIREMENTS_FILE" --target "%(python_path)s"
-                    else
-                        echo "Using pip $MAJOR_VERSION.x"
-                        pip install -r "$REQUIREMENTS_FILE" --target "%(python_path)s"
-                    fi
-
-                    echo "Python requirements installed successfully"
-                else
-                    echo "No requirements.txt found, skipping Python dependencies installation"
-                fi
-            """
-                % {"python_path": python_path}
-            ],
-            volume_mounts=volume_mounts,
-            security_context=client.V1SecurityContext(
-                privileged=True,
-                run_as_user=0,
-                run_as_group=0,
-            ),
-            env=env_vars,
-        )
-
     def get_environment_variables(self) -> List[client.V1EnvVar]:
         """Get the environment variables for Odoo pods.
 
@@ -296,15 +242,6 @@ class Deployment(ResourceHandler):
             ),
         ]
 
-        # Add PYTHONPATH if git project is configured
-        if self.spec.get("gitProject"):
-            env_vars.append(
-                client.V1EnvVar(
-                    name="PYTHONPATH",
-                    value="/mnt/python-deps",
-                )
-            )
-
         return env_vars
 
     def get_volumes_and_mounts(
@@ -337,32 +274,5 @@ class Deployment(ResourceHandler):
                 mount_path="/etc/odoo",
             ),
         ]
-
-        # Add Git repository volume if configured
-        if self.spec.get("gitProject"):
-            volumes += [
-                client.V1Volume(
-                    name="repo-volume",
-                    persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                        claim_name=f"{self.name}-repo-pvc"
-                    ),
-                ),
-                client.V1Volume(
-                    name="python-deps",
-                    empty_dir=client.V1EmptyDirVolumeSource(),
-                ),
-            ]
-
-            # Add Git repo mount
-            volume_mounts += [
-                client.V1VolumeMount(
-                    name="repo-volume",
-                    mount_path="/mnt/repo",
-                ),
-                client.V1VolumeMount(
-                    name="python-deps",
-                    mount_path="/mnt/python-deps",
-                ),
-            ]
 
         return volumes, volume_mounts

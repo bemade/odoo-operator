@@ -21,8 +21,4 @@ configOptions:
   limit_time_real: "600"
   limit_time_cpu: "600"
   addons_path: "/mnt/extra-addons,/mnt/enterprise-addons"
-gitProject:
-  repository: "git@git.bemade.org:bemade/bemade-site"
-  branch: "18.0"
-  sshSecret: "ssh-key"
 

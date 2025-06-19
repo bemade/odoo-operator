@@ -24,12 +24,10 @@ class UpgradeJob(JobHandler):
         self.database = self.upgrade_spec.get("database", "")
 
     def handle_create(self):
-        if not self.handler.git_sync_job.is_running:
-            super().handle_create()
+        super().handle_create()
 
     def handle_update(self):
-        if not self.handler.git_sync_job.is_running:
-            super().handle_update()
+        super().handle_update()
 
     def _get_resource_body(self):
         """Create the job resource definition."""
