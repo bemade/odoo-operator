@@ -134,15 +134,21 @@ def check_odoo_instance_periodic(body, *args, **kwargs):
 
 def _is_odoo_job(body, *args, **kwargs):
     """Check if the job is a job owned by an OdooInstance."""
-    logger.debug(f"Checking if job is an OdooInstance git sync job")
+    logger.debug(f"Checking if job is an OdooInstance job")
 
     # Check job name pattern
-    name = body.get("metadata", {}).get("ownerReferences", "")
-    if not (name and "-git-sync-" in name):
+    meta = body.get("metadata")
+    if not meta:
+        return False
+    name = meta.get("name")
+    owner_refs = meta.get("ownerReferences")
+    if not name or not owner_refs:
+        return False
+
+    if "-restore-" not in name and "-backup-" not in name:
         return False
 
     # Check owner references to confirm it's owned by an OdooInstance
-    owner_refs = body.get("metadata", {}).get("ownerReferences", [])
     for owner in owner_refs:
         if (
             owner.get("kind") == "OdooInstance"
@@ -152,9 +158,11 @@ def _is_odoo_job(body, *args, **kwargs):
     return False
 
 
-@kopf.on.field("batch", "v1", "jobs", when=_is_odoo_job, field="status.completionTime")
+@kopf.on.field("batch", "v1", "jobs", when=_is_odoo_job, field="status.failed")
+@kopf.on.field("batch", "v1", "jobs", when=_is_odoo_job, field="status.succeeded")
 def on_job_completion(body, *args, **kwargs):
     """Handle completion (success or failure) of git sync job owned by OdooInstance."""
+    logger.debug(f"Handling job completion.")
     owner_refs = [
         ref
         for ref in body.get("metadata", {}).get("ownerReferences", [])

@@ -12,6 +12,7 @@ from .deployment import Deployment
 from .service import Service
 from .ingress_routes import IngressRouteHTTPS, IngressRouteWebsocket
 from .upgrade_job import UpgradeJob
+from .restore_job import RestoreJob
 from .resource_handler import ResourceHandler
 import logging
 from enum import Enum
@@ -62,6 +63,7 @@ class OdooHandler(ResourceHandler):
         self.ingress_route_https = IngressRouteHTTPS(self)
         self.ingress_route_websocket = IngressRouteWebsocket(self)
         self.upgrade_job = UpgradeJob(self)
+        self.restore_job = RestoreJob(self)
 
         # Create handlers list in the correct order for creation/update
         self.handlers = [
@@ -76,7 +78,7 @@ class OdooHandler(ResourceHandler):
             self.ingress_route_websocket,
         ]
 
-        # The upgrade job is handled separately and not included in the main handlers list
+        # The Job handlers are handled separately and not included in the main handlers list
 
     def on_create(self):
         # Create all resources in the correct order
@@ -87,6 +89,9 @@ class OdooHandler(ResourceHandler):
         """Handle update events for this OdooInstance."""
         logging.info(f"Handling update for OdooInstance {self.name}")
 
+        if self._is_restore_request() and self._should_execute_restore():
+            logging.info(f"Restore requested for {self.name}")
+            self._handle_restore()
         # Check if this is an upgrade request that should be executed now
         if self._is_upgrade_request() and self._should_execute_upgrade():
             logging.info(f"Upgrade requested for {self.name}")
@@ -102,6 +107,33 @@ class OdooHandler(ResourceHandler):
         # The deployment handler will handle scaling down before deletion
         for handler in reversed(self.handlers):
             handler.handle_delete()
+
+    def _is_restore_request(self):
+        """Check if the spec contains a valid restore request."""
+        restore_spec = self.spec.get("restore", {})
+        return restore_spec and restore_spec.get("enabled", False)
+
+    def _should_execute_restore(self):
+        """Determine if a restore request should be executed now.
+        Check if:
+
+        1. If a restore job is already running
+        2. If a restore job is requested
+        """
+        return not self.restore_job.is_running and self._is_restore_request()
+
+    def _handle_restore(self):
+        """Handle the restore process."""
+        logging.info(f"Starting restore process for {self.name}")
+
+        # Create or update the restore job
+        self.restore_job.handle_update()
+
+        # The job will run asynchronously, and we'll check for completion
+        # in the check_restore_job_completion method that will be called periodically
+        logging.debug(
+            f"Restore job created for {self.name}, will check for completion periodically"
+        )
 
     def _is_upgrade_request(self):
         """Check if the spec contains a valid upgrade request."""
@@ -119,9 +151,15 @@ class OdooHandler(ResourceHandler):
         Determine if an upgrade request should be executed now.
 
         This checks:
-        1. If an upgrade job is already running
-        2. If a scheduled time is specified and has passed
+        1. If a restore job is already running
+        2. If an upgrade job is already running
+        3. If a scheduled time is specified and has passed
         """
+        if self.restore_job.is_running:
+            return False
+        if self.upgrade_job.is_running:
+            return False
+
         # If it's not a valid upgrade request, don't execute
         if not self._is_upgrade_request():
             return False
@@ -160,11 +198,51 @@ class OdooHandler(ResourceHandler):
         """
         Periodic checks for this instance.
         """
+        # Check if the status is somehow out of date
+
+        self._check_status()
+
         # Check for scheduled upgrades
         self._check_scheduled_upgrade()
 
         # Add any future periodic checks here
         # ...
+
+    def _check_status(self):
+        """
+        Check if the status is somehow out of date.
+        """
+        logging.debug(f"Checking status for {self.name}")
+        status = client.CustomObjectsApi().get_namespaced_custom_object_status(
+            group="bemade.org",
+            version="v1",
+            namespace=self.namespace,
+            plural="odooinstances",
+            name=self.name,
+        )
+        phase = cast(dict, status).get("status", {}).get("phase")
+        if not phase or phase == "Running":
+            logging.debug(f"Status for {self.name} is Running. No action needed.")
+            return
+        if phase == "Upgrading" and self.upgrade_job.is_running:
+            logging.debug(f"Status for {self.name} is Upgrading. No action needed.")
+            return
+        if phase == "Restoring" and self.restore_job.is_running:
+            logging.debug(f"Status for {self.name} is Restoring. No action needed.")
+            return
+        logging.debug(
+            f"Resetting status to Running since job for {phase} is not running."
+        )
+        client.CustomObjectsApi().patch_namespaced_custom_object_status(
+            group="bemade.org",
+            version="v1",
+            namespace=self.namespace,
+            plural="odooinstances",
+            name=self.name,
+            body={
+                "status": {"phase": "Running", "restoreJob": None, "upgradeJob": None}
+            },
+        )
 
     def _check_scheduled_upgrade(self):
         """
@@ -355,3 +433,5 @@ class OdooHandler(ResourceHandler):
         match body.get("metadata", {}).get("name"):
             case name if "upgrade" in name:
                 self.upgrade_job.handle_update()
+            case name if "restore" in name:
+                self.restore_job.handle_update()

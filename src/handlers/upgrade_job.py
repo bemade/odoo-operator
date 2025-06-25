@@ -33,14 +33,6 @@ class UpgradeJob(JobHandler):
         """Create the job resource definition."""
         image = self.spec.get("image", self.defaults.get("odooImage", "odoo:18.0"))
 
-        # Add labels to make it easier to find this job later
-        labels = {
-            "app.kubernetes.io/name": "odoo",
-            "app.kubernetes.io/instance": self.name,
-            "app.kubernetes.io/component": "upgrade",
-            "app.kubernetes.io/managed-by": "odoo-operator",
-        }
-
         # Format modules list as comma-separated string
         modules_str = ",".join(self.modules)
 
@@ -48,7 +40,6 @@ class UpgradeJob(JobHandler):
             generate_name=f"{self.name}-upgrade-",  # Kubernetes will append a unique suffix
             namespace=self.namespace,
             owner_references=[self.owner_reference],
-            labels=labels,  # Use our standardized labels
         )
 
         pull_secret = (
@@ -68,9 +59,7 @@ class UpgradeJob(JobHandler):
         # Create the job spec
         job_spec = client.V1JobSpec(
             template=client.V1PodTemplateSpec(
-                metadata=client.V1ObjectMeta(
-                    labels=labels,  # Use our standardized labels
-                ),
+                metadata=metadata,
                 spec=client.V1PodSpec(
                     **pull_secret,
                     restart_policy="Never",
