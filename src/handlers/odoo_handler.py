@@ -1,4 +1,6 @@
 from kubernetes import client
+from kubernetes.client.rest import ApiException
+import kopf
 import os
 import yaml
 from typing import cast

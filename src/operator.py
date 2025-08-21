@@ -2,6 +2,7 @@ import kopf
 import logging
 import os
 from kubernetes import client
+from kubernetes.client.rest import ApiException
 from handlers.odoo_handler import OdooHandler
 from webhook_server import ServiceModeWebhookServer
 
@@ -66,22 +67,72 @@ def configure_webhook(settings: kopf.OperatorSettings, *args, **kwargs):
             logger.error(f"Key file not found: {webhook_key_path}")
 
 
+def _classify_and_raise_api_exception(e: ApiException):
+    """Map K8s ApiException to kopf Permanent/Temporary errors.
+
+    - Permanent: 400, 403, 422 and other 4xx by default (invalid spec, forbidden ops).
+    - Temporary: 409, 429, 5xx (conflicts, rate limits, server issues).
+    - PVC shrink specific message mapped to permanent stop.
+    """
+    body = getattr(e, "body", "") or ""
+    status = getattr(e, "status", None)
+    reason = getattr(e, "reason", "")
+    msg = f"{status} {reason} {body}".strip()
+
+    if status in (400, 403, 422):
+        if "can not be less than previous value" in body:
+            raise kopf.PermanentError("PVC shrink not allowed; stopping retries.")
+        raise kopf.PermanentError(f"Permanent API error: {msg}")
+
+    if status in (409, 429) or (status is not None and 500 <= status < 600):
+        raise kopf.TemporaryError(f"Temporary API error: {msg}", delay=30)
+
+    if status is not None and 400 <= status < 500:
+        raise kopf.PermanentError(f"Permanent API error: {msg}")
+
+    # Unknown, re-raise original to let Kopf decide/defaults apply
+    raise e
+
+
 @kopf.on.create("bemade.org", "v1", "odooinstances")
 def create_fn(body, *args, **kwargs):
     handler = OdooHandler(body, **kwargs)
-    handler.on_create()
+    try:
+        handler.on_create()
+    except ApiException as e:
+        _classify_and_raise_api_exception(e)
+    except (kopf.PermanentError, kopf.TemporaryError):
+        # Let Kopf handle these as-is
+        raise
+    except Exception as e:
+        # Default to temporary for unexpected errors
+        raise kopf.TemporaryError(str(e), delay=30)
 
 
 @kopf.on.update("bemade.org", "v1", "odooinstances")
 def update_fn(body, *args, **kwargs):
     handler = OdooHandler(body, *args, **kwargs)
-    handler.on_update()
+    try:
+        handler.on_update()
+    except ApiException as e:
+        _classify_and_raise_api_exception(e)
+    except (kopf.PermanentError, kopf.TemporaryError):
+        raise
+    except Exception as e:
+        raise kopf.TemporaryError(str(e), delay=30)
 
 
 @kopf.on.delete("bemade.org", "v1", "odooinstances")
 def delete_fn(body, *args, **kwargs):
     handler = OdooHandler(body, *args, **kwargs)
-    handler.on_delete()
+    try:
+        handler.on_delete()
+    except ApiException as e:
+        _classify_and_raise_api_exception(e)
+    except (kopf.PermanentError, kopf.TemporaryError):
+        raise
+    except Exception as e:
+        raise kopf.TemporaryError(str(e), delay=30)
 
 
 @kopf.on.validate("bemade.org", "v1", "odooinstances")
