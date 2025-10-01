@@ -1,6 +1,6 @@
 variables:
   VERSION: 0.6.0
-  CI_REGISTRY_IMAGE: "$CI_REGISTRY_IMAGE"
+  IMAGE_NAME: "$CI_REGISTRY_IMAGE"
 
 stages:
   - build
@@ -51,6 +51,6 @@ build:
       # Login to Docker registry
       echo "${CI_REGISTRY_PASSWORD}" | docker login ${CI_REGISTRY} -u "${CI_REGISTRY_USER}" --password-stdin
 
-      docker build -t $CI_REGISTRY_IMAGE:$VERSION -t $CI_REGISTRY_IMAGE:latest .
+      docker build -t $IMAGE_NAME:$VERSION -t $IMAGE_NAME:latest .
       docker push $CI_REGISTRY_IMAGE:latest
       docker push $CI_REGISTRY_IMAGE:$VERSION
