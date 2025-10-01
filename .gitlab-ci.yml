@@ -1,5 +1,6 @@
 variables:
   VERSION: 0.6.0
+  CI_REGISTRY_IMAGE: "$CI_REGISTRY_IMAGE"
 
 stages:
   - build
