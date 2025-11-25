@@ -155,11 +155,8 @@ class RestoreJob(JobHandler):
         
         echo "Download complete. Checking file..."
         ls -lh {destination}
-        file {destination}
         
-        # Show first few bytes to verify it's actually a zip
-        echo "First 100 bytes:"
-        head -c 100 {destination} | od -A x -t x1z -v
+        echo "Init container complete - backup downloaded successfully"
         """
         return script
 
