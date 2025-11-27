@@ -96,6 +96,11 @@ class OdooBackupJobHandler:
 
     def check_job_status(self):
         """Check the underlying Job status and update OdooBackupJob accordingly."""
+        # Skip if already in a terminal state
+        current_phase = self.status.get("phase")
+        if current_phase in ("Completed", "Failed"):
+            return
+
         job_name = self.status.get("jobName")
         if not job_name:
             return
@@ -363,6 +368,13 @@ if [ "$BACKUP_FORMAT" = "zip" ] && [ "$BACKUP_WITH_FILESTORE" = "True" ]; then
         dump \
         "$DB_NAME" \
         "/mnt/backup/$OUTPUT_NAME"
+elif [ "$BACKUP_FORMAT" = "dump" ]; then
+    echo "Creating PostgreSQL custom format dump with pg_dump..."
+    case "$OUTPUT_NAME" in
+        *.dump) : ;;
+        *) OUTPUT_NAME="$OUTPUT_NAME.dump" ;;
+    esac
+    pg_dump -h "$HOST" -p "$PORT" -U "$USER" -d "$DB_NAME" --format=custom -f /mnt/backup/$OUTPUT_NAME
 else
     echo "Creating SQL dump with pg_dump (no filestore)..."
     case "$OUTPUT_NAME" in
