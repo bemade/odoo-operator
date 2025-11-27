@@ -252,9 +252,12 @@ class OdooRestoreJobHandler:
             init_container = self._build_odoo_download_container(volume_mounts)
 
         # Environment variables for database connection
+        db_host = os.environ.get("DB_HOST", "postgres")
+        db_port = os.environ.get("DB_PORT", "5432")
+
         db_env = [
-            client.V1EnvVar(name="HOST", value="postgres.postgres.svc.cluster.local"),
-            client.V1EnvVar(name="PORT", value="5432"),
+            client.V1EnvVar(name="HOST", value=db_host),
+            client.V1EnvVar(name="PORT", value=db_port),
             client.V1EnvVar(
                 name="USER",
                 value_from=client.V1EnvVarSource(
