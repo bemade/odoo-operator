@@ -10,10 +10,14 @@ This handler manages the lifecycle of backup jobs:
 from __future__ import annotations
 from kubernetes import client
 from kubernetes.client.rest import ApiException
+import base64
 import logging
 import os
 
 logger = logging.getLogger(__name__)
+
+# Default namespace for S3 credentials secret
+OPERATOR_NAMESPACE = os.environ.get("OPERATOR_NAMESPACE", "odoo-operator")
 
 
 class OdooBackupJobHandler:
@@ -44,6 +48,42 @@ class OdooBackupJobHandler:
             uid=self.uid,
             block_owner_deletion=True,
         )
+
+    def _get_s3_credentials(self) -> tuple[str, str]:
+        """Fetch S3 credentials from the referenced secret.
+
+        Returns:
+            Tuple of (access_key, secret_key)
+        """
+        secret_ref = self.destination.get("s3CredentialsSecretRef", {})
+        secret_name = secret_ref.get("name")
+        secret_namespace = secret_ref.get("namespace", OPERATOR_NAMESPACE)
+
+        if not secret_name:
+            raise ValueError("s3CredentialsSecretRef.name is required")
+
+        try:
+            secret = client.CoreV1Api().read_namespaced_secret(
+                name=secret_name,
+                namespace=secret_namespace,
+            )
+            access_key = base64.b64decode(secret.data.get("accessKey", "")).decode(
+                "utf-8"
+            )
+            secret_key = base64.b64decode(secret.data.get("secretKey", "")).decode(
+                "utf-8"
+            )
+
+            if not access_key or not secret_key:
+                raise ValueError(
+                    f"Secret {secret_namespace}/{secret_name} missing accessKey or secretKey"
+                )
+
+            return access_key, secret_key
+        except ApiException as e:
+            raise ValueError(
+                f"Failed to read S3 credentials secret {secret_namespace}/{secret_name}: {e}"
+            )
 
     def on_create(self):
         """Handle creation of OdooBackupJob - create the backup Job."""
@@ -202,30 +242,14 @@ class OdooBackupJobHandler:
             client.V1EnvVar(name="LOCAL_FILENAME", value=local_filename),
         ]
 
-        # Add S3 credentials from secret refs if provided
-        if self.destination.get("accessKeySecretRef"):
-            common_env.append(
-                client.V1EnvVar(
-                    name="AWS_ACCESS_KEY_ID",
-                    value_from=client.V1EnvVarSource(
-                        secret_key_ref=client.V1SecretKeySelector(
-                            name=self.destination["accessKeySecretRef"]["name"],
-                            key=self.destination["accessKeySecretRef"]["key"],
-                        )
-                    ),
-                )
-            )
-        if self.destination.get("secretKeySecretRef"):
-            common_env.append(
-                client.V1EnvVar(
-                    name="AWS_SECRET_ACCESS_KEY",
-                    value_from=client.V1EnvVarSource(
-                        secret_key_ref=client.V1SecretKeySelector(
-                            name=self.destination["secretKeySecretRef"]["name"],
-                            key=self.destination["secretKeySecretRef"]["key"],
-                        )
-                    ),
-                )
+        # Fetch S3 credentials from centralized secret and inject directly
+        if self.destination.get("s3CredentialsSecretRef"):
+            access_key, secret_key = self._get_s3_credentials()
+            common_env.extend(
+                [
+                    client.V1EnvVar(name="AWS_ACCESS_KEY_ID", value=access_key),
+                    client.V1EnvVar(name="AWS_SECRET_ACCESS_KEY", value=secret_key),
+                ]
             )
 
         # Volumes: mount the instance's filestore PVC and a scratch volume
@@ -272,29 +296,14 @@ class OdooBackupJobHandler:
                 value="true" if self.destination.get("insecure") else "false",
             ),
         ]
-        if self.destination.get("accessKeySecretRef"):
-            upload_env.append(
-                client.V1EnvVar(
-                    name="AWS_ACCESS_KEY_ID",
-                    value_from=client.V1EnvVarSource(
-                        secret_key_ref=client.V1SecretKeySelector(
-                            name=self.destination["accessKeySecretRef"]["name"],
-                            key=self.destination["accessKeySecretRef"]["key"],
-                        )
-                    ),
-                )
-            )
-        if self.destination.get("secretKeySecretRef"):
-            upload_env.append(
-                client.V1EnvVar(
-                    name="AWS_SECRET_ACCESS_KEY",
-                    value_from=client.V1EnvVarSource(
-                        secret_key_ref=client.V1SecretKeySelector(
-                            name=self.destination["secretKeySecretRef"]["name"],
-                            key=self.destination["secretKeySecretRef"]["key"],
-                        )
-                    ),
-                )
+        # Add S3 credentials (already fetched above)
+        if self.destination.get("s3CredentialsSecretRef"):
+            access_key, secret_key = self._get_s3_credentials()
+            upload_env.extend(
+                [
+                    client.V1EnvVar(name="AWS_ACCESS_KEY_ID", value=access_key),
+                    client.V1EnvVar(name="AWS_SECRET_ACCESS_KEY", value=secret_key),
+                ]
             )
 
         upload_container = client.V1Container(

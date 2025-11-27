@@ -3,6 +3,7 @@ from kubernetes.client.rest import ApiException
 import kopf
 import os
 import yaml
+import requests
 from typing import cast
 
 from .pull_secret import PullSecret
@@ -15,8 +16,6 @@ from .service import Service
 from .ingress_routes import IngressRouteHTTPS, IngressRouteWebsocket
 from .upgrade_job import UpgradeJob
 from .restore_job import RestoreJob
-from .init_job import InitJob
-from .database_initialization import DatabaseInitializationHandler
 from .resource_handler import ResourceHandler
 import logging
 from enum import Enum
@@ -66,13 +65,10 @@ class OdooHandler(ResourceHandler):
         self.service = Service(self)
         self.ingress_route_https = IngressRouteHTTPS(self)
         self.ingress_route_websocket = IngressRouteWebsocket(self)
-        self.database_initialization = DatabaseInitializationHandler(self)
-        self.init_job = InitJob(self)
         self.upgrade_job = UpgradeJob(self)
         self.restore_job = RestoreJob(self)
 
         # Create handlers list in the correct order for creation/update
-        # DatabaseInitializationHandler must be FIRST to patch the spec before other handlers run
         self.handlers = [
             self.pull_secret,
             self.odoo_user_secret,
@@ -83,31 +79,23 @@ class OdooHandler(ResourceHandler):
             self.service,
             self.ingress_route_https,
             self.ingress_route_websocket,
-            self.database_initialization,
         ]
 
-        # The Job handlers are handled separately and not included in the main handlers list
+        # The Job handlers (upgrade, restore) are handled separately
 
     def on_create(self):
         logging.info(f"Creating OdooInstance {self.name}")
         # Create all resources in the correct order
-        # DatabaseInitializationHandler runs first and may patch the instance with restore spec
         for handler in self.handlers:
             handler.handle_create()
 
-        # For fresh instances (no restore), run the init job to create the database
-        # The init job will set status to "Initializing" and then "Running" when complete
-        if not self.spec.get("restore"):
-            logging.info(f"Creating init job for fresh instance {self.name}")
-            self.init_job.handle_create()
-        # Note: We don't initialize status here - the init job handles that
+        # Initialize status to Running - database initialization is handled externally
+        # (either Odoo auto-initializes on first start, or a RestoreJob is created)
+        self._initialize_status()
 
     def on_update(self):
         """Handle update events for this OdooInstance."""
         logging.info(f"Handling update for OdooInstance {self.name}")
-
-        # Check for init job completion
-        self.init_job.handle_update()
 
         if self._is_restore_request() and self._should_execute_restore():
             logging.info(f"Restore requested for {self.name}")
@@ -248,8 +236,37 @@ class OdooHandler(ResourceHandler):
                 },
             )
             logging.info(f"Status initialized for {self.name}")
+            # Notify via webhook if configured
+            self._call_webhook("Running")
         except Exception as e:
             logging.error(f"Failed to initialize status for {self.name}: {e}")
+
+    def _call_webhook(self, phase: str, message: str = ""):
+        """Call the webhook URL if configured in the spec."""
+        webhook = self.spec.get("webhook", {})
+        url = webhook.get("url")
+        if not url:
+            return
+
+        try:
+            payload = {
+                "phase": phase,
+                "message": message,
+            }
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=10,
+                verify=True,
+            )
+            if response.status_code == 200:
+                logging.info(f"Webhook called successfully for {self.name}: {phase}")
+            else:
+                logging.warning(
+                    f"Webhook returned {response.status_code} for {self.name}: {response.text}"
+                )
+        except Exception as e:
+            logging.warning(f"Failed to call webhook for {self.name}: {e}")
 
     def _check_status(self):
         """
@@ -270,9 +287,6 @@ class OdooHandler(ResourceHandler):
             return
         if phase == "Running":
             logging.debug(f"Status for {self.name} is Running. No action needed.")
-            return
-        if phase == "Initializing" and self.init_job.is_running:
-            logging.debug(f"Status for {self.name} is Initializing. No action needed.")
             return
         if phase == "Upgrading" and self.upgrade_job.is_running:
             logging.debug(f"Status for {self.name} is Upgrading. No action needed.")

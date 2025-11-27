@@ -15,10 +15,14 @@ from __future__ import annotations
 from typing import Any, Optional
 from kubernetes import client
 from kubernetes.client.rest import ApiException
+import base64
 import logging
 import os
 
 logger = logging.getLogger(__name__)
+
+# Default namespace for S3 credentials secret
+OPERATOR_NAMESPACE = os.environ.get("OPERATOR_NAMESPACE", "odoo-operator")
 
 
 class OdooRestoreJobHandler:
@@ -50,6 +54,45 @@ class OdooRestoreJobHandler:
             uid=self.uid,
             block_owner_deletion=True,
         )
+
+    def _get_s3_credentials(self, s3_config: dict) -> tuple[str, str]:
+        """Fetch S3 credentials from the referenced secret.
+
+        Args:
+            s3_config: The s3 source configuration dict
+
+        Returns:
+            Tuple of (access_key, secret_key)
+        """
+        secret_ref = s3_config.get("s3CredentialsSecretRef", {})
+        secret_name = secret_ref.get("name")
+        secret_namespace = secret_ref.get("namespace", OPERATOR_NAMESPACE)
+
+        if not secret_name:
+            raise ValueError("s3CredentialsSecretRef.name is required")
+
+        try:
+            secret = client.CoreV1Api().read_namespaced_secret(
+                name=secret_name,
+                namespace=secret_namespace,
+            )
+            access_key = base64.b64decode(secret.data.get("accessKey", "")).decode(
+                "utf-8"
+            )
+            secret_key = base64.b64decode(secret.data.get("secretKey", "")).decode(
+                "utf-8"
+            )
+
+            if not access_key or not secret_key:
+                raise ValueError(
+                    f"Secret {secret_namespace}/{secret_name} missing accessKey or secretKey"
+                )
+
+            return access_key, secret_key
+        except ApiException as e:
+            raise ValueError(
+                f"Failed to read S3 credentials secret {secret_namespace}/{secret_name}: {e}"
+            )
 
     def on_create(self):
         """Handle creation of OdooRestoreJob - create the restore Job."""
@@ -85,6 +128,9 @@ class OdooRestoreJobHandler:
         if not isinstance(odoo_instance, dict):
             self._update_status("Failed", message="Invalid OdooInstance response")
             return
+
+        # Scale down the deployment before restore
+        self._scale_deployment(instance_name, instance_ns, 0)
 
         job = self._create_restore_job(odoo_instance)
         if job is None or job.metadata is None:
@@ -139,6 +185,7 @@ class OdooRestoreJobHandler:
             if job_status.completion_time is not None:
                 completion_time = job_status.completion_time.isoformat()
             self._update_status("Completed", completion_time=completion_time)
+            self._scale_instance_back_up()
             self._notify_webhook("Completed")
         elif job_status.failed:
             completion_time = None
@@ -149,6 +196,7 @@ class OdooRestoreJobHandler:
                 completion_time=completion_time,
                 message="Restore job failed",
             )
+            self._scale_instance_back_up()
             self._notify_webhook("Failed")
 
     def _create_restore_job(self, odoo_instance: dict[str, Any]) -> client.V1Job:
@@ -274,8 +322,6 @@ class OdooRestoreJobHandler:
         object_key = s3_config.get("objectKey", "")
         endpoint = s3_config.get("endpoint", "")
         insecure = s3_config.get("insecure", False)
-        access_key_ref = s3_config.get("accessKeySecretRef", {})
-        secret_key_ref = s3_config.get("secretKeySecretRef", {})
 
         # Determine output filename based on format
         if self.format == "zip":
@@ -285,6 +331,9 @@ class OdooRestoreJobHandler:
         else:
             output_file = "/mnt/backup/dump.sql"
 
+        # Fetch S3 credentials from centralized secret
+        access_key, secret_key = self._get_s3_credentials(s3_config)
+
         env = [
             client.V1EnvVar(name="S3_BUCKET", value=bucket),
             client.V1EnvVar(name="S3_KEY", value=object_key),
@@ -292,24 +341,8 @@ class OdooRestoreJobHandler:
             client.V1EnvVar(name="S3_INSECURE", value="true" if insecure else "false"),
             client.V1EnvVar(name="OUTPUT_FILE", value=output_file),
             client.V1EnvVar(name="MC_CONFIG_DIR", value="/tmp/.mc"),
-            client.V1EnvVar(
-                name="AWS_ACCESS_KEY_ID",
-                value_from=client.V1EnvVarSource(
-                    secret_key_ref=client.V1SecretKeySelector(
-                        name=access_key_ref.get("name", ""),
-                        key=access_key_ref.get("key", "accessKey"),
-                    )
-                ),
-            ),
-            client.V1EnvVar(
-                name="AWS_SECRET_ACCESS_KEY",
-                value_from=client.V1EnvVarSource(
-                    secret_key_ref=client.V1SecretKeySelector(
-                        name=secret_key_ref.get("name", ""),
-                        key=secret_key_ref.get("key", "secretKey"),
-                    )
-                ),
-            ),
+            client.V1EnvVar(name="AWS_ACCESS_KEY_ID", value=access_key),
+            client.V1EnvVar(name="AWS_SECRET_ACCESS_KEY", value=secret_key),
         ]
 
         script = """
@@ -375,6 +408,43 @@ curl -X POST \\
 
 echo "Download complete:"
 ls -lh {output_file}
+
+# Validate the downloaded file
+echo "Validating downloaded file..."
+FILE_SIZE=$(stat -c%s {output_file} 2>/dev/null || stat -f%z {output_file})
+echo "File size: $FILE_SIZE bytes"
+
+# Check minimum file size (100KB) - a real backup should be larger
+if [ "$FILE_SIZE" -lt 102400 ]; then
+    echo "ERROR: Downloaded file is too small ($FILE_SIZE bytes) - likely an error response!"
+    echo "File contents:"
+    cat {output_file}
+    exit 1
+fi
+
+if [ "{backup_format}" = "zip" ]; then
+    # Check if it starts with PK (zip magic bytes)
+    MAGIC=$(head -c 2 {output_file} | od -An -tx1 | tr -d ' ')
+    if [ "$MAGIC" != "504b" ]; then
+        echo "ERROR: Downloaded file is not a valid zip file (magic: $MAGIC)!"
+        echo "File contents (first 500 bytes):"
+        head -c 500 {output_file}
+        exit 1
+    fi
+    echo "Valid zip file confirmed (PK header found)"
+else
+    # For dump format, check it starts with SQL or pg_dump header
+    HEADER=$(head -c 5 {output_file})
+    if echo "$HEADER" | grep -qE '^(--|PGDMP|CREAT|SET )'; then
+        echo "Valid SQL dump confirmed"
+    else
+        echo "ERROR: Downloaded file does not appear to be a valid SQL dump!"
+        echo "File contents (first 500 bytes):"
+        head -c 500 {output_file}
+        exit 1
+    fi
+fi
+
 echo "=== Odoo download complete ==="
 """
 
@@ -563,3 +633,46 @@ echo "=== Restore process complete ==="
             logger.info(f"Webhook notification sent: {resp.status_code}")
         except Exception as e:
             logger.warning(f"Webhook notification failed: {e}")
+
+    def _scale_deployment(self, instance_name: str, instance_ns: str, replicas: int):
+        """Scale the OdooInstance deployment to the specified number of replicas."""
+        try:
+            apps_api = client.AppsV1Api()
+            apps_api.patch_namespaced_deployment_scale(
+                name=instance_name,
+                namespace=instance_ns,
+                body={"spec": {"replicas": replicas}},
+            )
+            logger.info(f"Scaled deployment {instance_name} to {replicas} replicas")
+        except ApiException as e:
+            if e.status == 404:
+                logger.warning(f"Deployment {instance_name} not found, cannot scale")
+            else:
+                logger.error(f"Failed to scale deployment {instance_name}: {e}")
+
+    def _scale_instance_back_up(self):
+        """Scale the OdooInstance deployment back up after restore completes."""
+        instance_name = self.odoo_instance_ref.get("name")
+        instance_ns = self.odoo_instance_ref.get("namespace", self.namespace)
+
+        if not instance_name:
+            logger.warning("No instance name found, cannot scale up")
+            return
+
+        # Get the desired replicas from the OdooInstance spec
+        try:
+            odoo_instance = client.CustomObjectsApi().get_namespaced_custom_object(
+                group="bemade.org",
+                version="v1",
+                namespace=instance_ns,
+                plural="odooinstances",
+                name=instance_name,
+            )
+            replicas = odoo_instance.get("spec", {}).get("replicas", 1)
+        except ApiException as e:
+            logger.warning(
+                f"Could not get OdooInstance {instance_name}, defaulting to 1 replica: {e}"
+            )
+            replicas = 1
+
+        self._scale_deployment(instance_name, instance_ns, replicas)
