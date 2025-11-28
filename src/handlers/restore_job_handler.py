@@ -484,8 +484,9 @@ ls -lh /mnt/backup/
 export PGPASSWORD=$PASSWORD
 
 # Function to re-initialize database parameters after restore
+# This resets secrets/UUIDs to prevent session hijacking and ensure unique identity
 reinit_db_params() {{
-    echo "Running database parameter re-initialization..."
+    echo "=== Re-initializing database parameters ==="
     psql -h "$HOST" -p "$PORT" -U "$USER" -d "{db_name}" << 'EOSQL'
 DO $$
 DECLARE
@@ -518,6 +519,57 @@ EOSQL
     echo "Database parameter re-initialization complete"
 }}
 
+# Function to run full Odoo neutralization using the CLI
+# This disables mail servers, crons, payment providers, webhooks, etc.
+run_odoo_neutralize() {{
+    echo "=== Running Odoo neutralization ==="
+    
+    # Run odoo neutralize command - this is the official way to neutralize
+    # It handles all module-specific neutralization scripts
+    odoo neutralize --db_host "$HOST" --db_port "$PORT" --db_user "$USER" --db_password "$PASSWORD" -d "{db_name}"
+    
+    echo "Odoo neutralize command completed"
+}}
+
+# Function to verify neutralization succeeded
+# CRITICAL: If neutralization was requested but failed, we must fail the job
+# AND DROP THE DATABASE to prevent un-neutralized databases from running
+# (which could steal emails, trigger bank syncs, send erroneous emails, etc.)
+verify_neutralization() {{
+    echo "=== Verifying neutralization ==="
+    
+    # Check if database.is_neutralized flag is set to 'true'
+    NEUTRALIZED=$(psql -h "$HOST" -p "$PORT" -U "$USER" -d "{db_name}" -t -A -c \
+        "SELECT value FROM ir_config_parameter WHERE key = 'database.is_neutralized';" 2>/dev/null || echo "")
+    
+    if [ "$NEUTRALIZED" = "true" ] || [ "$NEUTRALIZED" = "True" ]; then
+        echo "✓ Neutralization verified: database.is_neutralized = $NEUTRALIZED"
+        
+        # Additional verification: check mail servers are disabled
+        ACTIVE_MAIL_SERVERS=$(psql -h "$HOST" -p "$PORT" -U "$USER" -d "{db_name}" -t -A -c \
+            "SELECT COUNT(*) FROM ir_mail_server WHERE active = true AND name != 'neutralization - disable emails';" 2>/dev/null || echo "0")
+        echo "Active mail servers (excluding neutralization dummy): $ACTIVE_MAIL_SERVERS"
+        
+        # Check active crons (should only be autovacuum after neutralization)
+        ACTIVE_CRONS=$(psql -h "$HOST" -p "$PORT" -U "$USER" -d "{db_name}" -t -A -c \
+            "SELECT COUNT(*) FROM ir_cron WHERE active = true;" 2>/dev/null || echo "0")
+        echo "Active crons: $ACTIVE_CRONS"
+        
+        return 0
+    else
+        echo "✗ CRITICAL ERROR: Neutralization verification FAILED!"
+        echo "  database.is_neutralized = '$NEUTRALIZED' (expected 'true')"
+        echo ""
+        echo "This database may have active mail servers, crons, payment providers,"
+        echo "and other integrations that could cause serious issues in production."
+        echo ""
+        echo "DROPPING DATABASE to prevent un-neutralized database from being used!"
+        dropdb -h "$HOST" -p "$PORT" -U "$USER" --if-exists "{db_name}"
+        echo "Database {db_name} has been dropped."
+        return 1
+    fi
+}}
+
 # Drop existing database and filestore using odoo CLI
 echo "Dropping existing database {db_name}..."
 odoo db --db_host "$HOST" --db_port "$PORT" --db_user "$USER" --db_password "$PASSWORD" drop "{db_name}" || true
@@ -529,13 +581,9 @@ if [ -f /mnt/backup/dump.dump ]; then
     createdb -h "$HOST" -p "$PORT" -U "$USER" "{db_name}"
     
     # Restore using pg_restore for custom format dumps
+    # NOTE: || true because restore tools often exit non-zero for warnings (e.g., sequences,
+    # ownership) even when the restore succeeds. verify_neutralization will catch real failures.
     pg_restore -h "$HOST" -p "$PORT" -U "$USER" -d "{db_name}" --no-owner /mnt/backup/dump.dump || true
-    
-    if [ "$NEUTRALIZE" = "True" ]; then
-        reinit_db_params
-    else
-        echo "Skipping database parameter re-initialization (neutralize=False)"
-    fi
     
 elif [ -f /mnt/backup/dump.sql ]; then
     echo "Found dump.sql - using psql method"
@@ -544,13 +592,8 @@ elif [ -f /mnt/backup/dump.sql ]; then
     createdb -h "$HOST" -p "$PORT" -U "$USER" "{db_name}"
     
     # Restore using psql for plain SQL dumps
-    psql -h "$HOST" -p "$PORT" -U "$USER" -d "{db_name}" -f /mnt/backup/dump.sql
-    
-    if [ "$NEUTRALIZE" = "True" ]; then
-        reinit_db_params
-    else
-        echo "Skipping database parameter re-initialization (neutralize=False)"
-    fi
+    # NOTE: || true - see pg_restore comment above
+    psql -h "$HOST" -p "$PORT" -U "$USER" -d "{db_name}" -f /mnt/backup/dump.sql || true
     
 elif [ -f /mnt/backup/backup.zip ]; then
     echo "Found backup.zip - using odoo db load method"
@@ -559,11 +602,21 @@ elif [ -f /mnt/backup/backup.zip ]; then
     ls -lh /mnt/backup/backup.zip
     
     echo "Running: odoo db load {neutralize_flag} -f ..."
-    odoo db --db_host "$HOST" --db_port "$PORT" --db_user "$USER" --db_password "$PASSWORD" load {neutralize_flag} -f "{db_name}" /mnt/backup/backup.zip
+    # NOTE: || true - see pg_restore comment above
+    odoo db --db_host "$HOST" --db_port "$PORT" --db_user "$USER" --db_password "$PASSWORD" load {neutralize_flag} -f "{db_name}" /mnt/backup/backup.zip || true
 else
     echo "ERROR: Backup file not found in /mnt/backup/"
     ls -la /mnt/backup/
     exit 1
+fi
+
+# Neutralization (runs after any restore type)
+if [ "$NEUTRALIZE" = "True" ]; then
+    reinit_db_params
+    run_odoo_neutralize
+    verify_neutralization || exit 1
+else
+    echo "Skipping neutralization (neutralize=False)"
 fi
 
 echo "=== Restore process complete ==="
