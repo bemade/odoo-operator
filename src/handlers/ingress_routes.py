@@ -2,7 +2,7 @@ from kubernetes import client
 from .resource_handler import ResourceHandler, update_if_exists, create_if_missing
 
 
-class IngressRouteBase(ResourceHandler):
+class IngressRoute(ResourceHandler):
     """Base class for Traefik IngressRoute resources."""
 
     def __init__(self, handler):
@@ -24,28 +24,15 @@ class IngressRouteBase(ResourceHandler):
 
     def _build_ingress_route_spec(self):
         """Build the IngressRoute spec based on configuration from child class."""
-        # Get route configuration from child class
-        config = self._get_route_config()
-
-        # Extract configuration values
-        entrypoint = config.get("entrypoint")
-        port = config.get("port")
-        middlewares = config.get("middlewares", [])
-        match_suffix = config.get("match_suffix", "")
-        tls_enabled = config.get("tls", True)
 
         # Build TLS configuration
-        tls = {}
-        if tls_enabled and self.tls_cert.resource:
-            tls = {"secretName": self.tls_cert.resource.get("metadata", {}).get("name")}
+        tls = {"secretName": self.tls_cert.resource.get("metadata", {}).get("name")}
 
         # Get hostnames from spec
         hostnames = self.spec.get("ingress", {}).get("hosts", [])
 
         # Build match rule
         match_rule = " || ".join(f"Host(`{hostname}`)" for hostname in hostnames or [])
-        if match_suffix:
-            match_rule += match_suffix
 
         # Return the complete spec
         return {
@@ -56,23 +43,36 @@ class IngressRouteBase(ResourceHandler):
                 "ownerReferences": [self.owner_reference],
             },
             "spec": {
-                "entryPoints": [entrypoint],
+                "entryPoints": ["websecure"],
                 "routes": [
                     {
                         "kind": "Rule",
                         "match": match_rule,
-                        "middlewares": middlewares,
                         "services": [
                             {
                                 "kind": "Service",
                                 "name": self.name,
                                 "namespace": self.namespace,
                                 "passHostHeader": True,
-                                "port": port,
+                                "port": 8069,
                                 "scheme": "http",
-                            }
+                            },
                         ],
-                    }
+                    },
+                    {
+                        "kind": "Rule",
+                        "match": match_rule + " && PathPrefix(`/websocket`)",
+                        "services": [
+                            {
+                                "kind": "Service",
+                                "name": self.name,
+                                "namespace": self.namespace,
+                                "passHostHeader": True,
+                                "port": 8072,
+                                "scheme": "http",
+                            },
+                        ],
+                    },
                 ],
                 "tls": tls,
             },
@@ -110,39 +110,3 @@ class IngressRouteBase(ResourceHandler):
     def _get_route_name(self):
         """Return the name of the ingress route."""
         raise NotImplementedError()
-
-
-class IngressRouteHTTPS(IngressRouteBase):
-    """Manages the HTTPS IngressRoute for Odoo."""
-
-    def _get_route_config(self):
-        return {
-            "suffix": "https",
-            "entrypoint": "websecure",
-            "port": 8069,
-            "middlewares": [],
-        }
-
-    def _get_route_name(self):
-        return f"{self.name}-https"
-
-
-class IngressRouteWebsocket(IngressRouteBase):
-    """Manages the Websocket IngressRoute for Odoo."""
-
-    def _get_route_config(self):
-        return {
-            "suffix": "websocket",
-            "entrypoint": "websecure",
-            "port": 8072,
-            "middlewares": [
-                # {
-                #     "name": "remove-prefix",
-                #     "namespace": self.operator_ns,
-                # },
-            ],
-            "match_suffix": " && PathPrefix(`/websocket`)",
-        }
-
-    def _get_route_name(self):
-        return f"{self.name}-websocket"
