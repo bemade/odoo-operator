@@ -18,6 +18,7 @@ from kubernetes.client.rest import ApiException
 import base64
 import logging
 import os
+from typing import cast
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +73,17 @@ class OdooRestoreJobHandler:
             raise ValueError("s3CredentialsSecretRef.name is required")
 
         try:
-            secret = client.CoreV1Api().read_namespaced_secret(
-                name=secret_name,
-                namespace=secret_namespace,
+            secret = cast(
+                client.V1Secret,
+                client.CoreV1Api().read_namespaced_secret(
+                    name=secret_name,
+                    namespace=secret_namespace,
+                ),
             )
+            if not secret.data:
+                raise ValueError(
+                    f"Secret {secret_namespace}/{secret_name} missing data"
+                )
             access_key = base64.b64decode(secret.data.get("accessKey", "")).decode(
                 "utf-8"
             )
@@ -130,7 +138,7 @@ class OdooRestoreJobHandler:
             return
 
         # Check if instance is already being upgraded or restored
-        instance_phase = odoo_instance.get("status", {}).get("phase")
+        instance_phase = odoo_instance.get("status", {}).get("phase") # pyright: ignore
         if instance_phase in ("Upgrading", "Restoring"):
             self._update_status(
                 "Failed",
