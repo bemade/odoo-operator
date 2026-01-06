@@ -20,6 +20,8 @@ import logging
 import os
 from typing import cast
 
+from .deployment import get_odoo_volumes_and_mounts
+
 logger = logging.getLogger(__name__)
 
 # Default namespace for S3 credentials secret
@@ -138,7 +140,7 @@ class OdooRestoreJobHandler:
             return
 
         # Check if instance is already being upgraded or restored
-        instance_phase = odoo_instance.get("status", {}).get("phase") # pyright: ignore
+        instance_phase = odoo_instance.get("status", {}).get("phase")  # pyright: ignore
         if instance_phase in ("Upgrading", "Restoring"):
             self._update_status(
                 "Failed",
@@ -246,21 +248,16 @@ class OdooRestoreJobHandler:
             owner_references=[self.owner_reference],
         )
 
-        # Volumes
-        volumes = [
-            client.V1Volume(
-                name="filestore",
-                persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                    claim_name=f"{instance_name}-filestore-pvc"
-                ),
-            ),
-            client.V1Volume(name="backup", empty_dir=client.V1EmptyDirVolumeSource()),
-        ]
+        # Get standard volumes and mounts (includes filestore and odoo-conf for addons)
+        volumes, volume_mounts = get_odoo_volumes_and_mounts(instance_name)
 
-        volume_mounts = [
-            client.V1VolumeMount(name="filestore", mount_path="/var/lib/odoo"),
-            client.V1VolumeMount(name="backup", mount_path="/mnt/backup"),
-        ]
+        # Add backup scratch volume for restore operations
+        volumes.append(
+            client.V1Volume(name="backup", empty_dir=client.V1EmptyDirVolumeSource())
+        )
+        volume_mounts.append(
+            client.V1VolumeMount(name="backup", mount_path="/mnt/backup")
+        )
 
         # Build init container based on source type
         if self.source_type == "s3":

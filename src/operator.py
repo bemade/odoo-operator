@@ -76,6 +76,7 @@ def configure_webhook(settings: kopf.OperatorSettings, *args, **kwargs):
 def restart_fn(*args, **kwargs):
     update_fn(*args, **kwargs)
 
+
 def _classify_and_raise_api_exception(e: ApiException):
     """Map K8s ApiException to kopf Permanent/Temporary errors.
 

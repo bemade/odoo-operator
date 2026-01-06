@@ -204,32 +204,49 @@ class Deployment(ResourceHandler):
     def get_volumes_and_mounts(
         self,
     ) -> Tuple[List[client.V1Volume], List[client.V1VolumeMount]]:
-        # Define volumes
-        volumes = [
-            client.V1Volume(
-                name="filestore",
-                persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                    claim_name=f"{self.name}-filestore-pvc"
-                ),
-            ),
-            client.V1Volume(
-                name="odoo-conf",
-                config_map=client.V1ConfigMapVolumeSource(
-                    name=f"{self.name}-odoo-conf"
-                ),
-            ),
-        ]
+        return get_odoo_volumes_and_mounts(self.name)
 
-        # Define volume mounts
-        volume_mounts = [
-            client.V1VolumeMount(
-                name="filestore",
-                mount_path="/var/lib/odoo",
-            ),
-            client.V1VolumeMount(
-                name="odoo-conf",
-                mount_path="/etc/odoo",
-            ),
-        ]
 
-        return volumes, volume_mounts
+def get_odoo_volumes_and_mounts(
+    instance_name: str,
+) -> Tuple[List[client.V1Volume], List[client.V1VolumeMount]]:
+    """
+    Get the standard volumes and volume mounts for an Odoo instance.
+
+    This includes:
+    - filestore PVC: persistent storage for attachments and session data
+    - odoo-conf ConfigMap: Odoo configuration including addons paths
+
+    Args:
+        instance_name: The name of the OdooInstance
+
+    Returns:
+        Tuple of (volumes, volume_mounts) for use in pod specs
+    """
+    volumes = [
+        client.V1Volume(
+            name="filestore",
+            persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                claim_name=f"{instance_name}-filestore-pvc"
+            ),
+        ),
+        client.V1Volume(
+            name="odoo-conf",
+            config_map=client.V1ConfigMapVolumeSource(
+                name=f"{instance_name}-odoo-conf"
+            ),
+        ),
+    ]
+
+    volume_mounts = [
+        client.V1VolumeMount(
+            name="filestore",
+            mount_path="/var/lib/odoo",
+        ),
+        client.V1VolumeMount(
+            name="odoo-conf",
+            mount_path="/etc/odoo",
+        ),
+    ]
+
+    return volumes, volume_mounts

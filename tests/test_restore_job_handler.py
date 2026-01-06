@@ -286,3 +286,61 @@ def test_create_restore_job_odoo_source(monkeypatch):
     # Should use odoo download container path (curl image)
     assert init.name == "download"
     assert "curl" in init.image
+
+
+def test_restore_job_has_required_volumes(monkeypatch):
+    """Verify restore job mounts filestore PVC, odoo-conf ConfigMap, and backup scratch volume."""
+    body = _make_body()
+    handler = OdooRestoreJobHandler(body)
+
+    # Fake S3 secret
+    access = base64.b64encode(b"AK").decode()
+    secret = base64.b64encode(b"SK").decode()
+    monkeypatch.setattr(
+        "handlers.restore_job_handler.client.CoreV1Api.read_namespaced_secret",
+        lambda self, name, namespace: SimpleNamespace(
+            data={"accessKey": access, "secretKey": secret}
+        ),
+    )
+    monkeypatch.setattr(
+        "handlers.restore_job_handler.client.BatchV1Api.create_namespaced_job",
+        lambda self, namespace, body: body,
+    )
+
+    job = handler._create_restore_job(_make_instance())
+    pod_spec = job.spec.template.spec
+
+    # Check volumes
+    volume_names = {v.name for v in pod_spec.volumes}
+    assert "filestore" in volume_names, "Missing filestore volume"
+    assert "odoo-conf" in volume_names, "Missing odoo-conf volume for addons"
+    assert "backup" in volume_names, "Missing backup scratch volume"
+
+    # Verify volume sources
+    volumes_by_name = {v.name: v for v in pod_spec.volumes}
+    assert (
+        volumes_by_name["filestore"].persistent_volume_claim.claim_name
+        == "demo-filestore-pvc"
+    )
+    assert volumes_by_name["odoo-conf"].config_map.name == "demo-odoo-conf"
+    assert volumes_by_name["backup"].empty_dir is not None
+
+    # Check volume mounts on the restore container
+    restore_container = pod_spec.containers[0]
+    mount_names = {m.name for m in restore_container.volume_mounts}
+    assert "filestore" in mount_names, "Restore container missing filestore mount"
+    assert (
+        "odoo-conf" in mount_names
+    ), "Restore container missing odoo-conf mount for addons"
+    assert "backup" in mount_names, "Restore container missing backup mount"
+
+    # Verify mount paths
+    mounts_by_name = {m.name: m for m in restore_container.volume_mounts}
+    assert mounts_by_name["filestore"].mount_path == "/var/lib/odoo"
+    assert mounts_by_name["odoo-conf"].mount_path == "/etc/odoo"
+    assert mounts_by_name["backup"].mount_path == "/mnt/backup"
+
+    # Check init container also has the mounts
+    init_container = pod_spec.init_containers[0]
+    init_mount_names = {m.name for m in init_container.volume_mounts}
+    assert "backup" in init_mount_names, "Init container missing backup mount"

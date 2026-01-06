@@ -14,6 +14,8 @@ import base64
 import logging
 import os
 
+from .deployment import get_odoo_volumes_and_mounts
+
 logger = logging.getLogger(__name__)
 
 # Default namespace for S3 credentials secret
@@ -252,24 +254,17 @@ class OdooBackupJobHandler:
                 ]
             )
 
-        # Volumes: mount the instance's filestore PVC and a scratch volume
-        volumes = [
-            client.V1Volume(
-                name="filestore",
-                persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                    claim_name=f"{instance_meta.get('name')}-filestore-pvc"
-                ),
-            ),
-            client.V1Volume(
-                name="backup",
-                empty_dir=client.V1EmptyDirVolumeSource(),
-            ),
-        ]
+        # Get standard volumes and mounts (includes filestore and odoo-conf for addons)
+        instance_name = instance_meta.get("name")
+        volumes, volume_mounts = get_odoo_volumes_and_mounts(instance_name)
 
-        volume_mounts = [
-            client.V1VolumeMount(name="filestore", mount_path="/var/lib/odoo"),
-            client.V1VolumeMount(name="backup", mount_path="/mnt/backup"),
-        ]
+        # Add backup scratch volume for backup operations
+        volumes.append(
+            client.V1Volume(name="backup", empty_dir=client.V1EmptyDirVolumeSource())
+        )
+        volume_mounts.append(
+            client.V1VolumeMount(name="backup", mount_path="/mnt/backup")
+        )
 
         # Build the backup script
         script = self._backup_script(db_name)

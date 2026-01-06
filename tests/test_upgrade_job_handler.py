@@ -106,6 +106,44 @@ def test_create_upgrade_job_builds_spec(monkeypatch):
     assert pull[0].name == "pullme"
 
 
+def test_upgrade_job_has_required_volumes(monkeypatch):
+    """Verify upgrade job mounts filestore PVC and odoo-conf ConfigMap for addons."""
+    body = _make_body(modules=["base"])
+    handler = OdooUpgradeJobHandler(body)
+
+    monkeypatch.setattr(
+        "handlers.upgrade_job_handler.client.BatchV1Api.create_namespaced_job",
+        lambda self, namespace, body: body,
+    )
+
+    job = handler._create_upgrade_job(_make_instance())
+    pod_spec = job.spec.template.spec
+
+    # Check volumes
+    volume_names = {v.name for v in pod_spec.volumes}
+    assert "filestore" in volume_names, "Missing filestore volume"
+    assert "odoo-conf" in volume_names, "Missing odoo-conf volume for addons"
+
+    # Verify volume sources
+    volumes_by_name = {v.name: v for v in pod_spec.volumes}
+    assert (
+        volumes_by_name["filestore"].persistent_volume_claim.claim_name
+        == "demo-filestore-pvc"
+    )
+    assert volumes_by_name["odoo-conf"].config_map.name == "demo-odoo-conf"
+
+    # Check volume mounts on the upgrade container
+    container = pod_spec.containers[0]
+    mount_names = {m.name for m in container.volume_mounts}
+    assert "filestore" in mount_names, "Container missing filestore mount"
+    assert "odoo-conf" in mount_names, "Container missing odoo-conf mount for addons"
+
+    # Verify mount paths
+    mounts_by_name = {m.name: m for m in container.volume_mounts}
+    assert mounts_by_name["filestore"].mount_path == "/var/lib/odoo"
+    assert mounts_by_name["odoo-conf"].mount_path == "/etc/odoo"
+
+
 def test_on_create_missing_instance(monkeypatch):
     body = _make_body()
     handler = OdooUpgradeJobHandler(body)

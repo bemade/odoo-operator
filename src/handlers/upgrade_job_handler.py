@@ -13,6 +13,8 @@ from kubernetes.client.rest import ApiException
 import logging
 import os
 
+from .deployment import get_odoo_volumes_and_mounts
+
 logger = logging.getLogger(__name__)
 
 
@@ -215,19 +217,8 @@ class OdooUpgradeJobHandler:
             ),
         ]
 
-        # Volumes: mount the instance's filestore PVC
-        volumes = [
-            client.V1Volume(
-                name="filestore",
-                persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                    claim_name=f"{instance_name}-filestore-pvc"
-                ),
-            ),
-        ]
-
-        volume_mounts = [
-            client.V1VolumeMount(name="filestore", mount_path="/var/lib/odoo"),
-        ]
+        # Get volumes and mounts from the shared utility (includes filestore and odoo-conf)
+        volumes, volume_mounts = get_odoo_volumes_and_mounts(instance_name)
 
         upgrade_container = client.V1Container(
             name="odoo-upgrade",
