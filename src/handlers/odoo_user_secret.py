@@ -61,6 +61,7 @@ class OdooUserSecret(ResourceHandler):
             port=pg_cluster.port,
             user=pg_cluster.admin_user,
             password=pg_cluster.admin_password,
+            database="postgres",
         ) as conn:
             with conn.cursor() as cur:
                 cur.execute(
