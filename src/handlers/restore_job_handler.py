@@ -12,15 +12,15 @@ Supports two source types:
 """
 
 from __future__ import annotations
-from typing import Any, Optional
+from typing import Any, Optional, cast
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 import base64
 import logging
 import os
-from typing import cast
 
 from .deployment import get_odoo_volumes_and_mounts
+from .postgres_clusters import get_cluster_for_instance
 
 logger = logging.getLogger(__name__)
 
@@ -265,13 +265,12 @@ class OdooRestoreJobHandler:
         else:
             init_container = self._build_odoo_download_container(volume_mounts)
 
-        # Environment variables for database connection
-        db_host = os.environ.get("DB_HOST", "postgres")
-        db_port = os.environ.get("DB_PORT", "5432")
+        # Get the PostgreSQL cluster configuration for this instance
+        pg_cluster = get_cluster_for_instance(instance_spec)
 
         db_env = [
-            client.V1EnvVar(name="HOST", value=db_host),
-            client.V1EnvVar(name="PORT", value=db_port),
+            client.V1EnvVar(name="HOST", value=pg_cluster.host),
+            client.V1EnvVar(name="PORT", value=str(pg_cluster.port)),
             client.V1EnvVar(
                 name="USER",
                 value_from=client.V1EnvVarSource(

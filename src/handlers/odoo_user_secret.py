@@ -1,7 +1,7 @@
 from kubernetes import client
 from .resource_handler import ResourceHandler, update_if_exists, create_if_missing
+from .postgres_clusters import get_cluster_for_instance
 import secrets
-import os
 import psycopg2
 import base64
 
@@ -53,17 +53,14 @@ class OdooUserSecret(ResourceHandler):
         # Delete the user if it already exists
         self._delete_odoo_db_user()
 
-        # Create the database user
-        db_host = os.environ["DB_HOST"]
-        db_port = os.environ["DB_PORT"]
-        db_superuser = os.environ["DB_ADMIN_USER"]
-        db_superuser_password = os.environ["DB_ADMIN_PASSWORD"]
+        # Get the PostgreSQL cluster configuration for this instance
+        pg_cluster = get_cluster_for_instance(self.spec)
 
         with psycopg2.connect(
-            host=db_host,
-            port=db_port,
-            user=db_superuser,
-            password=db_superuser_password,
+            host=pg_cluster.host,
+            port=pg_cluster.port,
+            user=pg_cluster.admin_user,
+            password=pg_cluster.admin_password,
         ) as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -73,17 +70,15 @@ class OdooUserSecret(ResourceHandler):
         return username, password
 
     def _delete_odoo_db_user(self):
-        db_host = os.environ["DB_HOST"]
-        db_port = os.environ["DB_PORT"]
-        db_superuser = os.environ["DB_ADMIN_USER"]
-        db_superuser_password = os.environ["DB_ADMIN_PASSWORD"]
+        # Get the PostgreSQL cluster configuration for this instance
+        pg_cluster = get_cluster_for_instance(self.spec)
         username = f"odoo.{self.namespace}.{self.name}"
 
         conn = psycopg2.connect(
-            host=db_host,
-            port=db_port,
-            user=db_superuser,
-            password=db_superuser_password,
+            host=pg_cluster.host,
+            port=pg_cluster.port,
+            user=pg_cluster.admin_user,
+            password=pg_cluster.admin_password,
             database="postgres",
         )
         conn.autocommit = True

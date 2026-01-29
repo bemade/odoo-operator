@@ -1,9 +1,9 @@
 from __future__ import annotations
 from kubernetes import client
 from .resource_handler import ResourceHandler, update_if_exists, create_if_missing
+from .postgres_clusters import get_cluster_for_instance
 import logging
-import os
-from typing import cast, TYPE_CHECKING, Tuple, List
+from typing import TYPE_CHECKING, Tuple, List
 
 if TYPE_CHECKING:
     from .odoo_handler import OdooHandler
@@ -167,17 +167,17 @@ class Deployment(ResourceHandler):
 
         Returns common environment variables including Python path if configured.
         """
-        db_host = os.environ["DB_HOST"]
-        db_port = os.environ["DB_PORT"]
+        # Get the PostgreSQL cluster configuration for this instance
+        pg_cluster = get_cluster_for_instance(self.spec)
 
         env_vars = [
             client.V1EnvVar(
                 name="HOST",
-                value=db_host,
+                value=pg_cluster.host,
             ),
             client.V1EnvVar(
                 name="PORT",
-                value=db_port,
+                value=str(pg_cluster.port),
             ),
             client.V1EnvVar(
                 name="USER",

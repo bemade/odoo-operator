@@ -15,6 +15,8 @@ import base64
 import logging
 import os
 
+from .postgres_clusters import get_cluster_for_instance
+
 logger = logging.getLogger(__name__)
 
 
@@ -188,14 +190,13 @@ class OdooInitJobHandler:
             owner_references=[self.owner_reference],
         )
 
-        # Get DB connection info
-        db_host = os.environ.get("DB_HOST", "postgres")
-        db_port = os.environ.get("DB_PORT", "5432")
+        # Get the PostgreSQL cluster configuration for this instance
+        pg_cluster = get_cluster_for_instance(instance_spec)
 
         # Environment variables for database connection
         db_env = [
-            client.V1EnvVar(name="HOST", value=db_host),
-            client.V1EnvVar(name="PORT", value=db_port),
+            client.V1EnvVar(name="HOST", value=pg_cluster.host),
+            client.V1EnvVar(name="PORT", value=str(pg_cluster.port)),
             client.V1EnvVar(
                 name="USER",
                 value_from=client.V1EnvVarSource(

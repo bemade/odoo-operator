@@ -4,6 +4,7 @@ import yaml
 import requests
 from typing import cast
 
+from .postgres_clusters import get_cluster_for_instance
 from .pull_secret import PullSecret
 from .odoo_user_secret import OdooUserSecret
 from .filestore_pvc import FilestorePVC
@@ -162,11 +163,8 @@ class OdooHandler(ResourceHandler):
         try:
             import psycopg2
 
-            # Get database connection parameters from environment variables
-            db_host = os.environ.get("DB_HOST")
-            db_port = os.environ.get("DB_PORT")
-            db_superuser = os.environ.get("DB_ADMIN_USER")
-            db_superuser_password = os.environ.get("DB_ADMIN_PASSWORD")
+            # Get the PostgreSQL cluster configuration for this instance
+            pg_cluster = get_cluster_for_instance(self.spec)
 
             # Get the Odoo username for ownership check
             odoo_username = self.odoo_user_secret.username
@@ -175,11 +173,11 @@ class OdooHandler(ResourceHandler):
 
             # Connect to the postgres database using superuser credentials
             conn = psycopg2.connect(
-                host=db_host,
-                port=db_port,
+                host=pg_cluster.host,
+                port=pg_cluster.port,
                 database="postgres",
-                user=db_superuser,
-                password=db_superuser_password,
+                user=pg_cluster.admin_user,
+                password=pg_cluster.admin_password,
             )
 
             # Set autocommit to True to avoid transaction issues

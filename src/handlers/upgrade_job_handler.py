@@ -14,6 +14,7 @@ import logging
 import os
 
 from .deployment import get_odoo_volumes_and_mounts
+from .postgres_clusters import get_cluster_for_instance
 
 logger = logging.getLogger(__name__)
 
@@ -192,13 +193,12 @@ class OdooUpgradeJobHandler:
         modules_str = ",".join(self.modules)
         modules_install_str = ",".join(self.modules_install)
 
-        # Build environment variables
-        db_host = os.environ.get("DB_HOST", "postgres")
-        db_port = os.environ.get("DB_PORT", "5432")
+        # Get the PostgreSQL cluster configuration for this instance
+        pg_cluster = get_cluster_for_instance(instance_spec)
 
         env_vars = [
-            client.V1EnvVar(name="HOST", value=db_host),
-            client.V1EnvVar(name="PORT", value=db_port),
+            client.V1EnvVar(name="HOST", value=pg_cluster.host),
+            client.V1EnvVar(name="PORT", value=str(pg_cluster.port)),
             client.V1EnvVar(
                 name="USER",
                 value_from=client.V1EnvVarSource(
