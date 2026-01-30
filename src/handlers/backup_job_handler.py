@@ -312,6 +312,21 @@ class OdooBackupJobHandler:
             ],
         )
 
+        # Pod affinity to schedule on the same node as the Odoo instance
+        # Required for RWO filestore PVCs which can only be mounted on one node
+        pod_affinity = client.V1Affinity(
+            pod_affinity=client.V1PodAffinity(
+                required_during_scheduling_ignored_during_execution=[
+                    client.V1PodAffinityTerm(
+                        label_selector=client.V1LabelSelector(
+                            match_labels={"app": instance_name}
+                        ),
+                        topology_key="kubernetes.io/hostname",
+                    )
+                ]
+            )
+        )
+
         job_spec = client.V1JobSpec(
             template=client.V1PodTemplateSpec(
                 spec=client.V1PodSpec(
@@ -325,10 +340,12 @@ class OdooBackupJobHandler:
                     image_pull_secrets=image_pull_secrets,
                     init_containers=[backup_container],
                     containers=[upload_container],
+                    affinity=pod_affinity,
                 ),
             ),
             backoff_limit=0,
             ttl_seconds_after_finished=900,  # Clean up 15 min after completion
+            active_deadline_seconds=1800,  # Fail job if not completed within 30 minutes
         )
 
         job = client.V1Job(
