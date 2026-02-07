@@ -310,6 +310,7 @@ class OdooRestoreJobHandler:
                         run_as_user=100,
                         run_as_group=101,
                         fs_group=101,
+                        fs_group_change_policy="OnRootMismatch",
                     ),
                     volumes=volumes,
                     init_containers=[init_container],

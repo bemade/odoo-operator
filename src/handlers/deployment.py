@@ -157,6 +157,7 @@ class Deployment(ResourceHandler):
                         run_as_user=100,
                         run_as_group=101,
                         fs_group=101,
+                        fs_group_change_policy="OnRootMismatch",
                     ),
                     affinity=self.spec.get(
                         "affinity", self.defaults.get("affinity", {})

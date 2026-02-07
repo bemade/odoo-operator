@@ -267,6 +267,7 @@ class OdooInitJobHandler:
                         run_as_user=100,
                         run_as_group=101,
                         fs_group=101,
+                        fs_group_change_policy="OnRootMismatch",
                     ),
                     volumes=volumes,
                     containers=[init_container],

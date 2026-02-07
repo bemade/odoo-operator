@@ -336,6 +336,7 @@ class OdooBackupJobHandler:
                         run_as_user=100,
                         run_as_group=101,
                         fs_group=101,
+                        fs_group_change_policy="OnRootMismatch",
                     ),
                     image_pull_secrets=image_pull_secrets,
                     init_containers=[backup_container],
