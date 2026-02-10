@@ -69,7 +69,9 @@ def test_deployment_defaults_and_ports():
     volumes = {v.name for v in tpl.spec.volumes}
     assert volumes == {"filestore", "odoo-conf"}
 
-    # Probes target the health endpoint on 8069
+    # Probes target the health endpoint on 8069 with default paths
+    assert container.startup_probe.http_get.port == 8069
+    assert container.startup_probe.http_get.path == "/web/health"
     assert container.liveness_probe.http_get.port == 8069
     assert container.liveness_probe.http_get.path == "/web/health"
     assert container.readiness_probe.http_get.port == 8069
@@ -219,7 +221,9 @@ def test_deployment_strategy_partial_rolling_update_params():
 
     assert dep.spec.strategy.type == "RollingUpdate"
     assert dep.spec.strategy.rolling_update.max_unavailable == 1  # converted to int
-    assert dep.spec.strategy.rolling_update.max_surge == "25%"  # default value (percentage)
+    assert (
+        dep.spec.strategy.rolling_update.max_surge == "25%"
+    )  # default value (percentage)
 
 
 # Tests for _parse_int_or_string helper function
@@ -251,3 +255,74 @@ def test_parse_int_or_string_invalid():
     """Invalid strings should be kept as-is"""
     assert _parse_int_or_string("abc") == "abc"
     assert _parse_int_or_string("1.5") == "1.5"
+
+
+# Tests for probe configuration
+
+
+def test_deployment_probe_paths_default():
+    """Test that all probes default to /web/health"""
+    handler = _make_handler(defaults={"odooImage": "odoo:18.0"})
+    dep_handler = Deployment(handler)
+    dep_handler._resource = SimpleNamespace(spec=None)
+    dep = dep_handler._get_resource_body()
+    container = dep.spec.template.spec.containers[0]
+
+    assert container.startup_probe.http_get.path == "/web/health"
+    assert container.liveness_probe.http_get.path == "/web/health"
+    assert container.readiness_probe.http_get.path == "/web/health"
+
+
+def test_deployment_probe_paths_custom_readiness():
+    """Test custom readiness path for health_check_k8s module"""
+    spec = {
+        "probes": {
+            "readinessPath": "/health/ready",
+        }
+    }
+    handler = _make_handler(spec=spec, defaults={"odooImage": "odoo:18.0"})
+    dep_handler = Deployment(handler)
+    dep_handler._resource = SimpleNamespace(spec=None)
+    dep = dep_handler._get_resource_body()
+    container = dep.spec.template.spec.containers[0]
+
+    # Startup and liveness should still use default
+    assert container.startup_probe.http_get.path == "/web/health"
+    assert container.liveness_probe.http_get.path == "/web/health"
+    # Readiness uses custom path
+    assert container.readiness_probe.http_get.path == "/health/ready"
+
+
+def test_deployment_probe_paths_all_custom():
+    """Test all custom probe paths"""
+    spec = {
+        "probes": {
+            "startupPath": "/custom/startup",
+            "livenessPath": "/custom/liveness",
+            "readinessPath": "/custom/readiness",
+        }
+    }
+    handler = _make_handler(spec=spec, defaults={"odooImage": "odoo:18.0"})
+    dep_handler = Deployment(handler)
+    dep_handler._resource = SimpleNamespace(spec=None)
+    dep = dep_handler._get_resource_body()
+    container = dep.spec.template.spec.containers[0]
+
+    assert container.startup_probe.http_get.path == "/custom/startup"
+    assert container.liveness_probe.http_get.path == "/custom/liveness"
+    assert container.readiness_probe.http_get.path == "/custom/readiness"
+
+
+def test_deployment_startup_probe_exists():
+    """Test that startup probe is configured with appropriate settings"""
+    handler = _make_handler(defaults={"odooImage": "odoo:18.0"})
+    dep_handler = Deployment(handler)
+    dep_handler._resource = SimpleNamespace(spec=None)
+    dep = dep_handler._get_resource_body()
+    container = dep.spec.template.spec.containers[0]
+
+    # Startup probe should exist and have reasonable settings for slow-starting Odoo
+    assert container.startup_probe is not None
+    assert container.startup_probe.http_get.port == 8069
+    assert container.startup_probe.failure_threshold >= 20  # Allow time for slow starts
+    assert container.startup_probe.period_seconds >= 5

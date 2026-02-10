@@ -88,6 +88,21 @@ class Deployment(ResourceHandler):
             return self.resource.spec.replicas or 0
         return 0
 
+    def _get_probe_paths(self) -> dict:
+        """Get the probe paths from spec or defaults.
+
+        Returns a dict with startupPath, livenessPath, and readinessPath.
+        All default to /web/health for backwards compatibility.
+        Use /health/ready for readinessPath if health_check_k8s module is installed.
+        """
+        probes_spec = self.spec.get("probes", {})
+        default_path = "/web/health"
+        return {
+            "startupPath": probes_spec.get("startupPath", default_path),
+            "livenessPath": probes_spec.get("livenessPath", default_path),
+            "readinessPath": probes_spec.get("readinessPath", default_path),
+        }
+
     @update_if_exists
     def handle_create(self):
         deployment = self._get_resource_body()
@@ -187,27 +202,38 @@ class Deployment(ResourceHandler):
                                 "resources",
                                 self.defaults.get("resources", {}),
                             ),
-                            liveness_probe=client.V1Probe(
+                            startup_probe=client.V1Probe(
                                 http_get=client.V1HTTPGetAction(
-                                    path="/web/health",
+                                    path=self._get_probe_paths()["startupPath"],
                                     port=8069,
                                 ),
-                                initial_delay_seconds=2,
-                                period_seconds=15,
-                                timeout_seconds=2,
+                                initial_delay_seconds=5,
+                                period_seconds=10,
+                                timeout_seconds=5,
                                 success_threshold=1,
-                                failure_threshold=40,
+                                failure_threshold=30,
+                            ),
+                            liveness_probe=client.V1Probe(
+                                http_get=client.V1HTTPGetAction(
+                                    path=self._get_probe_paths()["livenessPath"],
+                                    port=8069,
+                                ),
+                                initial_delay_seconds=0,
+                                period_seconds=15,
+                                timeout_seconds=5,
+                                success_threshold=1,
+                                failure_threshold=3,
                             ),
                             readiness_probe=client.V1Probe(
                                 http_get=client.V1HTTPGetAction(
-                                    path="/web/health",
+                                    path=self._get_probe_paths()["readinessPath"],
                                     port=8069,
                                 ),
-                                initial_delay_seconds=2,
-                                period_seconds=15,
-                                timeout_seconds=2,
+                                initial_delay_seconds=0,
+                                period_seconds=10,
+                                timeout_seconds=5,
                                 success_threshold=1,
-                                failure_threshold=40,
+                                failure_threshold=3,
                             ),
                         )
                     ],
