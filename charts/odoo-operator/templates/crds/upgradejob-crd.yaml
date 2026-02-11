@@ -1,0 +1,111 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: odooupgradejobs.bemade.org
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  group: bemade.org
+  names:
+    kind: OdooUpgradeJob
+    listKind: OdooUpgradeJobList
+    plural: odooupgradejobs
+    singular: odooupgradejob
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - odooInstanceRef
+              properties:
+                odooInstanceRef:
+                  type: object
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the OdooInstance to upgrade.
+                    namespace:
+                      type: string
+                      description: Namespace of the OdooInstance (defaults to this namespace).
+                modules:
+                  type: array
+                  items:
+                    type: string
+                  description: List of modules to upgrade.
+                modulesInstall:
+                  type: array
+                  items:
+                    type: string
+                  description: List of modules to install.
+                scheduledTime:
+                  type: string
+                  format: date-time
+                  description: "Optional scheduled time for the upgrade. Format: YYYY-MM-DDTHH:MM:SSZ."
+                webhook:
+                  type: object
+                  description: Optional webhook callback when upgrade completes.
+                  properties:
+                    url:
+                      type: string
+                      description: URL to POST upgrade status updates to.
+                    token:
+                      type: string
+                      description: Bearer token to include in Authorization header.
+                    secretTokenSecretRef:
+                      type: object
+                      description: Alternative to token - reference to a Secret containing the token.
+                      properties:
+                        name:
+                          type: string
+                        key:
+                          type: string
+                      required:
+                        - name
+                        - key
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Running
+                    - Completed
+                    - Failed
+                  description: Current execution phase.
+                message:
+                  type: string
+                  description: Human-readable status message or error.
+                startTime:
+                  type: string
+                  format: date-time
+                completionTime:
+                  type: string
+                  format: date-time
+                jobName:
+                  type: string
+                  description: Kubernetes Job name handling this upgrade.
+                originalReplicas:
+                  type: integer
+                  description: Original replica count before scaling down for upgrade.
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Instance
+          type: string
+          jsonPath: .spec.odooInstanceRef.name
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

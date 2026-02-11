@@ -1,0 +1,69 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-migrate-instances
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 1
+  template:
+    metadata:
+      name: {{ .Release.Name }}-migrate-instances
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: bitnami/kubectl:latest
+          env:
+            - name: RELEASE_NAMESPACE
+              value: {{ .Release.Namespace }}
+            - name: SECRET_NAME
+              value: {{ .Values.postgresClustersSecretRef.name }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              
+              echo "=== Odoo Operator Post-Install Migration ==="
+              
+              # Read the default cluster name from the secret
+              echo "Reading default cluster from secret..."
+              SECRET_DATA=$(kubectl get secret "$SECRET_NAME" -n "$RELEASE_NAMESPACE" -o jsonpath='{.data.clusters\.yaml}' | base64 -d)
+              # Find the cluster name that has default: true (cluster names start at column 0, not indented)
+              DEFAULT_CLUSTER=$(echo "$SECRET_DATA" | awk '/^[a-zA-Z_-]+:/{name=substr($0,1,length($0)-1)} /default: true/{print name}' | head -1)
+              
+              if [ -z "$DEFAULT_CLUSTER" ]; then
+                echo "ERROR: No default cluster found in secret. Ensure one cluster has 'default: true'."
+                exit 1
+              fi
+              echo "Default cluster: $DEFAULT_CLUSTER"
+              
+              # Migrate instances without database.cluster to use default cluster
+              echo "Checking for OdooInstances without database.cluster..."
+              
+              # Get all instances and check each one
+              INSTANCES=$(kubectl get odooinstances.bemade.org --all-namespaces -o json 2>/dev/null | \
+                jq -r '.items[] | select(.spec.database == null or .spec.database.cluster == null) | "\(.metadata.namespace) \(.metadata.name)"' || echo "")
+              
+              if [ -z "$INSTANCES" ]; then
+                echo "No instances need migration."
+              else
+                echo "$INSTANCES" | while read namespace name; do
+                  if [ -n "$namespace" ] && [ -n "$name" ]; then
+                    echo "Patching $namespace/$name to set database.cluster=$DEFAULT_CLUSTER"
+                    kubectl patch odooinstance.bemade.org "$name" -n "$namespace" \
+                      --type=merge \
+                      -p "{\"spec\":{\"database\":{\"cluster\":\"$DEFAULT_CLUSTER\"}}}"
+                  fi
+                done
+              fi
+              
+              echo "=== Migration complete ==="

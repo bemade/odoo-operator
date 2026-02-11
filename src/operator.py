@@ -10,6 +10,14 @@ from handlers.upgrade_job_handler import OdooUpgradeJobHandler
 from handlers.init_job_handler import OdooInitJobHandler
 from typing import cast
 from webhook_server import ServiceModeWebhookServer
+from constants import (
+    API_GROUP,
+    ODOO_INSTANCE_VERSION,
+    BACKUP_JOB_VERSION,
+    RESTORE_JOB_VERSION,
+    UPGRADE_JOB_VERSION,
+    INIT_JOB_VERSION,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -72,7 +80,7 @@ def configure_webhook(settings: kopf.OperatorSettings, *args, **kwargs):
             logger.error(f"Key file not found: {webhook_key_path}")
 
 
-@kopf.on.resume("bemade.org", "v1", "odooinstances")
+@kopf.on.resume(API_GROUP, ODOO_INSTANCE_VERSION, "odooinstances")
 def restart_fn(*args, **kwargs):
     update_fn(*args, **kwargs)
 
@@ -104,7 +112,7 @@ def _classify_and_raise_api_exception(e: ApiException):
     raise e
 
 
-@kopf.on.create("bemade.org", "v1", "odooinstances")
+@kopf.on.create(API_GROUP, ODOO_INSTANCE_VERSION, "odooinstances")
 def create_fn(body, *args, **kwargs):
     handler = OdooHandler(body, **kwargs)
     try:
@@ -119,7 +127,7 @@ def create_fn(body, *args, **kwargs):
         raise kopf.TemporaryError(str(e), delay=30)
 
 
-@kopf.on.update("bemade.org", "v1", "odooinstances")
+@kopf.on.update(API_GROUP, ODOO_INSTANCE_VERSION, "odooinstances")
 def update_fn(body, *args, **kwargs):
     handler = OdooHandler(body, *args, **kwargs)
     try:
@@ -132,7 +140,7 @@ def update_fn(body, *args, **kwargs):
         raise kopf.TemporaryError(str(e), delay=30)
 
 
-@kopf.on.delete("bemade.org", "v1", "odooinstances")
+@kopf.on.delete(API_GROUP, ODOO_INSTANCE_VERSION, "odooinstances")
 def delete_fn(body, *args, **kwargs):
     handler = OdooHandler(body, *args, **kwargs)
     try:
@@ -145,7 +153,7 @@ def delete_fn(body, *args, **kwargs):
         raise kopf.TemporaryError(str(e), delay=30)
 
 
-@kopf.on.validate("bemade.org", "v1", "odooinstances")
+@kopf.on.validate(API_GROUP, ODOO_INSTANCE_VERSION, "odooinstances")
 def validate(body, old, new, *args, **kwargs):
     """
     Validate the OdooInstance resource before it is created or updated.
@@ -187,7 +195,7 @@ def validate(body, old, new, *args, **kwargs):
 # ============== OdooBackupJob handlers ==============
 
 
-@kopf.on.create("bemade.org", "v1", "odoobackupjobs")
+@kopf.on.create(API_GROUP, BACKUP_JOB_VERSION, "odoobackupjobs")
 def create_backup_job(body, *args, **kwargs):
     """Handle creation of OdooBackupJob CR."""
     handler = OdooBackupJobHandler(body, **kwargs)
@@ -201,7 +209,7 @@ def create_backup_job(body, *args, **kwargs):
         raise kopf.TemporaryError(str(e), delay=30)
 
 
-@kopf.on.update("bemade.org", "v1", "odoobackupjobs")
+@kopf.on.update(API_GROUP, BACKUP_JOB_VERSION, "odoobackupjobs")
 def update_backup_job(body, *args, **kwargs):
     """Handle update of OdooBackupJob CR."""
     handler = OdooBackupJobHandler(body, **kwargs)
@@ -218,7 +226,7 @@ def update_backup_job(body, *args, **kwargs):
 # ============== OdooRestoreJob handlers ==============
 
 
-@kopf.on.create("bemade.org", "v1", "odoorestorejobs")
+@kopf.on.create(API_GROUP, RESTORE_JOB_VERSION, "odoorestorejobs")
 def create_restore_job(body, *args, **kwargs):
     """Handle creation of OdooRestoreJob CR."""
     handler = OdooRestoreJobHandler(body, **kwargs)
@@ -232,7 +240,7 @@ def create_restore_job(body, *args, **kwargs):
         raise kopf.TemporaryError(str(e), delay=30)
 
 
-@kopf.on.update("bemade.org", "v1", "odoorestorejobs")
+@kopf.on.update(API_GROUP, RESTORE_JOB_VERSION, "odoorestorejobs")
 def update_restore_job(body, *args, **kwargs):
     """Handle update of OdooRestoreJob CR."""
     handler = OdooRestoreJobHandler(body, **kwargs)
@@ -261,7 +269,7 @@ def _is_operator_job(body, *args, **kwargs):
     owner_refs = body.get("metadata", {}).get("ownerReferences", [])
     for owner in owner_refs:
         if (
-            owner.get("apiVersion") == "bemade.org/v1"
+            owner.get("apiVersion", "").startswith(f"{API_GROUP}/")
             and owner.get("kind") in _JOB_OWNER_KINDS
         ):
             return True
@@ -271,7 +279,7 @@ def _is_operator_job(body, *args, **kwargs):
 # ============== OdooUpgradeJob handlers ==============
 
 
-@kopf.on.create("bemade.org", "v1", "odooupgradejobs")
+@kopf.on.create(API_GROUP, UPGRADE_JOB_VERSION, "odooupgradejobs")
 def create_upgrade_job(body, *args, **kwargs):
     """Handle creation of OdooUpgradeJob CR."""
     handler = OdooUpgradeJobHandler(body, **kwargs)
@@ -285,7 +293,7 @@ def create_upgrade_job(body, *args, **kwargs):
         raise kopf.TemporaryError(str(e), delay=30)
 
 
-@kopf.on.update("bemade.org", "v1", "odooupgradejobs")
+@kopf.on.update(API_GROUP, UPGRADE_JOB_VERSION, "odooupgradejobs")
 def update_upgrade_job(body, *args, **kwargs):
     """Handle update of OdooUpgradeJob CR."""
     handler = OdooUpgradeJobHandler(body, **kwargs)
@@ -302,7 +310,7 @@ def update_upgrade_job(body, *args, **kwargs):
 # ============== OdooInitJob handlers ==============
 
 
-@kopf.on.create("bemade.org", "v1", "odooinitjobs")
+@kopf.on.create(API_GROUP, INIT_JOB_VERSION, "odooinitjobs")
 def create_init_job(body, *args, **kwargs):
     """Handle creation of OdooInitJob CR."""
     handler = OdooInitJobHandler(body, **kwargs)
@@ -316,7 +324,7 @@ def create_init_job(body, *args, **kwargs):
         raise kopf.TemporaryError(str(e), delay=30)
 
 
-@kopf.on.update("bemade.org", "v1", "odooinitjobs")
+@kopf.on.update(API_GROUP, INIT_JOB_VERSION, "odooinitjobs")
 def update_init_job(body, *args, **kwargs):
     """Handle update of OdooInitJob CR."""
     handler = OdooInitJobHandler(body, **kwargs)
@@ -338,7 +346,7 @@ def on_job_completion(body, *args, **kwargs):
     owner_refs = body.get("metadata", {}).get("ownerReferences", [])
 
     for owner in owner_refs:
-        if owner.get("apiVersion") != "bemade.org/v1":
+        if not owner.get("apiVersion", "").startswith(f"{API_GROUP}/"):
             continue
 
         kind = owner.get("kind")
@@ -347,35 +355,35 @@ def on_job_completion(body, *args, **kwargs):
         try:
             if kind == "OdooInstance":
                 instance = client.CustomObjectsApi().get_namespaced_custom_object(
-                    "bemade.org", "v1", namespace, "odooinstances", owner_name
+                    API_GROUP, ODOO_INSTANCE_VERSION, namespace, "odooinstances", owner_name
                 )
                 odoo_handler = OdooHandler(body=instance, *args, **kwargs)
                 odoo_handler.handle_job_completion(body)
 
             elif kind == "OdooBackupJob":
                 backup_job = client.CustomObjectsApi().get_namespaced_custom_object(
-                    "bemade.org", "v1", namespace, "odoobackupjobs", owner_name
+                    API_GROUP, BACKUP_JOB_VERSION, namespace, "odoobackupjobs", owner_name
                 )
                 handler = OdooBackupJobHandler(backup_job, **kwargs)
                 handler.check_job_status()
 
             elif kind == "OdooRestoreJob":
                 restore_job = client.CustomObjectsApi().get_namespaced_custom_object(
-                    "bemade.org", "v1", namespace, "odoorestorejobs", owner_name
+                    API_GROUP, RESTORE_JOB_VERSION, namespace, "odoorestorejobs", owner_name
                 )
                 handler = OdooRestoreJobHandler(restore_job, **kwargs)
                 handler.check_job_status()
 
             elif kind == "OdooUpgradeJob":
                 upgrade_job = client.CustomObjectsApi().get_namespaced_custom_object(
-                    "bemade.org", "v1", namespace, "odooupgradejobs", owner_name
+                    API_GROUP, UPGRADE_JOB_VERSION, namespace, "odooupgradejobs", owner_name
                 )
                 handler = OdooUpgradeJobHandler(upgrade_job, **kwargs)
                 handler.check_job_status()
 
             elif kind == "OdooInitJob":
                 init_job = client.CustomObjectsApi().get_namespaced_custom_object(
-                    "bemade.org", "v1", namespace, "odooinitjobs", owner_name
+                    API_GROUP, INIT_JOB_VERSION, namespace, "odooinitjobs", owner_name
                 )
                 handler = OdooInitJobHandler(init_job, **kwargs)
                 handler.check_job_status()

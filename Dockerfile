@@ -1,9 +1,12 @@
 FROM python:3.12-slim
 
-COPY requirements.txt .
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-RUN pip install -r requirements.txt
+WORKDIR /app
 
-COPY src /app/src
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
-CMD ["kopf", "run", "/app/src/operator.py", "--verbose", "--all-namespaces"]
+COPY src ./src
+
+CMD ["uv", "run", "kopf", "run", "src/operator.py", "--verbose", "--all-namespaces"]

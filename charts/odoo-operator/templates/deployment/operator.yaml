@@ -1,0 +1,77 @@
+{{- if not .Values.postgresClustersSecretRef.name -}}
+  {{- fail "postgresClustersSecretRef.name is required. Create a secret with clusters.yaml and reference it here." -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+      annotations:
+        odoo-operator.bemade.org/release: "{{ .Release.Revision }}"
+    spec:
+      affinity:
+        {{- toYaml .Values.operator.affinity | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.operator.tolerations | nindent 8}}
+      imagePullSecrets:
+        {{- range .Values.imagePullSecrets }}
+        - name: {{ .domain }}
+        {{- end }}
+      serviceAccountName: odoo-operator
+      containers:
+        - name: {{ .Release.Name }}
+          image: {{ .Values.operator.image }}
+          imagePullPolicy: {{ .Values.operator.imagePullPolicy | default "Always" }}
+          ports:
+            - name: webhook
+              containerPort: 443
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+          env:
+            - name: OPERATOR_NAME
+              value: {{ .Release.Name }}
+            - name: OPERATOR_NAMESPACE
+              value: {{ .Release.Namespace }}
+            - name: DEFAULT_ODOO_IMAGE
+              value: {{ .Values.defaults.odooImage }}
+            - name: DEFAULT_STORAGE_CLASS
+              value: {{ .Values.defaults.storageClass }}
+            - name: SERVICE_NAME
+              value: {{ .Release.Name }}-webhook
+            - name: SERVICE_NAMESPACE
+              value: {{ .Release.Namespace }}
+            # PostgreSQL clusters config file path
+            - name: POSTGRES_CLUSTERS_FILE
+              value: /etc/postgres/clusters.yaml
+          volumeMounts:
+            - name: instance-defaults
+              mountPath: /etc/odoo
+              readOnly: true
+            - name: webhook-cert
+              mountPath: /etc/webhook
+              readOnly: true
+            - name: postgres-clusters
+              mountPath: /etc/postgres
+              readOnly: true
+      volumes:
+        - name: instance-defaults
+          configMap:
+            name: instance-defaults
+        - name: webhook-cert
+          secret:
+            secretName: {{ .Release.Name }}-webhook-cert
+        - name: postgres-clusters
+          secret:
+            secretName: {{ .Values.postgresClustersSecretRef.name }}

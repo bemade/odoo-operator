@@ -12,6 +12,8 @@ from kubernetes import client
 from kubernetes.client.rest import ApiException
 import logging
 import os
+from constants import API_GROUP, UPGRADE_JOB_VERSION
+_HANDLER_VERSION = UPGRADE_JOB_VERSION
 
 from .deployment import get_odoo_volumes_and_mounts
 from .postgres_clusters import get_cluster_for_instance
@@ -41,7 +43,7 @@ class OdooUpgradeJobHandler:
     @property
     def owner_reference(self):
         return client.V1OwnerReference(
-            api_version="bemade.org/v1",
+            api_version=f"{API_GROUP}/{_HANDLER_VERSION}",
             kind="OdooUpgradeJob",
             name=self.name,
             uid=self.uid,

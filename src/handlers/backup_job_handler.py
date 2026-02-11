@@ -13,6 +13,8 @@ from kubernetes.client.rest import ApiException
 import base64
 import logging
 import os
+from constants import API_GROUP, BACKUP_JOB_VERSION
+_HANDLER_VERSION = BACKUP_JOB_VERSION
 
 from .deployment import get_odoo_volumes_and_mounts
 from .postgres_clusters import get_cluster_for_instance
@@ -45,7 +47,7 @@ class OdooBackupJobHandler:
     @property
     def owner_reference(self):
         return client.V1OwnerReference(
-            api_version="bemade.org/v1",
+            api_version=f"{API_GROUP}/{_HANDLER_VERSION}",
             kind="OdooBackupJob",
             name=self.name,
             uid=self.uid,

@@ -14,6 +14,8 @@ from kubernetes.client.rest import ApiException
 import base64
 import logging
 import os
+from constants import API_GROUP, INIT_JOB_VERSION
+_HANDLER_VERSION = INIT_JOB_VERSION
 
 from .postgres_clusters import get_cluster_for_instance
 
@@ -40,7 +42,7 @@ class OdooInitJobHandler:
     @property
     def owner_reference(self):
         return client.V1OwnerReference(
-            api_version="bemade.org/v1",
+            api_version=f"{API_GROUP}/{_HANDLER_VERSION}",
             kind="OdooInitJob",
             name=self.name,
             uid=self.uid,

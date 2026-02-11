@@ -1,12 +1,13 @@
-PYTHON ?= python3
+.PHONY: test lint coverage sync
 
-.PHONY: test lint coverage
+sync:
+	uv sync
 
 test:
-	$(PYTHON) -m pytest -q
+	uv run pytest -q
 
 coverage:
-	$(PYTHON) -m pytest --cov=handlers --cov=operator --cov-report=term-missing
+	uv run pytest --cov=handlers --cov=operator --cov-report=term-missing
 
 lint:
-	helm lint helm-charts/odoo-operator
+	helm lint charts/odoo-operator

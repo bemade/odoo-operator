@@ -10,6 +10,7 @@ import kopf
 import aiohttp.web
 import asyncio
 import base64
+from conversion import convert_odoo_instance
 
 logger = logging.getLogger(__name__)
 
@@ -138,14 +139,45 @@ class ServiceModeWebhookServer(kopf.WebhookServer):
             await runner.cleanup()
 
     def _setup_app(self, fn, path):
-        """Set up the web application for the webhook server."""
+        """Set up the web application with both admission and conversion endpoints."""
 
         async def _serve_fn(request):
             return await self._serve(fn, request)
 
+        async def _conversion_fn(request):
+            return await self._handle_conversion(request)
+
         app = aiohttp.web.Application()
-        app.add_routes([aiohttp.web.post(f"{path}/{{id:.*}}", _serve_fn)])
+        app.add_routes([
+            aiohttp.web.post("/convert", _conversion_fn),
+            aiohttp.web.post(f"{path}/{{id:.*}}", _serve_fn),
+        ])
         return app
+
+    async def _handle_conversion(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        """Handle CRD conversion webhook requests."""
+        review = await request.json()
+        req = review["request"]
+        desired = req["desiredAPIVersion"]
+
+        converted = []
+        for obj in req["objects"]:
+            kind = obj.get("kind", "")
+            if kind == "OdooInstance":
+                converted.append(convert_odoo_instance(obj, desired))
+            else:
+                obj["apiVersion"] = desired
+                converted.append(obj)
+
+        return aiohttp.web.json_response({
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "ConversionReview",
+            "response": {
+                "uid": req["uid"],
+                "result": {"status": "Success"},
+                "convertedObjects": converted,
+            },
+        })
 
     def _setup_runner(self, app):
         """Set up the application runner for the webhook server."""

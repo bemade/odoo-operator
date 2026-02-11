@@ -1,0 +1,133 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: odoobackupjobs.bemade.org
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  group: bemade.org
+  names:
+    kind: OdooBackupJob
+    listKind: OdooBackupJobList
+    plural: odoobackupjobs
+    singular: odoobackupjob
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - odooInstanceRef
+                - destination
+              properties:
+                odooInstanceRef:
+                  type: object
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the OdooInstance to back up.
+                    namespace:
+                      type: string
+                      description: Namespace of the OdooInstance (defaults to this namespace).
+                format:
+                  type: string
+                  enum:
+                    - zip
+                    - sql
+                    - dump
+                  description: "Backup format: 'zip' includes filestore (Odoo format), 'sql' is plain text SQL, 'dump' is PostgreSQL custom format."
+                  default: zip
+                withFilestore:
+                  type: boolean
+                  description: Include the filestore contents when possible.
+                  default: true
+                destination:
+                  type: object
+                  required:
+                    - bucket
+                    - objectKey
+                    - endpoint
+                    - s3CredentialsSecretRef
+                  properties:
+                    bucket:
+                      type: string
+                      description: S3 bucket where the backup will be uploaded.
+                    objectKey:
+                      type: string
+                      description: Object key (path) for the uploaded backup file.
+                    endpoint:
+                      type: string
+                      description: S3 endpoint URL (required).
+                    region:
+                      type: string
+                      description: Optional S3 region.
+                    insecure:
+                      type: boolean
+                      description: Disable TLS verification when uploading to S3 endpoint.
+                      default: false
+                    s3CredentialsSecretRef:
+                      type: object
+                      description: Reference to a Secret containing S3 credentials (accessKey and secretKey keys).
+                      required:
+                        - name
+                      properties:
+                        name:
+                          type: string
+                          description: Name of the Secret containing S3 credentials.
+                        namespace:
+                          type: string
+                          description: Namespace of the Secret (defaults to odoo-operator namespace).
+                webhook:
+                  type: object
+                  description: Optional webhook callback when backup completes.
+                  properties:
+                    url:
+                      type: string
+                      description: URL to POST backup status updates to.
+                    token:
+                      type: string
+                      description: Bearer token to include in Authorization header.
+                    secretTokenSecretRef:
+                      type: object
+                      description: Alternative to token - reference to a Secret containing the token.
+                      properties:
+                        name:
+                          type: string
+                        key:
+                          type: string
+                      required:
+                        - name
+                        - key
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: Current execution phase (Pending, Running, Completed, Failed).
+                message:
+                  type: string
+                startTime:
+                  type: string
+                  format: date-time
+                completionTime:
+                  type: string
+                  format: date-time
+                backupSize:
+                  type: string
+                  description: Size of the produced backup file.
+                objectKey:
+                  type: string
+                  description: Final object key after upload (if different from spec).
+                jobName:
+                  type: string
+                  description: Kubernetes Job name handling this backup.
+      subresources:
+        status: {}

@@ -2,7 +2,8 @@ from kubernetes import client
 import os
 import yaml
 import requests
-from typing import cast
+from constants import API_GROUP, ODOO_INSTANCE_VERSION
+_HANDLER_VERSION = ODOO_INSTANCE_VERSION
 
 from .postgres_clusters import get_cluster_for_instance
 from .pull_secret import PullSecret
@@ -272,7 +273,7 @@ class OdooHandler(ResourceHandler):
     @property
     def owner_reference(self):
         return client.V1OwnerReference(
-            api_version="bemade.org/v1",
+            api_version=f"{API_GROUP}/{_HANDLER_VERSION}",
             kind="OdooInstance",
             name=self.name,
             uid=self.uid,

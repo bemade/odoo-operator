@@ -1,0 +1,15 @@
+Odoo Operator has been installed.
+
+PostgreSQL clusters secret: {{ .Values.postgresClustersSecretRef.name }}
+
+To check the operator status:
+  kubectl get pods -n {{ .Release.Namespace }} -l app={{ .Release.Name }}
+
+To view operator logs:
+  kubectl logs -n {{ .Release.Namespace }} -l app={{ .Release.Name }} -f
+
+To list OdooInstances:
+  kubectl get odooinstances --all-namespaces
+
+To view configured PostgreSQL clusters:
+  kubectl get secret {{ .Values.postgresClustersSecretRef.name }} -n {{ .Release.Namespace }} -o jsonpath='{.data.clusters\.yaml}' | base64 -d
