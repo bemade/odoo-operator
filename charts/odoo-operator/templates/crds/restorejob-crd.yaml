@@ -113,20 +113,6 @@ spec:
                       bucket:
                         description: bucket is the S3 bucket name.
                         type: string
-                      credentialsSecretRef:
-                        description: credentialsSecretRef references a Secret with
-                          accessKey and secretKey fields.
-                        properties:
-                          name:
-                            description: name is unique within a namespace to reference
-                              a secret resource.
-                            type: string
-                          namespace:
-                            description: namespace defines the space within which
-                              the secret name must be unique.
-                            type: string
-                        type: object
-                        x-kubernetes-map-type: atomic
                       endpoint:
                         description: endpoint is the S3-compatible endpoint URL (e.g.
                           "https://s3.example.com").
@@ -142,6 +128,20 @@ spec:
                       region:
                         description: region is the optional S3 region.
                         type: string
+                      s3CredentialsSecretRef:
+                        description: s3CredentialsSecretRef references a Secret with
+                          accessKey and secretKey fields.
+                        properties:
+                          name:
+                            description: name is unique within a namespace to reference
+                              a secret resource.
+                            type: string
+                          namespace:
+                            description: namespace defines the space within which
+                              the secret name must be unique.
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
                     required:
                     - bucket
                     - endpoint

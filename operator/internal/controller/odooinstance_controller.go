@@ -333,8 +333,18 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
+	// Check for active restore/upgrade jobs before ensuring child resources
+	// so that desiredReplicas() keeps the Deployment scaled to 0 while a
+	// job is in progress (prevents racing with the job controller).
+	jobs, err := r.getActiveJobState(ctx, &instance)
+	if err != nil {
+		r.Recorder.Eventf(&instance, corev1.EventTypeWarning, "ReconcileError",
+			"Failed to check active job state: %v", err)
+		return ctrl.Result{}, err
+	}
+
 	// Ensure all child resources exist and reflect the current spec.
-	if err := r.ensureChildResources(ctx, &instance, pgCluster); err != nil {
+	if err := r.ensureChildResources(ctx, &instance, pgCluster, jobs); err != nil {
 		r.Recorder.Eventf(&instance, corev1.EventTypeWarning, "ReconcileError",
 			"Failed to reconcile child resources: %v", err)
 		return ctrl.Result{}, err
@@ -349,7 +359,7 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Derive phase from observed state (priority-ordered).
-	phase, err := r.derivePhase(ctx, &instance, readyReplicas)
+	phase, err := r.derivePhase(ctx, &instance, readyReplicas, jobs)
 	if err != nil {
 		r.Recorder.Eventf(&instance, corev1.EventTypeWarning, "ReconcileError",
 			"Failed to derive instance phase: %v", err)
@@ -410,7 +420,7 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 // ── Child resource management ─────────────────────────────────────────────────
 
-func (r *OdooInstanceReconciler) ensureChildResources(ctx context.Context, instance *bemadev1alpha1.OdooInstance, pg postgresClusterConfig) error {
+func (r *OdooInstanceReconciler) ensureChildResources(ctx context.Context, instance *bemadev1alpha1.OdooInstance, pg postgresClusterConfig, jobs activeJobState) error {
 	if instance.Spec.ImagePullSecret != "" {
 		if err := r.ensureImagePullSecret(ctx, instance); err != nil {
 			return fmt.Errorf("image pull secret: %w", err)
@@ -434,7 +444,7 @@ func (r *OdooInstanceReconciler) ensureChildResources(ctx context.Context, insta
 	if err := r.ensureIngress(ctx, instance); err != nil {
 		return fmt.Errorf("ingress: %w", err)
 	}
-	if err := r.ensureDeployment(ctx, instance); err != nil {
+	if err := r.ensureDeployment(ctx, instance, jobs); err != nil {
 		return fmt.Errorf("deployment: %w", err)
 	}
 	return nil
@@ -584,12 +594,12 @@ func (r *OdooInstanceReconciler) ensureConfigMap(ctx context.Context, instance *
 	}
 	_, err := controllerutil.CreateOrPatch(ctx, r.Client, cm, func() error {
 		cm.Data = map[string]string{
-			"odoo.conf":    buildOdooConf(username, password, instance.Spec.AdminPassword, pg.Host, pg.Port, dbName, instance.Spec.ConfigOptions),
-			"db_host":      pg.Host,
-			"db_port":      fmt.Sprintf("%d", pg.Port),
-			"db_name":      dbName,
-			"db_user":      username,
-			"db_password":  password,
+			"odoo.conf":   buildOdooConf(username, password, instance.Spec.AdminPassword, pg.Host, pg.Port, dbName, instance.Spec.ConfigOptions),
+			"db_host":     pg.Host,
+			"db_port":     fmt.Sprintf("%d", pg.Port),
+			"db_name":     dbName,
+			"db_user":     username,
+			"db_password": password,
 		}
 		return controllerutil.SetControllerReference(instance, cm, r.Scheme)
 	})
@@ -679,8 +689,8 @@ func (r *OdooInstanceReconciler) ensureIngress(ctx context.Context, instance *be
 	return err
 }
 
-func (r *OdooInstanceReconciler) ensureDeployment(ctx context.Context, instance *bemadev1alpha1.OdooInstance) error {
-	replicas := desiredReplicas(instance)
+func (r *OdooInstanceReconciler) ensureDeployment(ctx context.Context, instance *bemadev1alpha1.OdooInstance, jobs activeJobState) error {
+	replicas := desiredReplicas(instance, jobs)
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
@@ -827,25 +837,17 @@ func (r *OdooInstanceReconciler) ensureDeployment(ctx context.Context, instance 
 
 // ── Phase derivation ──────────────────────────────────────────────────────────
 
-func (r *OdooInstanceReconciler) derivePhase(ctx context.Context, instance *bemadev1alpha1.OdooInstance, readyReplicas int32) (bemadev1alpha1.OdooInstancePhase, error) {
+func (r *OdooInstanceReconciler) derivePhase(ctx context.Context, instance *bemadev1alpha1.OdooInstance, readyReplicas int32, jobs activeJobState) (bemadev1alpha1.OdooInstancePhase, error) {
 	// 1. Stopped — explicit user intent.
 	if instance.Spec.Replicas == 0 {
 		return bemadev1alpha1.OdooInstancePhaseStopped, nil
 	}
 
 	// 2–3. Job-driven phases (restore takes priority over upgrade).
-	activeRestore, _, err := r.getRestoreJobState(ctx, instance)
-	if err != nil {
-		return "", err
-	}
-	activeUpgrade, _, err := r.getUpgradeJobState(ctx, instance)
-	if err != nil {
-		return "", err
-	}
-	if activeRestore {
+	if jobs.RestoreActive {
 		return bemadev1alpha1.OdooInstancePhaseRestoring, nil
 	}
-	if activeUpgrade {
+	if jobs.UpgradeActive {
 		return bemadev1alpha1.OdooInstancePhaseUpgrading, nil
 	}
 
@@ -891,42 +893,56 @@ func (r *OdooInstanceReconciler) checkInitJobCompletion(ctx context.Context, ins
 	return nil
 }
 
-func (r *OdooInstanceReconciler) getRestoreJobState(ctx context.Context, instance *bemadev1alpha1.OdooInstance) (active, failed bool, err error) {
-	var list bemadev1alpha1.OdooRestoreJobList
-	if err = r.List(ctx, &list, client.InNamespace(instance.Namespace)); err != nil {
-		return
-	}
-	for _, job := range list.Items {
-		if job.Spec.OdooInstanceRef.Name != instance.Name {
-			continue
-		}
-		if job.Status.Phase == bemadev1alpha1.PhaseRunning {
-			active = true
-		}
-		if job.Status.Phase == bemadev1alpha1.PhaseFailed {
-			failed = true
-		}
-	}
-	return
+// activeJobState caches the result of scanning restore/upgrade jobs so that
+// both desiredReplicas (called from ensureDeployment) and derivePhase can
+// use it without issuing duplicate List calls.
+type activeJobState struct {
+	RestoreActive bool
+	RestoreFailed bool
+	UpgradeActive bool
+	UpgradeFailed bool
 }
 
-func (r *OdooInstanceReconciler) getUpgradeJobState(ctx context.Context, instance *bemadev1alpha1.OdooInstance) (active, failed bool, err error) {
-	var list bemadev1alpha1.OdooUpgradeJobList
-	if err = r.List(ctx, &list, client.InNamespace(instance.Namespace)); err != nil {
-		return
+func (s activeJobState) hasActiveJobs() bool {
+	return s.RestoreActive || s.UpgradeActive
+}
+
+func (r *OdooInstanceReconciler) getActiveJobState(ctx context.Context, instance *bemadev1alpha1.OdooInstance) (activeJobState, error) {
+	var state activeJobState
+
+	var restoreList bemadev1alpha1.OdooRestoreJobList
+	if err := r.List(ctx, &restoreList, client.InNamespace(instance.Namespace)); err != nil {
+		return state, err
 	}
-	for _, job := range list.Items {
+	for _, job := range restoreList.Items {
 		if job.Spec.OdooInstanceRef.Name != instance.Name {
 			continue
 		}
-		if job.Status.Phase == bemadev1alpha1.PhaseRunning {
-			active = true
+		if job.Status.Phase == bemadev1alpha1.PhasePending || job.Status.Phase == bemadev1alpha1.PhaseRunning {
+			state.RestoreActive = true
 		}
 		if job.Status.Phase == bemadev1alpha1.PhaseFailed {
-			failed = true
+			state.RestoreFailed = true
 		}
 	}
-	return
+
+	var upgradeList bemadev1alpha1.OdooUpgradeJobList
+	if err := r.List(ctx, &upgradeList, client.InNamespace(instance.Namespace)); err != nil {
+		return state, err
+	}
+	for _, job := range upgradeList.Items {
+		if job.Spec.OdooInstanceRef.Name != instance.Name {
+			continue
+		}
+		if job.Status.Phase == bemadev1alpha1.PhasePending || job.Status.Phase == bemadev1alpha1.PhaseRunning {
+			state.UpgradeActive = true
+		}
+		if job.Status.Phase == bemadev1alpha1.PhaseFailed {
+			state.UpgradeFailed = true
+		}
+	}
+
+	return state, nil
 }
 
 func (r *OdooInstanceReconciler) latestInitJobPhase(ctx context.Context, instance *bemadev1alpha1.OdooInstance) (bemadev1alpha1.Phase, error) {
@@ -1101,8 +1117,13 @@ func (r *OdooInstanceReconciler) notifyWebhook(
 	}
 }
 
-func desiredReplicas(instance *bemadev1alpha1.OdooInstance) int32 {
+func desiredReplicas(instance *bemadev1alpha1.OdooInstance, jobs activeJobState) int32 {
 	if !instance.Status.DBInitialized {
+		return 0
+	}
+	// Keep replicas at 0 while a restore or upgrade job is active to prevent
+	// the OdooInstance controller from racing with the job controller.
+	if jobs.hasActiveJobs() {
 		return 0
 	}
 	return instance.Spec.Replicas

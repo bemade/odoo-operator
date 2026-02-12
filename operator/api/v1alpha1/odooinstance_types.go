@@ -196,8 +196,8 @@ const (
 	OdooInstancePhaseRunning       OdooInstancePhase = "Running"
 	OdooInstancePhaseDegraded      OdooInstancePhase = "Degraded"
 	OdooInstancePhaseStopped       OdooInstancePhase = "Stopped"
-	OdooInstancePhaseUpgrading OdooInstancePhase = "Upgrading"
-	OdooInstancePhaseRestoring OdooInstancePhase = "Restoring"
+	OdooInstancePhaseUpgrading     OdooInstancePhase = "Upgrading"
+	OdooInstancePhaseRestoring     OdooInstancePhase = "Restoring"
 	OdooInstancePhaseError         OdooInstancePhase = "Error"
 )
 

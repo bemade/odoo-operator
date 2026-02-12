@@ -54,7 +54,7 @@ type S3Config struct {
 	// +kubebuilder:default=false
 	Insecure bool `json:"insecure,omitempty"`
 
-	// credentialsSecretRef references a Secret with accessKey and secretKey fields.
+	// s3CredentialsSecretRef references a Secret with accessKey and secretKey fields.
 	// +optional
-	CredentialsSecretRef *corev1.SecretReference `json:"credentialsSecretRef,omitempty"`
+	CredentialsSecretRef *corev1.SecretReference `json:"s3CredentialsSecretRef,omitempty"`
 }

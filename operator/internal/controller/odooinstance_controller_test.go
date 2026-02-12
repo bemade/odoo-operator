@@ -568,6 +568,34 @@ var _ = Describe("OdooInstance Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(getInstance().Status.Phase).To(Equal(bemadev1alpha1.OdooInstancePhaseStarting))
 		})
+
+		It("keeps Deployment at 0 replicas while a Running restore job exists", func() {
+			createRestoreJob(bemadev1alpha1.PhaseRunning)
+			_, err := reconcileInstance()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(*getDeployment().Spec.Replicas).To(Equal(int32(0)))
+		})
+
+		It("keeps Deployment at 0 replicas while a Pending restore job exists", func() {
+			createRestoreJob(bemadev1alpha1.PhasePending)
+			_, err := reconcileInstance()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(*getDeployment().Spec.Replicas).To(Equal(int32(0)))
+		})
+
+		It("is Restoring when an OdooRestoreJob is Pending", func() {
+			createRestoreJob(bemadev1alpha1.PhasePending)
+			_, err := reconcileInstance()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(getInstance().Status.Phase).To(Equal(bemadev1alpha1.OdooInstancePhaseRestoring))
+		})
+
+		It("keeps Deployment at 0 replicas while a Running upgrade job exists", func() {
+			createUpgradeJob(bemadev1alpha1.PhaseRunning)
+			_, err := reconcileInstance()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(*getDeployment().Spec.Replicas).To(Equal(int32(0)))
+		})
 	})
 
 	Describe("event publishing", func() {
