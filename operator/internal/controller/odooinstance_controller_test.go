@@ -21,7 +21,11 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -399,7 +403,7 @@ var _ = Describe("OdooInstance Controller", func() {
 				Expect(cond.Reason).To(Equal("Running"))
 			})
 
-		It("sets status.url from the first ingress host", func() {
+			It("sets status.url from the first ingress host", func() {
 				_, err := reconcileInstance()
 				Expect(err).NotTo(HaveOccurred())
 				simulateDeploymentReady(2)
@@ -605,6 +609,66 @@ var _ = Describe("OdooInstance Controller", func() {
 
 			events := drainEvents()
 			Expect(events).NotTo(ContainElement(ContainSubstring("PhaseChanged")))
+		})
+
+		It("POSTs a phase-transition payload to spec.webhook.url", func() {
+			// Set up a test HTTP server that captures the incoming request body.
+			var (
+				mu       sync.Mutex
+				received []webhookPayload
+				wg       sync.WaitGroup
+			)
+			wg.Add(1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var p webhookPayload
+				if err := json.NewDecoder(r.Body).Decode(&p); err == nil {
+					mu.Lock()
+					received = append(received, p)
+					mu.Unlock()
+					wg.Done()
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			// Use the test server's client so the goroutine can reach it.
+			reconciler.HTTPClient = srv.Client()
+
+			// Create instance pointing at the test server.
+			obj := &bemadev1alpha1.OdooInstance{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: bemadev1alpha1.OdooInstanceSpec{
+					Image:         "odoo:18.0",
+					AdminPassword: "admin",
+					Replicas:      1,
+					Ingress:       bemadev1alpha1.IngressSpec{Hosts: []string{"test.example.com"}},
+					Database:      &bemadev1alpha1.DatabaseSpec{Cluster: "default"},
+					Webhook:       &bemadev1alpha1.OdooWebhookConfig{URL: srv.URL},
+				},
+			}
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+			// First reconcile: phase transitions from "" → Uninitialized, triggering the webhook.
+			_, err := reconcileInstance()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Wait for the goroutine to deliver the payload (short timeout via Eventually).
+			Eventually(func() int {
+				wg.Wait()
+				mu.Lock()
+				defer mu.Unlock()
+				return len(received)
+			}, "5s", "100ms").Should(BeNumerically(">=", 1))
+
+			mu.Lock()
+			p := received[0]
+			mu.Unlock()
+
+			Expect(p.Name).To(Equal(name))
+			Expect(p.Namespace).To(Equal(ns))
+			Expect(p.Phase).To(Equal(string(bemadev1alpha1.OdooInstancePhaseUninitialized)))
+			Expect(p.PreviousPhase).To(Equal("")) // first transition from empty
+			Expect(p.Timestamp.IsZero()).To(BeFalse())
 		})
 	})
 })

@@ -20,10 +20,13 @@ with odoo-operator. If not, see <https://www.gnu.org/licenses/>.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -31,9 +34,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -61,6 +64,7 @@ type OdooInstanceReconciler struct {
 	client.Client
 	Scheme                 *runtime.Scheme
 	Recorder               record.EventRecorder
+	HTTPClient             *http.Client
 	OperatorNamespace      string
 	PostgresClustersSecret string
 	Defaults               OperatorDefaults
@@ -251,10 +255,14 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// Emit a phase-transition event (deduplicated: only when phase actually changes).
+	// Emit a phase-transition event and fire webhook (deduplicated: only when phase actually changes).
 	if phase != previousPhase {
 		r.Recorder.Eventf(&instance, phaseEventType(phase), "PhaseChanged",
 			"Phase changed: %s → %s", previousPhase, phase)
+		if instance.Spec.Webhook != nil && instance.Spec.Webhook.URL != "" {
+			go r.notifyWebhook(instance.Spec.Webhook.URL, instance.Name, instance.Namespace,
+				instance.Status.URL, previousPhase, phase)
+		}
 	}
 
 	// Requeue while pods are starting or initialization is in progress.
@@ -880,6 +888,56 @@ func phaseToCondition(phase bemadev1alpha1.OdooInstancePhase, generation int64) 
 	return c
 }
 
+// webhookPayload is the JSON body POSTed to spec.webhook.url on phase transitions.
+type webhookPayload struct {
+	Name          string    `json:"name"`
+	Namespace     string    `json:"namespace"`
+	Phase         string    `json:"phase"`
+	PreviousPhase string    `json:"previousPhase"`
+	URL           string    `json:"url,omitempty"`
+	Timestamp     time.Time `json:"timestamp"`
+}
+
+// notifyWebhook POSTs a phase-transition payload to the configured webhook URL.
+// It runs in a goroutine so it never delays the reconcile loop. Non-2xx responses
+// and transport errors are logged but do not affect reconcile outcome.
+func (r *OdooInstanceReconciler) notifyWebhook(
+	webhookURL, name, namespace, instanceURL string,
+	previousPhase, phase bemadev1alpha1.OdooInstancePhase,
+) {
+	log := logf.Log.WithName("webhook-notify")
+	payload := webhookPayload{
+		Name:          name,
+		Namespace:     namespace,
+		Phase:         string(phase),
+		PreviousPhase: string(previousPhase),
+		URL:           instanceURL,
+		Timestamp:     time.Now().UTC(),
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Error(err, "failed to marshal webhook payload")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(body))
+	if err != nil {
+		log.Error(err, "failed to build webhook request", "url", webhookURL)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.HTTPClient.Do(req)
+	if err != nil {
+		log.Error(err, "webhook POST failed", "url", webhookURL)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Info("webhook returned non-2xx status", "url", webhookURL, "status", resp.StatusCode)
+	}
+}
+
 func desiredReplicas(instance *bemadev1alpha1.OdooInstance) int32 {
 	if !instance.Status.DBInitialized {
 		return 0
@@ -967,6 +1025,9 @@ func (r *OdooInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	r.Recorder = mgr.GetEventRecorderFor("odooinstance-controller")
+	if r.HTTPClient == nil {
+		r.HTTPClient = &http.Client{Timeout: 10 * time.Second}
+	}
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bemadev1alpha1.OdooInstance{}).
