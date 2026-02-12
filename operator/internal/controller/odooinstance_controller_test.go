@@ -284,6 +284,17 @@ var _ = Describe("OdooInstance Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(*getDeployment().Spec.Replicas).To(Equal(int32(0)))
 		})
+
+		It("sets Ready=False condition when not Running", func() {
+			createInstance()
+			_, err := reconcileInstance()
+			Expect(err).NotTo(HaveOccurred())
+			instance := getInstance()
+			cond := findCondition(instance.Status.Conditions, "Ready")
+			Expect(cond).NotTo(BeNil())
+			Expect(string(cond.Status)).To(Equal("False"))
+			Expect(cond.Reason).To(Equal("Uninitialized"))
+		})
 	})
 
 	Describe("Initializing phase", func() {
@@ -373,7 +384,22 @@ var _ = Describe("OdooInstance Controller", func() {
 				Expect(getInstance().Status.Phase).To(Equal(bemadev1alpha1.OdooInstancePhaseRunning))
 			})
 
-			It("sets status.url from the first ingress host", func() {
+			It("sets Ready=True condition when Running", func() {
+				_, err := reconcileInstance()
+				Expect(err).NotTo(HaveOccurred())
+				simulateDeploymentReady(2)
+
+				_, err = reconcileInstance()
+				Expect(err).NotTo(HaveOccurred())
+				instance := getInstance()
+				Expect(instance.Status.Phase).To(Equal(bemadev1alpha1.OdooInstancePhaseRunning))
+				cond := findCondition(instance.Status.Conditions, "Ready")
+				Expect(cond).NotTo(BeNil())
+				Expect(string(cond.Status)).To(Equal("True"))
+				Expect(cond.Reason).To(Equal("Running"))
+			})
+
+		It("sets status.url from the first ingress host", func() {
 				_, err := reconcileInstance()
 				Expect(err).NotTo(HaveOccurred())
 				simulateDeploymentReady(2)
@@ -489,4 +515,106 @@ var _ = Describe("OdooInstance Controller", func() {
 			Expect(getInstance().Status.Phase).To(Equal(bemadev1alpha1.OdooInstancePhaseRestoreFailed))
 		})
 	})
+
+	Describe("event publishing", func() {
+		// drainEvents returns all events currently buffered in the fake recorder.
+		drainEvents := func() []string {
+			ch := reconciler.Recorder.(*record.FakeRecorder).Events
+			var events []string
+			for {
+				select {
+				case e := <-ch:
+					events = append(events, e)
+				default:
+					return events
+				}
+			}
+		}
+
+		It("emits DefaultsApplied on first reconcile when spec fields are missing", func() {
+			// Create instance without image/filestore/database so applyDefaults fires.
+			obj := &bemadev1alpha1.OdooInstance{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: bemadev1alpha1.OdooInstanceSpec{
+					AdminPassword: "admin",
+					Replicas:      1,
+					Ingress:       bemadev1alpha1.IngressSpec{Hosts: []string{"test.example.com"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			events := drainEvents()
+			Expect(events).To(ContainElement(ContainSubstring("DefaultsApplied")))
+		})
+
+		It("emits DefaultsApplied for database cluster on first reconcile", func() {
+			// Create instance without database.cluster set.
+			obj := &bemadev1alpha1.OdooInstance{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: bemadev1alpha1.OdooInstanceSpec{
+					Image:         "odoo:18.0",
+					AdminPassword: "admin",
+					Replicas:      1,
+					Ingress:       bemadev1alpha1.IngressSpec{Hosts: []string{"test.example.com"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			events := drainEvents()
+			Expect(events).To(ContainElement(ContainSubstring("DefaultsApplied")))
+			Expect(events).To(ContainElement(ContainSubstring("default"))) // resolved cluster name
+		})
+
+		It("emits PhaseChanged when phase transitions", func() {
+			createInstance()
+			// First reconcile: no InitJob → Uninitialized phase (from empty "").
+			_, err := reconcileInstance()
+			Expect(err).NotTo(HaveOccurred())
+			drainEvents() // discard defaults events
+
+			// Simulate DB initialized so phase can advance.
+			instance := getInstance()
+			patch := client.MergeFrom(instance.DeepCopy())
+			instance.Status.DBInitialized = true
+			Expect(k8sClient.Status().Patch(ctx, instance, patch)).To(Succeed())
+
+			_, err = reconcileInstance()
+			Expect(err).NotTo(HaveOccurred())
+
+			events := drainEvents()
+			Expect(events).To(ContainElement(ContainSubstring("PhaseChanged")))
+		})
+
+		It("does not emit PhaseChanged when phase is unchanged", func() {
+			createInstance()
+			_, err := reconcileInstance()
+			Expect(err).NotTo(HaveOccurred())
+			drainEvents() // discard first-reconcile events
+
+			// Second reconcile — phase stays Uninitialized.
+			_, err = reconcileInstance()
+			Expect(err).NotTo(HaveOccurred())
+
+			events := drainEvents()
+			Expect(events).NotTo(ContainElement(ContainSubstring("PhaseChanged")))
+		})
+	})
 })
+
+// findCondition returns the condition with the given type, or nil if not found.
+func findCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == condType {
+			return &conditions[i]
+		}
+	}
+	return nil
+}

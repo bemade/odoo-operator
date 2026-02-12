@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -243,6 +244,7 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	instance.Status.ReadyReplicas = readyReplicas
 	instance.Status.Ready = readyReplicas == instance.Spec.Replicas && instance.Spec.Replicas > 0
 	instance.Status.URL = url
+	meta.SetStatusCondition(&instance.Status.Conditions, phaseToCondition(phase, instance.Generation))
 	if err := r.Status().Patch(ctx, &instance, patch); err != nil {
 		r.Recorder.Eventf(&instance, corev1.EventTypeWarning, "StatusUpdateFailed",
 			"Failed to update instance status: %v", err)
@@ -854,6 +856,28 @@ func phaseEventType(phase bemadev1alpha1.OdooInstancePhase) string {
 	default:
 		return corev1.EventTypeNormal
 	}
+}
+
+// phaseToCondition converts the OdooInstance phase to a standard Ready condition
+// that Kubernetes UIs (Rancher, kubectl) can interpret for status colouring:
+//
+//	Running             → Ready=True  (green)
+//	Stopped             → Ready=False, reason=Stopped  (grey/neutral)
+//	*Failed / Error     → Ready=False, reason=<phase>  (red)
+//	everything else     → Ready=False, reason=<phase>  (yellow/progressing)
+func phaseToCondition(phase bemadev1alpha1.OdooInstancePhase, generation int64) metav1.Condition {
+	c := metav1.Condition{
+		Type:               "Ready",
+		ObservedGeneration: generation,
+		Reason:             string(phase),
+		Message:            string(phase),
+	}
+	if phase == bemadev1alpha1.OdooInstancePhaseRunning {
+		c.Status = metav1.ConditionTrue
+	} else {
+		c.Status = metav1.ConditionFalse
+	}
+	return c
 }
 
 func desiredReplicas(instance *bemadev1alpha1.OdooInstance) int32 {
