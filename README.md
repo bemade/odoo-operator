@@ -1,8 +1,10 @@
 # odoo-operator
 
-A Kubernetes operator for managing Odoo instances. Declaratively deploy, initialize, upgrade, back up, and restore Odoo databases using custom resources.
+A Kubernetes operator for managing Odoo instances. Declaratively deploy, initialize,
+upgrade, back up, and restore Odoo databases using custom resources.
 
-Built with [kubebuilder](https://book.kubebuilder.io/) / controller-runtime. Deployed via Helm.
+Built with [kubebuilder](https://book.kubebuilder.io/) / controller-runtime. Deployed
+via Helm.
 
 ## Custom Resources
 
@@ -42,6 +44,25 @@ kubectl create secret generic pg-clusters -n odoo-operator \
 ```
 
 ### 2. Install the chart
+
+#### With a values file (recommended)
+
+Get the sample values file at:
+
+`https://raw.githubusercontent.com/bemade/odoo-operator/refs/heads/main/kubebuilder/charts/odoo-operator/values.yaml`
+
+Edit the file according to your requirements, then:
+
+```sh
+helm upgrade --install odoo-operator oci://registry.bemade.org/charts/odoo-operator \
+  --namespace odoo-operator \
+  -f <values_file_path.yaml>
+```
+
+If installing with Rancher or similar tools, simply choose to edit the helm values
+prior to installation.
+
+#### With command line values
 
 ```sh
 helm upgrade --install odoo-operator oci://registry.bemade.org/charts/odoo-operator \
@@ -142,4 +163,4 @@ cd operator && make manifests && make helm-crds
 
 ## License
 
-Apache 2.0 — Copyright 2026 Bemade Inc.
+LGPL-3.0-or-later — Copyright 2026 Marc Durepos, Bemade Inc.
