@@ -31,39 +31,79 @@ spec:
             - -c
             - |
               set -e
-              
+
               echo "=== Odoo Operator Post-Install Migration ==="
-              
-              # Read the default cluster name from the secret
-              echo "Reading default cluster from secret..."
-              SECRET_DATA=$(kubectl get secret "$SECRET_NAME" -n "$RELEASE_NAMESPACE" -o jsonpath='{.data.clusters\.yaml}' | base64 -d)
-              # Find the cluster name that has default: true (cluster names start at column 0, not indented)
-              DEFAULT_CLUSTER=$(echo "$SECRET_DATA" | awk '/^[a-zA-Z_-]+:/{name=substr($0,1,length($0)-1)} /default: true/{print name}' | head -1)
-              
+
+              # Clean up stale Kopf webhook configurations (left over from Python operator)
+              echo "Removing stale Kopf webhook configurations if present..."
+              kubectl delete validatingwebhookconfiguration auto.kopf.dev --ignore-not-found=true
+              kubectl delete mutatingwebhookconfiguration auto.kopf.dev --ignore-not-found=true
+              echo "Webhook cleanup done."
+
+              # Determine the default postgres cluster by reading 'default: true' from the secret.
+              # The operator itself uses the same logic at runtime; this migration only needs
+              # the default to backfill spec.database.cluster on old instances that lack it.
+              SECRET_DATA=$(kubectl get secret "$SECRET_NAME" -n "$RELEASE_NAMESPACE" \
+                -o jsonpath='{.data.clusters\.yaml}' 2>/dev/null | base64 -d 2>/dev/null || true)
+              DEFAULT_CLUSTER=$(echo "$SECRET_DATA" | \
+                awk '/^[a-zA-Z_-]+:/{name=substr($0,1,length($0)-1)} /default: true/{print name}' | head -1)
+
               if [ -z "$DEFAULT_CLUSTER" ]; then
-                echo "ERROR: No default cluster found in secret. Ensure one cluster has 'default: true'."
-                exit 1
-              fi
-              echo "Default cluster: $DEFAULT_CLUSTER"
-              
-              # Migrate instances without database.cluster to use default cluster
-              echo "Checking for OdooInstances without database.cluster..."
-              
-              # Get all instances and check each one
-              INSTANCES=$(kubectl get odooinstances.bemade.org --all-namespaces -o json 2>/dev/null | \
-                jq -r '.items[] | select(.spec.database == null or .spec.database.cluster == null) | "\(.metadata.namespace) \(.metadata.name)"' || echo "")
-              
-              if [ -z "$INSTANCES" ]; then
-                echo "No instances need migration."
+                echo "No default cluster available; skipping database.cluster migration."
               else
-                echo "$INSTANCES" | while read namespace name; do
-                  if [ -n "$namespace" ] && [ -n "$name" ]; then
+                echo "Default cluster: $DEFAULT_CLUSTER"
+
+                # Migrate instances without database.cluster to use default cluster
+                echo "Checking for OdooInstances without database.cluster..."
+                INSTANCES=$(kubectl get odooinstances.bemade.org --all-namespaces -o json 2>/dev/null | \
+                  jq -r '.items[] | select(.spec.database == null or .spec.database.cluster == null) | "\(.metadata.namespace) \(.metadata.name)"' || echo "")
+
+                if [ -z "$INSTANCES" ]; then
+                  echo "No instances need migration."
+                else
+                  echo "$INSTANCES" | while read -r namespace name; do
+                    [ -n "$namespace" ] && [ -n "$name" ] || continue
                     echo "Patching $namespace/$name to set database.cluster=$DEFAULT_CLUSTER"
                     kubectl patch odooinstance.bemade.org "$name" -n "$namespace" \
                       --type=merge \
                       -p "{\"spec\":{\"database\":{\"cluster\":\"$DEFAULT_CLUSTER\"}}}"
-                  fi
-                done
+                  done
+                fi
               fi
               
+              # Migrate all bemade.org CRD objects from v1 to v1alpha1 storage by
+              # patching via the explicit v1alpha1 API endpoint.  Kubernetes stores
+              # the write in the current storage version (v1alpha1) regardless of
+              # what version the object was previously stored as.
+              migrate_resource() {
+                local plural="$1"
+                echo "Migrating $plural from v1 to v1alpha1 storage..."
+                kubectl get "${plural}.v1alpha1.bemade.org" --all-namespaces -o json 2>/dev/null | \
+                  jq -r '.items[] | "\(.metadata.namespace) \(.metadata.name)"' | \
+                  while read -r namespace name; do
+                    [ -n "$namespace" ] && [ -n "$name" ] || continue
+                    echo "  $namespace/$name"
+                    kubectl patch "${plural}.v1alpha1.bemade.org" "$name" -n "$namespace" \
+                      --type=merge \
+                      -p '{"metadata":{"annotations":{"bemade.org/v1alpha1-migrated":"true"}}}'
+                  done
+              }
+
+              migrate_resource odooinstances
+              migrate_resource odoobackupjobs
+              migrate_resource odoorestorejobs
+              migrate_resource odooupgradejobs
+              migrate_resource odooinitjobs
+
+              # Clear v1 from status.storedVersions on each CRD now that all
+              # objects have been rewritten in v1alpha1 storage.
+              echo "Clearing v1 from CRD status.storedVersions..."
+              for crd in odooinstances.bemade.org odoobackupjobs.bemade.org odoorestorejobs.bemade.org odooupgradejobs.bemade.org odooinitjobs.bemade.org; do
+                kubectl patch crd "$crd" \
+                  --type=json \
+                  -p '[{"op":"replace","path":"/status/storedVersions","value":["v1alpha1"]}]' \
+                  --subresource=status \
+                  2>/dev/null && echo "  $crd: cleared" || echo "  $crd: skipped (already clean or not found)"
+              done
+
               echo "=== Migration complete ==="

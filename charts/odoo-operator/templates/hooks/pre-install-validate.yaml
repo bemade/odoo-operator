@@ -1,0 +1,73 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-validate-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 0
+  template:
+    metadata:
+      name: {{ .Release.Name }}-validate-config
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      restartPolicy: Never
+      containers:
+        - name: validate
+          image: bitnami/kubectl:latest
+          env:
+            - name: RELEASE_NAMESPACE
+              value: {{ .Release.Namespace }}
+            - name: SECRET_NAME
+              value: {{ .Values.postgresClustersSecretRef.name }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+
+              echo "=== Odoo Operator Pre-Install Validation ==="
+
+              # Verify the postgres clusters secret exists
+              if ! kubectl get secret "$SECRET_NAME" -n "$RELEASE_NAMESPACE" > /dev/null 2>&1; then
+                echo "ERROR: Secret '$SECRET_NAME' not found in namespace '$RELEASE_NAMESPACE'."
+                echo "Create it before installing:"
+                echo "  kubectl create secret generic $SECRET_NAME -n $RELEASE_NAMESPACE \\"
+                echo "    --from-file=clusters.yaml=my-clusters.yaml"
+                exit 1
+              fi
+
+              # Verify the clusters.yaml key is present
+              SECRET_DATA=$(kubectl get secret "$SECRET_NAME" -n "$RELEASE_NAMESPACE" \
+                -o jsonpath='{.data.clusters\.yaml}' 2>/dev/null | base64 -d 2>/dev/null)
+              if [ -z "$SECRET_DATA" ]; then
+                echo "ERROR: Secret '$SECRET_NAME' is missing the 'clusters.yaml' key."
+                exit 1
+              fi
+
+              # Count entries with 'default: true'
+              DEFAULT_COUNT=$(echo "$SECRET_DATA" | grep -c '^\s*default:\s*true\s*$' || true)
+              if [ "$DEFAULT_COUNT" -eq 0 ]; then
+                echo "ERROR: No cluster in '$SECRET_NAME' has 'default: true'."
+                echo "Exactly one cluster must be marked as the default. Example:"
+                echo "  main:"
+                echo "    host: postgres.postgres.svc.cluster.local"
+                echo "    port: 5432"
+                echo "    adminUser: postgres"
+                echo "    adminPassword: secret"
+                echo "    default: true"
+                exit 1
+              fi
+              if [ "$DEFAULT_COUNT" -gt 1 ]; then
+                echo "ERROR: $DEFAULT_COUNT clusters in '$SECRET_NAME' have 'default: true'."
+                echo "Exactly one cluster must be marked as the default."
+                exit 1
+              fi
+
+              echo "Validation passed: secret '$SECRET_NAME' is well-formed with one default cluster."

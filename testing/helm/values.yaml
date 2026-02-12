@@ -19,18 +19,16 @@ operator:
   # Node placement
   affinity: {}
   tolerations: []
-  annotations: {}
 
 # Image pull secrets for private registries
 imagePullSecrets: []
 
-# Default configuration for Odoo instances
 defaults:
-  # Default Odoo image to use
-  odooImage: odoo:18.0
-  # Default storage class for PVCs
+  odooImage: "odoo:18.0"
   storageClass: "standard"
-  # Default resource requests/limits for Odoo pods
+  storageSize: "2Gi"
+  ingressClass: "nginx"
+  ingressIssuer: "letsencrypt-dns"
   resources:
     requests:
       cpu: 400m
@@ -38,7 +36,6 @@ defaults:
     limits:
       cpu: 2000m
       memory: 4Gi
-  # Node placement
   affinity: {}
   tolerations: []
 

@@ -18,12 +18,15 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+
+	corev1 "k8s.io/api/core/v1"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -61,10 +64,37 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var postgresClustersSecret string
+	var defaultOdooImage string
+	var defaultStorageClass string
+	var defaultStorageSize string
+	var defaultIngressClass string
+	var defaultIngressIssuer string
+	var defaultResourcesJSON string
+	var defaultAffinityJSON string
+	var defaultTolerationsJSON string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&postgresClustersSecret, "postgres-clusters-secret", "postgres-clusters",
+		"Name of the Secret (in the operator namespace) containing the postgres cluster configuration.")
+	flag.StringVar(&defaultOdooImage, "default-odoo-image", "odoo:18.0",
+		"Default Odoo container image used when spec.image is not set on an OdooInstance.")
+	flag.StringVar(&defaultStorageClass, "default-storage-class", "standard",
+		"Default StorageClass for filestore PVCs when spec.filestore.storageClass is not set.")
+	flag.StringVar(&defaultStorageSize, "default-storage-size", "2Gi",
+		"Default PVC size for filestore when spec.filestore.storageSize is not set.")
+	flag.StringVar(&defaultIngressClass, "default-ingress-class", "",
+		"Default IngressClass annotation value when spec.ingress.class is not set. Empty means no annotation.")
+	flag.StringVar(&defaultIngressIssuer, "default-ingress-issuer", "",
+		"Default cert-manager ClusterIssuer when spec.ingress.issuer is not set.")
+	flag.StringVar(&defaultResourcesJSON, "default-resources", "",
+		"JSON-encoded corev1.ResourceRequirements applied when spec.resources is not set.")
+	flag.StringVar(&defaultAffinityJSON, "default-affinity", "",
+		"JSON-encoded corev1.Affinity applied when spec is not set.")
+	flag.StringVar(&defaultTolerationsJSON, "default-tolerations", "",
+		"JSON-encoded []corev1.Toleration applied when spec is not set.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -86,6 +116,39 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Parse complex defaults from JSON flags.
+	operatorDefaults := controller.OperatorDefaults{
+		OdooImage:     defaultOdooImage,
+		StorageClass:  defaultStorageClass,
+		StorageSize:   defaultStorageSize,
+		IngressClass:  defaultIngressClass,
+		IngressIssuer: defaultIngressIssuer,
+	}
+	if defaultResourcesJSON != "" {
+		var res corev1.ResourceRequirements
+		if err := json.Unmarshal([]byte(defaultResourcesJSON), &res); err != nil {
+			setupLog.Error(err, "invalid --default-resources JSON")
+			os.Exit(1)
+		}
+		operatorDefaults.Resources = &res
+	}
+	if defaultAffinityJSON != "" {
+		var aff corev1.Affinity
+		if err := json.Unmarshal([]byte(defaultAffinityJSON), &aff); err != nil {
+			setupLog.Error(err, "invalid --default-affinity JSON")
+			os.Exit(1)
+		}
+		operatorDefaults.Affinity = &aff
+	}
+	if defaultTolerationsJSON != "" {
+		var tols []corev1.Toleration
+		if err := json.Unmarshal([]byte(defaultTolerationsJSON), &tols); err != nil {
+			setupLog.Error(err, "invalid --default-tolerations JSON")
+			os.Exit(1)
+		}
+		operatorDefaults.Tolerations = tols
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -186,9 +249,11 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.OdooInstanceReconciler{
-		Client:            mgr.GetClient(),
-		Scheme:            mgr.GetScheme(),
-		OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"),
+		Client:                 mgr.GetClient(),
+		Scheme:                 mgr.GetScheme(),
+		OperatorNamespace:      os.Getenv("OPERATOR_NAMESPACE"),
+		PostgresClustersSecret: postgresClustersSecret,
+		Defaults:               operatorDefaults,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OdooInstance")
 		os.Exit(1)

@@ -54,8 +54,70 @@ type postgresClusterConfig struct {
 // OdooInstanceReconciler reconciles a OdooInstance object.
 type OdooInstanceReconciler struct {
 	client.Client
-	Scheme            *runtime.Scheme
-	OperatorNamespace string
+	Scheme                 *runtime.Scheme
+	OperatorNamespace      string
+	PostgresClustersSecret string
+	Defaults               OperatorDefaults
+}
+
+// applyDefaults writes operator-level defaults into any unset spec fields and
+// returns true if the spec was changed. The caller must persist the change and
+// requeue; downstream reconcile logic can then assume all fields are populated.
+func (r *OdooInstanceReconciler) applyDefaults(instance *bemadev1alpha1.OdooInstance) bool {
+	changed := false
+
+	if instance.Spec.Image == "" {
+		img := r.Defaults.OdooImage
+		if img == "" {
+			img = "odoo:18.0"
+		}
+		instance.Spec.Image = img
+		changed = true
+	}
+
+	if instance.Spec.Filestore == nil {
+		instance.Spec.Filestore = &bemadev1alpha1.FilestoreSpec{}
+	}
+	if instance.Spec.Filestore.StorageClass == "" {
+		sc := r.Defaults.StorageClass
+		if sc == "" {
+			sc = "standard"
+		}
+		instance.Spec.Filestore.StorageClass = sc
+		changed = true
+	}
+	if instance.Spec.Filestore.StorageSize == "" {
+		sz := r.Defaults.StorageSize
+		if sz == "" {
+			sz = "2Gi"
+		}
+		instance.Spec.Filestore.StorageSize = sz
+		changed = true
+	}
+
+	if instance.Spec.Ingress.Issuer == "" && r.Defaults.IngressIssuer != "" {
+		instance.Spec.Ingress.Issuer = r.Defaults.IngressIssuer
+		changed = true
+	}
+	if instance.Spec.Ingress.Class == nil && r.Defaults.IngressClass != "" {
+		instance.Spec.Ingress.Class = &r.Defaults.IngressClass
+		changed = true
+	}
+
+	if instance.Spec.Resources == nil && r.Defaults.Resources != nil {
+		instance.Spec.Resources = r.Defaults.Resources.DeepCopy()
+		changed = true
+	}
+	if instance.Spec.Affinity == nil && r.Defaults.Affinity != nil {
+		instance.Spec.Affinity = r.Defaults.Affinity.DeepCopy()
+		changed = true
+	}
+	if instance.Spec.Tolerations == nil && len(r.Defaults.Tolerations) > 0 {
+		instance.Spec.Tolerations = append([]corev1.Toleration{}, r.Defaults.Tolerations...)
+		changed = true
+	}
+
+	return changed
 }
 
 // +kubebuilder:rbac:groups=bemade.org,resources=odooinstances,verbs=get;list;watch;create;update;patch;delete
@@ -79,12 +141,38 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Write operator-level defaults into any unset spec fields on the first
+	// reconcile, then re-fetch so downstream logic works with the persisted
+	// (correct ResourceVersion) copy.
+	if r.applyDefaults(&instance) {
+		if err := r.Update(ctx, &instance); err != nil {
+			return ctrl.Result{}, fmt.Errorf("applying spec defaults: %w", err)
+		}
+		if err := r.Get(ctx, req.NamespacedName, &instance); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+	}
+
 	// Load postgres cluster config (needed for db-config secret and Deployment env vars).
-	pgCluster, err := r.loadPostgresCluster(ctx, instance.Spec.Database)
+	// If spec.database.cluster was not set, loadPostgresCluster resolves the default
+	// from the secret and returns its name so we can persist it into the spec.
+	clusterName, pgCluster, err := r.loadPostgresCluster(ctx, instance.Spec.Database)
 	if err != nil {
 		log.Error(err, "failed to load postgres cluster config")
 		return ctrl.Result{}, r.patchPhase(ctx, &instance, bemadev1alpha1.OdooInstancePhaseError,
 			fmt.Sprintf("postgres cluster config: %v", err))
+	}
+	if instance.Spec.Database == nil || instance.Spec.Database.Cluster == "" {
+		if instance.Spec.Database == nil {
+			instance.Spec.Database = &bemadev1alpha1.DatabaseSpec{}
+		}
+		instance.Spec.Database.Cluster = clusterName
+		if err := r.Update(ctx, &instance); err != nil {
+			return ctrl.Result{}, fmt.Errorf("persisting default postgres cluster: %w", err)
+		}
+		if err := r.Get(ctx, req.NamespacedName, &instance); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
 	}
 
 	// Check whether a completed InitJob has appeared before ensuring child
@@ -175,7 +263,7 @@ func (r *OdooInstanceReconciler) ensureOdooUserSecret(ctx context.Context, insta
 			Namespace: instance.Namespace,
 		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+	_, err := controllerutil.CreateOrPatch(ctx, r.Client, secret, func() error {
 		if secret.UID == "" {
 			// Generate credentials only on first creation.
 			secret.Data = map[string][]byte{
@@ -195,7 +283,7 @@ func (r *OdooInstanceReconciler) ensureDBConfigSecret(ctx context.Context, insta
 			Namespace: instance.Namespace,
 		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+	_, err := controllerutil.CreateOrPatch(ctx, r.Client, secret, func() error {
 		secret.Data = map[string][]byte{
 			"host": []byte(pg.Host),
 			"port": []byte(fmt.Sprintf("%d", pg.Port)),
@@ -206,14 +294,8 @@ func (r *OdooInstanceReconciler) ensureDBConfigSecret(ctx context.Context, insta
 }
 
 func (r *OdooInstanceReconciler) ensureFilestorePVC(ctx context.Context, instance *bemadev1alpha1.OdooInstance) error {
-	storageSize := "2Gi"
-	storageClass := ""
-	if instance.Spec.Filestore != nil {
-		if instance.Spec.Filestore.StorageSize != "" {
-			storageSize = instance.Spec.Filestore.StorageSize
-		}
-		storageClass = instance.Spec.Filestore.StorageClass
-	}
+	storageSize := instance.Spec.Filestore.StorageSize
+	storageClass := instance.Spec.Filestore.StorageClass
 
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -221,7 +303,7 @@ func (r *OdooInstanceReconciler) ensureFilestorePVC(ctx context.Context, instanc
 			Namespace: instance.Namespace,
 		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
+	_, err := controllerutil.CreateOrPatch(ctx, r.Client, pvc, func() error {
 		if pvc.UID == "" {
 			// Spec is immutable after creation — only set on first create.
 			qty := resource.MustParse(storageSize)
@@ -248,7 +330,7 @@ func (r *OdooInstanceReconciler) ensureConfigMap(ctx context.Context, instance *
 			Namespace: instance.Namespace,
 		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+	_, err := controllerutil.CreateOrPatch(ctx, r.Client, cm, func() error {
 		cm.Data = map[string]string{
 			"odoo.conf": buildOdooConf(username, instance.Spec.AdminPassword, instance.Spec.ConfigOptions),
 		}
@@ -264,7 +346,7 @@ func (r *OdooInstanceReconciler) ensureService(ctx context.Context, instance *be
 			Namespace: instance.Namespace,
 		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+	_, err := controllerutil.CreateOrPatch(ctx, r.Client, svc, func() error {
 		svc.Labels = map[string]string{"app": instance.Name}
 		svc.Spec.Selector = map[string]string{"app": instance.Name}
 		svc.Spec.Type = corev1.ServiceTypeClusterIP
@@ -285,12 +367,13 @@ func (r *OdooInstanceReconciler) ensureIngress(ctx context.Context, instance *be
 			Namespace: instance.Namespace,
 		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ing, func() error {
+	_, err := controllerutil.CreateOrPatch(ctx, r.Client, ing, func() error {
 		if ing.Annotations == nil {
 			ing.Annotations = map[string]string{}
 		}
-		ing.Annotations["cert-manager.io/cluster-issuer"] = instance.Spec.Ingress.Issuer
-
+		if instance.Spec.Ingress.Issuer != "" {
+			ing.Annotations["cert-manager.io/cluster-issuer"] = instance.Spec.Ingress.Issuer
+		}
 		if instance.Spec.Ingress.Class != nil {
 			ing.Spec.IngressClassName = instance.Spec.Ingress.Class
 		}
@@ -347,7 +430,7 @@ func (r *OdooInstanceReconciler) ensureDeployment(ctx context.Context, instance 
 			Namespace: instance.Namespace,
 		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
+	_, err := controllerutil.CreateOrPatch(ctx, r.Client, dep, func() error {
 		dep.Labels = map[string]string{"app": instance.Name}
 		dep.Spec.Replicas = &replicas
 		dep.Spec.Selector = &metav1.LabelSelector{
@@ -361,9 +444,6 @@ func (r *OdooInstanceReconciler) ensureDeployment(ctx context.Context, instance 
 		dep.Spec.Strategy = appsv1.DeploymentStrategy{Type: strategy}
 
 		image := instance.Spec.Image
-		if image == "" {
-			image = "odoo:18.0"
-		}
 
 		var imagePullSecrets []corev1.LocalObjectReference
 		if instance.Spec.ImagePullSecret != "" {
@@ -392,6 +472,8 @@ func (r *OdooInstanceReconciler) ensureDeployment(ctx context.Context, instance 
 			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": instance.Name}},
 			Spec: corev1.PodSpec{
 				ImagePullSecrets: imagePullSecrets,
+				Affinity:         instance.Spec.Affinity,
+				Tolerations:      instance.Spec.Tolerations,
 				SecurityContext: &corev1.PodSecurityContext{
 					RunAsUser:           ptr(int64(100)),
 					RunAsGroup:          ptr(int64(101)),
@@ -649,36 +731,45 @@ func (r *OdooInstanceReconciler) latestInitJobPhase(ctx context.Context, instanc
 
 // ── Postgres cluster config ───────────────────────────────────────────────────
 
-func (r *OdooInstanceReconciler) loadPostgresCluster(ctx context.Context, dbSpec *bemadev1alpha1.DatabaseSpec) (postgresClusterConfig, error) {
+// loadPostgresCluster resolves the postgres cluster for the given instance and
+// returns both the cluster name and its configuration. If spec.database.cluster
+// is set it is used directly; otherwise the cluster marked default:true in the
+// secret is used. The returned name can be written back to spec.database.cluster
+// so the spec becomes self-describing.
+func (r *OdooInstanceReconciler) loadPostgresCluster(ctx context.Context, dbSpec *bemadev1alpha1.DatabaseSpec) (string, postgresClusterConfig, error) {
+	secretName := r.PostgresClustersSecret
+	if secretName == "" {
+		secretName = "postgres-clusters"
+	}
 	var secret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Name: "postgres-clusters", Namespace: r.OperatorNamespace}, &secret); err != nil {
-		return postgresClusterConfig{}, fmt.Errorf("postgres-clusters secret: %w", err)
+	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: r.OperatorNamespace}, &secret); err != nil {
+		return "", postgresClusterConfig{}, fmt.Errorf("%s secret: %w", secretName, err)
 	}
 
 	raw, ok := secret.Data["clusters.yaml"]
 	if !ok {
-		return postgresClusterConfig{}, fmt.Errorf("postgres-clusters secret missing clusters.yaml key")
+		return "", postgresClusterConfig{}, fmt.Errorf("postgres-clusters secret missing clusters.yaml key")
 	}
 
 	var clusters map[string]postgresClusterConfig
 	if err := sigsyaml.Unmarshal(raw, &clusters); err != nil {
-		return postgresClusterConfig{}, fmt.Errorf("parsing clusters.yaml: %w", err)
+		return "", postgresClusterConfig{}, fmt.Errorf("parsing clusters.yaml: %w", err)
 	}
 
 	if dbSpec != nil && dbSpec.Cluster != "" {
 		c, ok := clusters[dbSpec.Cluster]
 		if !ok {
-			return postgresClusterConfig{}, fmt.Errorf("postgres cluster %q not found", dbSpec.Cluster)
+			return "", postgresClusterConfig{}, fmt.Errorf("postgres cluster %q not found", dbSpec.Cluster)
 		}
-		return c, nil
+		return dbSpec.Cluster, c, nil
 	}
 
-	for _, c := range clusters {
+	for name, c := range clusters {
 		if c.Default {
-			return c, nil
+			return name, c, nil
 		}
 	}
-	return postgresClusterConfig{}, fmt.Errorf("no default postgres cluster configured")
+	return "", postgresClusterConfig{}, fmt.Errorf("no default postgres cluster configured in %s secret", secretName)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

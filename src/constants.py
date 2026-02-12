@@ -1,8 +1,0 @@
-API_GROUP = "bemade.org"
-
-# CRD versions
-ODOO_INSTANCE_VERSION = "v1alpha2"
-BACKUP_JOB_VERSION = "v1alpha1"
-RESTORE_JOB_VERSION = "v1alpha1"
-UPGRADE_JOB_VERSION = "v1alpha1"
-INIT_JOB_VERSION = "v1alpha1"

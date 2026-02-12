@@ -140,6 +140,32 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx rm odoo-operator-builder
 	rm Dockerfile.cross
 
+HELM_CHART_DIR ?= ../charts/odoo-operator/templates/crds
+
+# helm-crd-inject:
+#   1. Replaces the controller-gen annotation with helm.sh/resource-policy: keep.
+#   2. Injects a Helm template include for the v1 legacy shim (served:true,
+#      storage:false, open schema) immediately after "  versions:" so that
+#      clusters previously running the Kopf Python operator (which stored objects
+#      as bemade.org/v1) can upgrade without manual kubectl patching.
+# $(1) = source CRD yaml, $(2) = destination path, $(3) = include name
+define helm-crd-inject
+	sed \
+	  -e 's|    controller-gen\.kubebuilder\.io/version:.*|    helm.sh/resource-policy: keep|' \
+	  -e 's|^  versions:$$|  versions:\n{{- include "$(3)" . \| nindent 2 }}|' \
+	  $(1) > $(2)
+endef
+
+.PHONY: helm-crds
+helm-crds: manifests ## Sync generated CRDs into the Helm chart templates.
+	@mkdir -p "$(HELM_CHART_DIR)"
+	$(call helm-crd-inject,config/crd/bases/bemade.org_odooinstances.yaml,$(HELM_CHART_DIR)/odoo-crd.yaml,odoo-operator.v1LegacyVersionWithScale)
+	$(call helm-crd-inject,config/crd/bases/bemade.org_odooinitjobs.yaml,$(HELM_CHART_DIR)/initjob-crd.yaml,odoo-operator.v1LegacyVersion)
+	$(call helm-crd-inject,config/crd/bases/bemade.org_odoobackupjobs.yaml,$(HELM_CHART_DIR)/backupjob-crd.yaml,odoo-operator.v1LegacyVersion)
+	$(call helm-crd-inject,config/crd/bases/bemade.org_odoorestorejobs.yaml,$(HELM_CHART_DIR)/restorejob-crd.yaml,odoo-operator.v1LegacyVersion)
+	$(call helm-crd-inject,config/crd/bases/bemade.org_odooupgradejobs.yaml,$(HELM_CHART_DIR)/upgradejob-crd.yaml,odoo-operator.v1LegacyVersion)
+	@echo "CRDs synced to $(HELM_CHART_DIR)"
+
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist

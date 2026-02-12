@@ -4,8 +4,8 @@
 
 # Operator deployment configuration
 operator:
-  # Operator container image
-  image: registry.bemade.org/bemade/odoo-operator
+  # Operator container image (include the tag, e.g. registry.bemade.org/bemade/odoo-operator:v0.12.0)
+  image: registry.bemade.org/bemade/odoo-operator:latest
 
   # Resource limits and requests for the operator
   resources:
@@ -18,7 +18,6 @@ operator:
   # Node placement
   affinity: {}
   tolerations: []
-  annotations: {}
 
 # Image pull secrets for private registries
 imagePullSecrets:
@@ -27,13 +26,20 @@ imagePullSecrets:
     password: password
 
 
-# Default configuration for Odoo instances
+# Default configuration applied by the operator when an OdooInstance does not
+# specify these fields. These are cluster-specific values that vary per installation.
 defaults:
-  # Default Odoo image to use
-  odooImage: odoo:18.0
-  # Default storage class for PVCs
+  # Default Odoo container image when spec.image is not set.
+  odooImage: "odoo:18.0"
+  # Default StorageClass for filestore PVCs when spec.filestore.storageClass is not set.
   storageClass: "standard"
-  # Default resource requests/limits for Odoo pods
+  # Default PVC size for filestore when spec.filestore.storageSize is not set.
+  storageSize: "2Gi"
+  # Default IngressClass when spec.ingress.class is not set. Leave empty to omit the annotation.
+  ingressClass: ""
+  # Default cert-manager ClusterIssuer when spec.ingress.issuer is not set.
+  ingressIssuer: ""
+  # Default CPU/memory resource requests and limits for Odoo pods.
   resources:
     requests:
       cpu: 400m
@@ -41,16 +47,10 @@ defaults:
     limits:
       cpu: 2000m
       memory: 4Gi
-  # Node placement
+  # Default node affinity for Odoo pods.
   affinity: {}
+  # Default tolerations for Odoo pods.
   tolerations: []
-  ingressClass: ""
-  # Default deployment strategy for Odoo instances
-  deploymentStrategy:
-    type: "Recreate"
-    rollingUpdate: # NOTE: This is ignored if type is not "RollingUpdate"
-      maxUnavailable: "25%"
-      maxSurge: "25%"
 
 # Odoo Manager ServiceAccount (for external Odoo instances to manage the cluster)
 odooManager:

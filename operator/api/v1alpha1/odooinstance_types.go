@@ -28,7 +28,9 @@ type IngressSpec struct {
 	Hosts []string `json:"hosts"`
 
 	// issuer is the name of the cert-manager ClusterIssuer used to issue the TLS certificate.
-	Issuer string `json:"issuer"`
+	// Defaults to the operator-level default when not set.
+	// +optional
+	Issuer string `json:"issuer,omitempty"`
 
 	// class is the IngressClass to use (e.g. "nginx", "traefik").
 	// +optional
@@ -38,13 +40,13 @@ type IngressSpec struct {
 // FilestoreSpec defines persistent storage for the Odoo filestore.
 type FilestoreSpec struct {
 	// storageSize is the PVC size requested for the filestore (e.g. "10Gi").
+	// Defaults to the operator-level default (typically "2Gi").
 	// +optional
-	// +kubebuilder:default="2Gi"
 	StorageSize string `json:"storageSize,omitempty"`
 
 	// storageClass is the StorageClass to use for the filestore PVC.
+	// Defaults to the operator-level default (typically "standard").
 	// +optional
-	// +kubebuilder:default="standard"
 	StorageClass string `json:"storageClass,omitempty"`
 }
 
@@ -133,8 +135,9 @@ type ProbesSpec struct {
 // OdooInstanceSpec defines the desired state of OdooInstance.
 type OdooInstanceSpec struct {
 	// image is the Odoo container image to use (e.g. "odoo:18.0").
-	// +kubebuilder:default="odoo:18.0"
-	Image string `json:"image"`
+	// Defaults to the operator-level default when not specified.
+	// +optional
+	Image string `json:"image,omitempty"`
 
 	// imagePullSecret is the name of the Secret containing registry credentials.
 	// +optional
@@ -182,6 +185,16 @@ type OdooInstanceSpec struct {
 	// probes configures the HTTP health check paths for Kubernetes liveness, readiness, and startup probes.
 	// +optional
 	Probes *ProbesSpec `json:"probes,omitempty"`
+
+	// affinity defines node affinity/anti-affinity rules for the Odoo pod.
+	// Defaults to the operator-level default when not set.
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// tolerations define tolerations for the Odoo pod.
+	// Defaults to the operator-level default when not set.
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 }
 
 // OdooInstancePhase represents the lifecycle state of an OdooInstance.

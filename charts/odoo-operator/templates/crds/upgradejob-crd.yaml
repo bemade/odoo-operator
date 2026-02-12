@@ -1,111 +1,229 @@
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: odooupgradejobs.bemade.org
   annotations:
     helm.sh/resource-policy: keep
+  name: odooupgradejobs.bemade.org
 spec:
   group: bemade.org
   names:
     kind: OdooUpgradeJob
     listKind: OdooUpgradeJobList
     plural: odooupgradejobs
+    shortNames:
+    - upgradejob
     singular: odooupgradejob
   scope: Namespaced
   versions:
-    - name: v1alpha1
-      served: true
-      storage: true
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            spec:
-              type: object
-              required:
-                - odooInstanceRef
-              properties:
-                odooInstanceRef:
-                  type: object
+{{- include "odoo-operator.v1LegacyVersion" . | nindent 2 }}
+  - additionalPrinterColumns:
+    - jsonPath: .spec.odooInstanceRef.name
+      name: Target
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: OdooUpgradeJob runs a one-shot module upgrade against an OdooInstance.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: OdooUpgradeJobSpec defines the desired state of OdooUpgradeJob.
+            properties:
+              modules:
+                description: modules is the list of already-installed modules to upgrade
+                  (-u flag).
+                items:
+                  type: string
+                type: array
+              modulesInstall:
+                description: modulesInstall is the list of new modules to install
+                  (-i flag).
+                items:
+                  type: string
+                type: array
+              odooInstanceRef:
+                description: odooInstanceRef identifies the OdooInstance to upgrade.
+                properties:
+                  name:
+                    description: name of the OdooInstance.
+                    type: string
+                  namespace:
+                    description: namespace of the OdooInstance. Defaults to the same
+                      namespace as this resource.
+                    type: string
+                required:
+                - name
+                type: object
+              scheduledTime:
+                description: |-
+                  scheduledTime is an optional time at which the upgrade should run.
+                  If set and in the future the controller will requeue until the time arrives.
+                format: date-time
+                type: string
+              webhook:
+                description: webhook is an optional callback invoked when the job
+                  completes or fails.
+                properties:
+                  secretTokenSecretRef:
+                    description: |-
+                      secretTokenSecretRef references a Secret containing the bearer token,
+                      as an alternative to specifying it inline.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  token:
+                    description: token is a bearer token included in the Authorization
+                      header.
+                    type: string
+                  url:
+                    description: url to POST status updates to.
+                    type: string
+                required:
+                - url
+                type: object
+            required:
+            - odooInstanceRef
+            type: object
+          status:
+            description: OdooUpgradeJobStatus defines the observed state of OdooUpgradeJob.
+            properties:
+              completionTime:
+                description: completionTime is when the upgrade job finished.
+                format: date-time
+                type: string
+              conditions:
+                description: conditions represent the detailed state of this resource.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
                   required:
-                    - name
-                  properties:
-                    name:
-                      type: string
-                      description: Name of the OdooInstance to upgrade.
-                    namespace:
-                      type: string
-                      description: Namespace of the OdooInstance (defaults to this namespace).
-                modules:
-                  type: array
-                  items:
-                    type: string
-                  description: List of modules to upgrade.
-                modulesInstall:
-                  type: array
-                  items:
-                    type: string
-                  description: List of modules to install.
-                scheduledTime:
-                  type: string
-                  format: date-time
-                  description: "Optional scheduled time for the upgrade. Format: YYYY-MM-DDTHH:MM:SSZ."
-                webhook:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
                   type: object
-                  description: Optional webhook callback when upgrade completes.
-                  properties:
-                    url:
-                      type: string
-                      description: URL to POST upgrade status updates to.
-                    token:
-                      type: string
-                      description: Bearer token to include in Authorization header.
-                    secretTokenSecretRef:
-                      type: object
-                      description: Alternative to token - reference to a Secret containing the token.
-                      properties:
-                        name:
-                          type: string
-                        key:
-                          type: string
-                      required:
-                        - name
-                        - key
-            status:
-              type: object
-              properties:
-                phase:
-                  type: string
-                  enum:
-                    - Pending
-                    - Running
-                    - Completed
-                    - Failed
-                  description: Current execution phase.
-                message:
-                  type: string
-                  description: Human-readable status message or error.
-                startTime:
-                  type: string
-                  format: date-time
-                completionTime:
-                  type: string
-                  format: date-time
-                jobName:
-                  type: string
-                  description: Kubernetes Job name handling this upgrade.
-                originalReplicas:
-                  type: integer
-                  description: Original replica count before scaling down for upgrade.
-      subresources:
-        status: {}
-      additionalPrinterColumns:
-        - name: Phase
-          type: string
-          jsonPath: .status.phase
-        - name: Instance
-          type: string
-          jsonPath: .spec.odooInstanceRef.name
-        - name: Age
-          type: date
-          jsonPath: .metadata.creationTimestamp
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              jobName:
+                description: jobName is the name of the Kubernetes Job performing
+                  the upgrade.
+                type: string
+              message:
+                description: message is a human-readable description of the current
+                  status.
+                type: string
+              originalReplicas:
+                description: |-
+                  originalReplicas records the replica count before scale-down so it can be
+                  restored after the upgrade completes.
+                format: int32
+                type: integer
+              phase:
+                description: phase is the current lifecycle phase of the upgrade job.
+                enum:
+                - Pending
+                - Running
+                - Completed
+                - Failed
+                type: string
+              startTime:
+                description: startTime is when the upgrade job began executing.
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

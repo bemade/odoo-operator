@@ -33,45 +33,48 @@ spec:
         - name: {{ .Release.Name }}
           image: {{ .Values.operator.image }}
           imagePullPolicy: {{ .Values.operator.imagePullPolicy | default "Always" }}
-          ports:
-            - name: webhook
-              containerPort: 443
-              protocol: TCP
+          command: ["/manager"]
+          args:
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+            - --postgres-clusters-secret={{ .Values.postgresClustersSecretRef.name }}
+            - --default-odoo-image={{ .Values.defaults.odooImage }}
+            - --default-storage-class={{ .Values.defaults.storageClass }}
+            - --default-storage-size={{ .Values.defaults.storageSize }}
+            {{- if .Values.defaults.ingressClass }}
+            - --default-ingress-class={{ .Values.defaults.ingressClass }}
+            {{- end }}
+            {{- if .Values.defaults.ingressIssuer }}
+            - --default-ingress-issuer={{ .Values.defaults.ingressIssuer }}
+            {{- end }}
+            {{- if .Values.defaults.postgresCluster }}
+            - --default-postgres-cluster={{ .Values.defaults.postgresCluster }}
+            {{- end }}
+            {{- if .Values.defaults.resources }}
+            - --default-resources={{ .Values.defaults.resources | toJson }}
+            {{- end }}
+            {{- if .Values.defaults.affinity }}
+            - --default-affinity={{ .Values.defaults.affinity | toJson }}
+            {{- end }}
+            {{- if .Values.defaults.tolerations }}
+            - --default-tolerations={{ .Values.defaults.tolerations | toJson }}
+            {{- end }}
           resources:
             {{- toYaml .Values.operator.resources | nindent 12 }}
           env:
-            - name: OPERATOR_NAME
-              value: {{ .Release.Name }}
             - name: OPERATOR_NAMESPACE
-              value: {{ .Release.Namespace }}
-            - name: DEFAULT_ODOO_IMAGE
-              value: {{ .Values.defaults.odooImage }}
-            - name: DEFAULT_STORAGE_CLASS
-              value: {{ .Values.defaults.storageClass }}
-            - name: SERVICE_NAME
-              value: {{ .Release.Name }}-webhook
-            - name: SERVICE_NAMESPACE
-              value: {{ .Release.Namespace }}
-            # PostgreSQL clusters config file path
-            - name: POSTGRES_CLUSTERS_FILE
-              value: /etc/postgres/clusters.yaml
-          volumeMounts:
-            - name: instance-defaults
-              mountPath: /etc/odoo
-              readOnly: true
-            - name: webhook-cert
-              mountPath: /etc/webhook
-              readOnly: true
-            - name: postgres-clusters
-              mountPath: /etc/postgres
-              readOnly: true
-      volumes:
-        - name: instance-defaults
-          configMap:
-            name: instance-defaults
-        - name: webhook-cert
-          secret:
-            secretName: {{ .Release.Name }}-webhook-cert
-        - name: postgres-clusters
-          secret:
-            secretName: {{ .Values.postgresClustersSecretRef.name }}
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
