@@ -293,6 +293,11 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 // ── Child resource management ─────────────────────────────────────────────────
 
 func (r *OdooInstanceReconciler) ensureChildResources(ctx context.Context, instance *bemadev1alpha1.OdooInstance, pg postgresClusterConfig) error {
+	if instance.Spec.ImagePullSecret != "" {
+		if err := r.ensureImagePullSecret(ctx, instance); err != nil {
+			return fmt.Errorf("image pull secret: %w", err)
+		}
+	}
 	if err := r.ensureOdooUserSecret(ctx, instance); err != nil {
 		return fmt.Errorf("odoo-user secret: %w", err)
 	}
@@ -315,6 +320,38 @@ func (r *OdooInstanceReconciler) ensureChildResources(ctx context.Context, insta
 		return fmt.Errorf("deployment: %w", err)
 	}
 	return nil
+}
+
+// ensureImagePullSecret copies spec.imagePullSecret from the operator namespace
+// into the instance namespace so that pods (Deployment and job containers) can
+// pull private images. If the secret does not exist in the operator namespace
+// it is assumed to be user-managed in the instance namespace and left alone.
+func (r *OdooInstanceReconciler) ensureImagePullSecret(ctx context.Context, instance *bemadev1alpha1.OdooInstance) error {
+	secretName := instance.Spec.ImagePullSecret
+
+	// Fetch the source from the operator namespace.
+	var src corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: r.OperatorNamespace}, &src); err != nil {
+		if errors.IsNotFound(err) {
+			// Not in operator namespace — assume user has placed it in the instance namespace.
+			return nil
+		}
+		return fmt.Errorf("reading source image pull secret %q: %w", secretName, err)
+	}
+
+	// Mirror into the instance namespace.
+	dst := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: instance.Namespace,
+		},
+	}
+	_, err := controllerutil.CreateOrPatch(ctx, r.Client, dst, func() error {
+		dst.Type = src.Type
+		dst.Data = src.Data
+		return controllerutil.SetControllerReference(instance, dst, r.Scheme)
+	})
+	return err
 }
 
 func (r *OdooInstanceReconciler) ensureOdooUserSecret(ctx context.Context, instance *bemadev1alpha1.OdooInstance) error {
