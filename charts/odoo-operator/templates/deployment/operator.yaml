@@ -37,6 +37,7 @@ spec:
           args:
             - --leader-elect
             - --health-probe-bind-address=:8081
+            - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
             - --postgres-clusters-secret={{ .Values.postgresClustersSecretRef.name }}
             - --default-odoo-image={{ .Values.defaults.odooImage }}
             - --default-storage-class={{ .Values.defaults.storageClass }}
@@ -66,6 +67,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          ports:
+            - name: webhook-server
+              containerPort: 9443
+              protocol: TCP
+          volumeMounts:
+            - name: webhook-cert
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
           livenessProbe:
             httpGet:
               path: /healthz
@@ -78,3 +87,7 @@ spec:
               port: 8081
             initialDelaySeconds: 5
             periodSeconds: 10
+      volumes:
+        - name: webhook-cert
+          secret:
+            secretName: {{ .Release.Name }}-webhook-cert

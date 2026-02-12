@@ -52,6 +52,11 @@ defaults:
   # Default tolerations for Odoo pods.
   tolerations: []
 
+# Validating webhook configuration
+webhook:
+  # ClusterIssuer used by cert-manager to issue the webhook TLS certificate.
+  certIssuer: "selfsigned-cluster-issuer"
+
 # Odoo Manager ServiceAccount (for external Odoo instances to manage the cluster)
 odooManager:
   # Enable creation of ServiceAccount and RBAC for Odoo manager

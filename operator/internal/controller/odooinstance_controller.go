@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -55,6 +56,7 @@ type postgresClusterConfig struct {
 type OdooInstanceReconciler struct {
 	client.Client
 	Scheme                 *runtime.Scheme
+	Recorder               record.EventRecorder
 	OperatorNamespace      string
 	PostgresClustersSecret string
 	Defaults               OperatorDefaults
@@ -132,6 +134,7 @@ func (r *OdooInstanceReconciler) applyDefaults(instance *bemadev1alpha1.OdooInst
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -141,11 +144,18 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Snapshot the phase before any mutations so we can detect transitions.
+	previousPhase := instance.Status.Phase
+
 	// Write operator-level defaults into any unset spec fields on the first
 	// reconcile, then re-fetch so downstream logic works with the persisted
 	// (correct ResourceVersion) copy.
 	if r.applyDefaults(&instance) {
+		r.Recorder.Event(&instance, corev1.EventTypeNormal, "DefaultsApplied",
+			"Spec defaults written from operator configuration")
 		if err := r.Update(ctx, &instance); err != nil {
+			r.Recorder.Eventf(&instance, corev1.EventTypeWarning, "UpdateFailed",
+				"Failed to persist spec defaults: %v", err)
 			return ctrl.Result{}, fmt.Errorf("applying spec defaults: %w", err)
 		}
 		if err := r.Get(ctx, req.NamespacedName, &instance); err != nil {
@@ -159,6 +169,8 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	clusterName, pgCluster, err := r.loadPostgresCluster(ctx, instance.Spec.Database)
 	if err != nil {
 		log.Error(err, "failed to load postgres cluster config")
+		r.Recorder.Eventf(&instance, corev1.EventTypeWarning, "PostgresConfigError",
+			"Failed to load postgres cluster config: %v", err)
 		return ctrl.Result{}, r.patchPhase(ctx, &instance, bemadev1alpha1.OdooInstancePhaseError,
 			fmt.Sprintf("postgres cluster config: %v", err))
 	}
@@ -167,7 +179,11 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			instance.Spec.Database = &bemadev1alpha1.DatabaseSpec{}
 		}
 		instance.Spec.Database.Cluster = clusterName
+		r.Recorder.Eventf(&instance, corev1.EventTypeNormal, "DefaultsApplied",
+			"Default postgres cluster %q resolved from secret and written to spec", clusterName)
 		if err := r.Update(ctx, &instance); err != nil {
+			r.Recorder.Eventf(&instance, corev1.EventTypeWarning, "UpdateFailed",
+				"Failed to persist default postgres cluster: %v", err)
 			return ctrl.Result{}, fmt.Errorf("persisting default postgres cluster: %w", err)
 		}
 		if err := r.Get(ctx, req.NamespacedName, &instance); err != nil {
@@ -180,6 +196,8 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// and the Deployment is created/updated with the right replica count.
 	if !instance.Status.DBInitialized {
 		if err := r.checkInitJobCompletion(ctx, &instance); err != nil {
+			r.Recorder.Eventf(&instance, corev1.EventTypeWarning, "InitJobCheckFailed",
+				"Failed to check init job completion: %v", err)
 			return ctrl.Result{}, err
 		}
 		// Re-read to pick up any status update just made.
@@ -190,18 +208,24 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Ensure all child resources exist and reflect the current spec.
 	if err := r.ensureChildResources(ctx, &instance, pgCluster); err != nil {
+		r.Recorder.Eventf(&instance, corev1.EventTypeWarning, "ReconcileError",
+			"Failed to reconcile child resources: %v", err)
 		return ctrl.Result{}, err
 	}
 
 	// Read current ready replica count from the Deployment.
 	readyReplicas, err := r.deploymentReadyReplicas(ctx, &instance)
 	if err != nil && !errors.IsNotFound(err) {
+		r.Recorder.Eventf(&instance, corev1.EventTypeWarning, "ReconcileError",
+			"Failed to read deployment ready replicas: %v", err)
 		return ctrl.Result{}, err
 	}
 
 	// Derive phase from observed state (priority-ordered).
 	phase, err := r.derivePhase(ctx, &instance, readyReplicas)
 	if err != nil {
+		r.Recorder.Eventf(&instance, corev1.EventTypeWarning, "ReconcileError",
+			"Failed to derive instance phase: %v", err)
 		return ctrl.Result{}, err
 	}
 
@@ -217,7 +241,15 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	instance.Status.Ready = readyReplicas == instance.Spec.Replicas && instance.Spec.Replicas > 0
 	instance.Status.URL = url
 	if err := r.Status().Patch(ctx, &instance, patch); err != nil {
+		r.Recorder.Eventf(&instance, corev1.EventTypeWarning, "StatusUpdateFailed",
+			"Failed to update instance status: %v", err)
 		return ctrl.Result{}, err
+	}
+
+	// Emit a phase-transition event (deduplicated: only when phase actually changes).
+	if phase != previousPhase {
+		r.Recorder.Eventf(&instance, phaseEventType(phase), "PhaseChanged",
+			"Phase changed: %s → %s", previousPhase, phase)
 	}
 
 	// Requeue while pods are starting or initialization is in progress.
@@ -296,6 +328,7 @@ func (r *OdooInstanceReconciler) ensureDBConfigSecret(ctx context.Context, insta
 func (r *OdooInstanceReconciler) ensureFilestorePVC(ctx context.Context, instance *bemadev1alpha1.OdooInstance) error {
 	storageSize := instance.Spec.Filestore.StorageSize
 	storageClass := instance.Spec.Filestore.StorageClass
+	desired := resource.MustParse(storageSize)
 
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -303,18 +336,27 @@ func (r *OdooInstanceReconciler) ensureFilestorePVC(ctx context.Context, instanc
 			Namespace: instance.Namespace,
 		},
 	}
+
 	_, err := controllerutil.CreateOrPatch(ctx, r.Client, pvc, func() error {
 		if pvc.UID == "" {
-			// Spec is immutable after creation — only set on first create.
-			qty := resource.MustParse(storageSize)
+			// Full spec is only set on first creation.
 			pvc.Spec = corev1.PersistentVolumeClaimSpec{
 				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
 				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{corev1.ResourceStorage: qty},
+					Requests: corev1.ResourceList{corev1.ResourceStorage: desired},
 				},
 			}
 			if storageClass != "" {
 				pvc.Spec.StorageClassName = &storageClass
+			}
+		} else {
+			// The validating webhook rejects decreases; here we only need to
+			// apply increases (StorageClasses with allowVolumeExpansion=true).
+			current := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+			if desired.Cmp(current) > 0 {
+				pvc.Spec.Resources.Requests[corev1.ResourceStorage] = desired
+				r.Recorder.Eventf(instance, corev1.EventTypeNormal, "FilestoreResized",
+					"Filestore PVC storage request increased from %s to %s", current.String(), desired.String())
 			}
 		}
 		return controllerutil.SetControllerReference(instance, pvc, r.Scheme)
@@ -783,10 +825,32 @@ func (r *OdooInstanceReconciler) deploymentReadyReplicas(ctx context.Context, in
 }
 
 func (r *OdooInstanceReconciler) patchPhase(ctx context.Context, instance *bemadev1alpha1.OdooInstance, phase bemadev1alpha1.OdooInstancePhase, message string) error {
+	previousPhase := instance.Status.Phase
 	patch := client.MergeFrom(instance.DeepCopy())
 	instance.Status.Phase = phase
 	instance.Status.Message = message
-	return r.Status().Patch(ctx, instance, patch)
+	if err := r.Status().Patch(ctx, instance, patch); err != nil {
+		return err
+	}
+	if phase != previousPhase {
+		r.Recorder.Eventf(instance, phaseEventType(phase), "PhaseChanged",
+			"Phase changed: %s → %s (%s)", previousPhase, phase, message)
+	}
+	return nil
+}
+
+// phaseEventType returns the Kubernetes event type for a given phase.
+// Error and failed phases use Warning; all others use Normal.
+func phaseEventType(phase bemadev1alpha1.OdooInstancePhase) string {
+	switch phase {
+	case bemadev1alpha1.OdooInstancePhaseError,
+		bemadev1alpha1.OdooInstancePhaseInitFailed,
+		bemadev1alpha1.OdooInstancePhaseRestoreFailed,
+		bemadev1alpha1.OdooInstancePhaseUpgradeFailed:
+		return corev1.EventTypeWarning
+	default:
+		return corev1.EventTypeNormal
+	}
 }
 
 func desiredReplicas(instance *bemadev1alpha1.OdooInstance) int32 {
@@ -874,6 +938,8 @@ func (r *OdooInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			NamespacedName: types.NamespacedName{Name: instanceName, Namespace: obj.GetNamespace()},
 		}}
 	}
+
+	r.Recorder = mgr.GetEventRecorderFor("odooinstance-controller")
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bemadev1alpha1.OdooInstance{}).

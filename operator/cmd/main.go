@@ -279,6 +279,10 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "OdooUpgradeJob")
 		os.Exit(1)
 	}
+	if err := bemadev1alpha1.SetupOdooInstanceWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "OdooInstance")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

@@ -28,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -50,6 +51,7 @@ var _ = Describe("OdooInstance Controller", func() {
 		reconciler = &OdooInstanceReconciler{
 			Client:            k8sClient,
 			Scheme:            k8sClient.Scheme(),
+			Recorder:          record.NewFakeRecorder(100),
 			OperatorNamespace: ns,
 		}
 		// Ensure postgres-clusters secret exists (shared across tests, idempotent).

@@ -92,19 +92,6 @@ type StrategySpec struct {
 	RollingUpdate *RollingUpdateSpec `json:"rollingUpdate,omitempty"`
 }
 
-// SyncSpec controls periodic git repository synchronisation.
-type SyncSpec struct {
-	// enabled triggers a sync operation when set to true.
-	// The controller resets it to false after sync completes.
-	// +optional
-	// +kubebuilder:default=false
-	Enabled bool `json:"enabled,omitempty"`
-
-	// time is the scheduled time for the next sync operation.
-	// +optional
-	Time *metav1.Time `json:"time,omitempty"`
-}
-
 // OdooWebhookConfig defines an optional webhook callback for status change notifications.
 // TODO: unify with the WebhookConfig in v1alpha1 once a shared package is established.
 type OdooWebhookConfig struct {
@@ -173,10 +160,6 @@ type OdooInstanceSpec struct {
 	// strategy defines the Deployment update strategy.
 	// +optional
 	Strategy *StrategySpec `json:"strategy,omitempty"`
-
-	// sync configures periodic git repository synchronisation.
-	// +optional
-	Sync *SyncSpec `json:"sync,omitempty"`
 
 	// webhook is an optional callback invoked when the instance phase changes.
 	// +optional
