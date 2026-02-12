@@ -64,8 +64,8 @@ rules:
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
-  # Events
-  - apiGroups: [""]
+  # Events (core + events.k8s.io for kube-rs Recorder)
+  - apiGroups: ["", "events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch"]
 

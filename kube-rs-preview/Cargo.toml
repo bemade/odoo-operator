@@ -1,0 +1,61 @@
+[package]
+name = "odoo-operator"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later"
+authors = ["Marc Durepos <marc@bemade.org>"]
+description = "Kubernetes operator for managing Odoo instances (kube-rs preview)"
+
+[dependencies]
+# Kubernetes
+kube = { version = "0.98", features = ["runtime", "derive", "client", "admission"] }
+k8s-openapi = { version = "0.24", features = ["v1_32", "schemars"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Crypto (password generation, config hashing)
+rand = "0.8"
+hex = "0.4"
+sha2 = "0.10"
+
+# PostgreSQL
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+
+# HTTP client (webhooks)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Schema generation
+schemars = "0.8"
+
+# Async trait (for PostgresManager trait)
+async-trait = "0.1"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive", "env"] }
+
+# Webhook server
+warp = { version = "0.3", features = ["tls"] }
+
+[dev-dependencies]
+tower-test = "0.4"
+http = "1"
+assert-json-diff = "2"
+http-body-util = "0.1"

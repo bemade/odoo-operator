@@ -8,8 +8,8 @@ metadata:
 spec:
   group: bemade.org
   names:
+    categories: []
     kind: OdooRestoreJob
-    listKind: OdooRestoreJobList
     plural: odoorestorejobs
     shortNames:
     - restore
@@ -33,31 +33,14 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: OdooRestoreJob restores an OdooInstance from a backup artifact.
+        description: Auto-generated derived type for OdooRestoreJobSpec via `CustomResource`
         properties:
-          apiVersion:
-            description: |-
-              APIVersion defines the versioned schema of this representation of an object.
-              Servers should convert recognized schemas to the latest internal value, and
-              may reject unrecognized values.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
-            type: string
-          kind:
-            description: |-
-              Kind is a string value representing the REST resource this object represents.
-              Servers may infer this from the endpoint the client submits requests to.
-              Cannot be updated.
-              In CamelCase.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
-            type: string
-          metadata:
-            type: object
           spec:
-            description: OdooRestoreJobSpec defines the desired state of OdooRestoreJob.
+            description: OdooRestoreJob restores an OdooInstance from a backup artifact.
             properties:
               format:
                 default: zip
-                description: format is the backup format of the artifact being restored.
+                description: BackupFormat specifies the format of the backup artifact.
                 enum:
                 - zip
                 - sql
@@ -65,90 +48,70 @@ spec:
                 type: string
               neutralize:
                 default: true
-                description: |-
-                  neutralize runs odoo-neutralize after restore to anonymise data.
-                  Recommended when restoring production data to a non-production environment.
                 type: boolean
               odooInstanceRef:
-                description: odooInstanceRef identifies the OdooInstance to restore
-                  into.
+                description: OdooInstanceRef is a reference to an OdooInstance resource.
                 properties:
                   name:
-                    description: name of the OdooInstance.
                     type: string
                   namespace:
-                    description: namespace of the OdooInstance. Defaults to the same
-                      namespace as this resource.
+                    nullable: true
                     type: string
                 required:
                 - name
                 type: object
               source:
-                description: source describes where to download the backup artifact
-                  from.
+                description: RestoreSource defines where to download the backup artifact from.
                 properties:
                   odoo:
-                    description: odoo configures a live Odoo instance source. Required
-                      when type is "odoo".
+                    description: OdooLiveSource downloads a backup from a running Odoo instance via its web backup endpoint.
+                    nullable: true
                     properties:
                       masterPassword:
-                        description: masterPassword is the Odoo master (admin) password
-                          of the source instance.
+                        nullable: true
                         type: string
                       sourceDatabase:
-                        description: sourceDatabase is the name of the database to
-                          download from the source.
+                        nullable: true
                         type: string
                       url:
-                        description: url is the base URL of the source Odoo instance
-                          (e.g. "https://src.example.com").
                         type: string
                     required:
                     - url
                     type: object
                   s3:
-                    description: s3 configures an S3-compatible source. Required when
-                      type is "s3".
+                    description: S3Config holds connection details for an S3-compatible object store.
+                    nullable: true
                     properties:
                       bucket:
-                        description: bucket is the S3 bucket name.
                         type: string
                       endpoint:
-                        description: endpoint is the S3-compatible endpoint URL (e.g.
-                          "https://s3.example.com").
                         type: string
                       insecure:
                         default: false
-                        description: insecure disables TLS certificate verification.
                         type: boolean
                       objectKey:
-                        description: objectKey is the object key (path) within the
-                          bucket.
                         type: string
                       region:
-                        description: region is the optional S3 region.
+                        nullable: true
                         type: string
                       s3CredentialsSecretRef:
-                        description: s3CredentialsSecretRef references a Secret with
-                          accessKey and secretKey fields.
+                        description: SecretReference represents a Secret Reference. It has enough information to retrieve secret in any namespace
+                        nullable: true
                         properties:
                           name:
-                            description: name is unique within a namespace to reference
-                              a secret resource.
+                            description: name is unique within a namespace to reference a secret resource.
                             type: string
                           namespace:
-                            description: namespace defines the space within which
-                              the secret name must be unique.
+                            description: namespace defines the space within which the secret name must be unique.
                             type: string
                         type: object
-                        x-kubernetes-map-type: atomic
                     required:
                     - bucket
                     - endpoint
                     - objectKey
                     type: object
                   type:
-                    description: type identifies the source backend.
+                    description: RestoreSourceType identifies the origin of the backup artifact.
                     enum:
                     - s3
                     - odoo
@@ -157,41 +120,25 @@ spec:
                 - type
                 type: object
               webhook:
-                description: webhook is an optional callback invoked when the job
-                  completes or fails.
+                description: WebhookConfig defines an optional webhook callback for job completion notifications.
+                nullable: true
                 properties:
                   secretTokenSecretRef:
-                    description: |-
-                      secretTokenSecretRef references a Secret containing the bearer token,
-                      as an alternative to specifying it inline.
+                    description: SecretKeySelector selects a key from a Secret.
+                    nullable: true
                     properties:
                       key:
-                        description: The key of the secret to select from.  Must be
-                          a valid secret key.
                         type: string
                       name:
-                        default: ""
-                        description: |-
-                          Name of the referent.
-                          This field is effectively required, but due to backwards compatibility is
-                          allowed to be empty. Instances of this type with an empty value here are
-                          almost certainly wrong.
-                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                         type: string
-                      optional:
-                        description: Specify whether the Secret or its key must be
-                          defined
-                        type: boolean
                     required:
                     - key
+                    - name
                     type: object
-                    x-kubernetes-map-type: atomic
                   token:
-                    description: token is a bearer token included in the Authorization
-                      header.
+                    nullable: true
                     type: string
                   url:
-                    description: url to POST status updates to.
                     type: string
                 required:
                 - url
@@ -202,59 +149,34 @@ spec:
             type: object
           status:
             description: OdooRestoreJobStatus defines the observed state of OdooRestoreJob.
+            nullable: true
             properties:
               completionTime:
-                description: completionTime is when the restore job finished.
-                format: date-time
+                nullable: true
                 type: string
               conditions:
-                description: conditions represent the detailed state of this resource.
                 items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
+                  description: Condition contains details for one aspect of the current state of this API Resource.
                   properties:
                     lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
                       format: date-time
                       type: string
                     message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
-                      maxLength: 32768
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
                       type: string
                     observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
                       format: int64
-                      minimum: 0
                       type: integer
                     reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
-                      maxLength: 1024
-                      minLength: 1
-                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
                       type: string
                     status:
                       description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
                       type: string
                     type:
                       description: type of condition in CamelCase or in foo.example.com/CamelCase.
-                      maxLength: 316
-                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
                       type: string
                   required:
                   - lastTransitionTime
@@ -264,32 +186,28 @@ spec:
                   - type
                   type: object
                 type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
               jobName:
-                description: jobName is the name of the Kubernetes Job performing
-                  the restore.
+                nullable: true
                 type: string
               message:
-                description: message is a human-readable description of the current
-                  status.
+                nullable: true
                 type: string
               phase:
-                description: phase is the current lifecycle phase of the restore job.
+                description: Phase represents the lifecycle state of a job resource.
                 enum:
                 - Pending
                 - Running
                 - Completed
                 - Failed
+                nullable: true
                 type: string
               startTime:
-                description: startTime is when the restore job began executing.
-                format: date-time
+                nullable: true
                 type: string
             type: object
         required:
         - spec
+        title: OdooRestoreJob
         type: object
     served: true
     storage: true

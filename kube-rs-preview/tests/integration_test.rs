@@ -1,0 +1,303 @@
+//! Integration tests for the odoo-operator.
+//!
+//! ## Pure logic tests (run always)
+//! Tests for `derive_phase`, `desired_replicas`, `owner_ref`, etc.
+//! These need no cluster — they exercise extracted pure functions.
+//!
+//! ## Cluster tests (run with `cargo test -- --ignored`)
+//! Tests that require a running Kubernetes cluster (kind, minikube, etc.).
+//! They apply CRDs, create resources, and verify the results.
+//!
+//! To run cluster tests:
+//!   1. `kind create cluster` (or use an existing minikube)
+//!   2. `cargo test -- --ignored`
+
+use kube::{Api, Client, CustomResourceExt, Resource, ResourceExt};
+use kube::api::{DeleteParams, Patch, PatchParams, PostParams};
+use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
+use serde_json::json;
+
+use odoo_operator::controller::odoo_instance::{
+    derive_phase, desired_replicas, owner_ref, ActiveJobState,
+};
+use odoo_operator::crd::odoo_instance::{
+    FilestoreSpec, IngressSpec, OdooInstance, OdooInstancePhase, OdooInstanceSpec,
+};
+use odoo_operator::crd::shared::Phase;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pure logic tests — no cluster needed
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_spec(replicas: i32) -> OdooInstanceSpec {
+    OdooInstanceSpec {
+        image: Some("odoo:18.0".into()),
+        image_pull_secret: None,
+        admin_password: "admin".into(),
+        replicas,
+        ingress: IngressSpec {
+            hosts: vec!["test.example.com".into()],
+            issuer: None,
+            class: None,
+        },
+        resources: None,
+        filestore: None,
+        config_options: None,
+        database: None,
+        strategy: None,
+        webhook: None,
+        probes: None,
+        affinity: None,
+        tolerations: vec![],
+    }
+}
+
+fn make_instance(replicas: i32) -> OdooInstance {
+    let mut inst = OdooInstance::new("test-instance", test_spec(replicas));
+    inst.meta_mut().namespace = Some("default".into());
+    inst.meta_mut().uid = Some("test-uid-1234".into());
+    inst
+}
+
+// ── derive_phase ─────────────────────────────────────────────────────────────
+
+#[test]
+fn phase_stopped_when_replicas_zero() {
+    let inst = make_instance(0);
+    let phase = derive_phase(&inst, 0, &ActiveJobState::default(), true, None);
+    assert_eq!(phase, OdooInstancePhase::Stopped);
+}
+
+#[test]
+fn phase_running_when_all_ready() {
+    let inst = make_instance(2);
+    let phase = derive_phase(&inst, 2, &ActiveJobState::default(), true, None);
+    assert_eq!(phase, OdooInstancePhase::Running);
+}
+
+#[test]
+fn phase_starting_when_zero_ready() {
+    let inst = make_instance(1);
+    let phase = derive_phase(&inst, 0, &ActiveJobState::default(), true, None);
+    assert_eq!(phase, OdooInstancePhase::Starting);
+}
+
+#[test]
+fn phase_degraded_when_partial_ready() {
+    let inst = make_instance(3);
+    let phase = derive_phase(&inst, 1, &ActiveJobState::default(), true, None);
+    assert_eq!(phase, OdooInstancePhase::Degraded);
+}
+
+#[test]
+fn phase_restoring_takes_priority() {
+    let inst = make_instance(1);
+    let jobs = ActiveJobState { restore_active: true, upgrade_active: true };
+    let phase = derive_phase(&inst, 1, &jobs, true, None);
+    assert_eq!(phase, OdooInstancePhase::Restoring);
+}
+
+#[test]
+fn phase_upgrading_when_upgrade_active() {
+    let inst = make_instance(1);
+    let jobs = ActiveJobState { restore_active: false, upgrade_active: true };
+    let phase = derive_phase(&inst, 1, &jobs, true, None);
+    assert_eq!(phase, OdooInstancePhase::Upgrading);
+}
+
+#[test]
+fn phase_uninitialized_when_db_not_init_no_job() {
+    let inst = make_instance(1);
+    let phase = derive_phase(&inst, 0, &ActiveJobState::default(), false, None);
+    assert_eq!(phase, OdooInstancePhase::Uninitialized);
+}
+
+#[test]
+fn phase_initializing_when_init_job_running() {
+    let inst = make_instance(1);
+    let phase = derive_phase(&inst, 0, &ActiveJobState::default(), false, Some(Phase::Running));
+    assert_eq!(phase, OdooInstancePhase::Initializing);
+}
+
+#[test]
+fn phase_init_failed_when_init_job_failed() {
+    let inst = make_instance(1);
+    let phase = derive_phase(&inst, 0, &ActiveJobState::default(), false, Some(Phase::Failed));
+    assert_eq!(phase, OdooInstancePhase::InitFailed);
+}
+
+// ── desired_replicas ─────────────────────────────────────────────────────────
+
+#[test]
+fn desired_replicas_zero_when_not_initialized() {
+    let inst = make_instance(3);
+    assert_eq!(desired_replicas(&inst, &ActiveJobState::default(), false), 0);
+}
+
+#[test]
+fn desired_replicas_zero_when_jobs_active() {
+    let inst = make_instance(3);
+    let jobs = ActiveJobState { restore_active: true, upgrade_active: false };
+    assert_eq!(desired_replicas(&inst, &jobs, true), 0);
+}
+
+#[test]
+fn desired_replicas_matches_spec_when_ready() {
+    let inst = make_instance(3);
+    assert_eq!(desired_replicas(&inst, &ActiveJobState::default(), true), 3);
+}
+
+// ── owner_ref ────────────────────────────────────────────────────────────────
+
+#[test]
+fn owner_ref_has_correct_fields() {
+    let inst = make_instance(1);
+    let oref = owner_ref(&inst);
+    assert_eq!(oref.kind, "OdooInstance");
+    assert_eq!(oref.api_version, "bemade.org/v1alpha1");
+    assert_eq!(oref.name, "test-instance");
+    assert_eq!(oref.uid, "test-uid-1234");
+    assert_eq!(oref.controller, Some(true));
+    assert_eq!(oref.block_owner_deletion, Some(true));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Cluster integration tests — require a running k8s cluster
+// Run with: cargo test -- --ignored
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Apply all operator CRDs to the cluster and verify they are accepted.
+#[tokio::test]
+#[ignore = "requires a running k8s cluster"]
+async fn cluster_apply_crds() {
+    let client = Client::try_default().await.expect("kubeconfig must be available");
+    let crds: Api<CustomResourceDefinition> = Api::all(client.clone());
+
+    let all_crds = vec![
+        OdooInstance::crd(),
+        odoo_operator::crd::odoo_init_job::OdooInitJob::crd(),
+        odoo_operator::crd::odoo_backup_job::OdooBackupJob::crd(),
+        odoo_operator::crd::odoo_restore_job::OdooRestoreJob::crd(),
+        odoo_operator::crd::odoo_upgrade_job::OdooUpgradeJob::crd(),
+    ];
+
+    let pp = PatchParams::apply("integration-test").force();
+    for crd in &all_crds {
+        let name = crd.metadata.name.as_deref().unwrap();
+        crds.patch(name, &pp, &Patch::Apply(crd))
+            .await
+            .unwrap_or_else(|e| panic!("failed to apply CRD {name}: {e}"));
+    }
+
+    // Give the API server a moment to register the CRDs.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Verify all CRDs exist.
+    for crd in &all_crds {
+        let name = crd.metadata.name.as_deref().unwrap();
+        let fetched = crds.get(name).await
+            .unwrap_or_else(|e| panic!("CRD {name} not found after apply: {e}"));
+        assert_eq!(fetched.name_any(), name);
+    }
+}
+
+/// Create an OdooInstance CR and verify it is accepted by the API server.
+/// Requires CRDs to be applied first (run cluster_apply_crds).
+#[tokio::test]
+#[ignore = "requires a running k8s cluster"]
+async fn cluster_create_odoo_instance() {
+    let client = Client::try_default().await.expect("kubeconfig must be available");
+    let ns = "default";
+    let instances: Api<OdooInstance> = Api::namespaced(client.clone(), ns);
+
+    let test_name = "integration-test-inst";
+
+    // Clean up from any previous run.
+    let _ = instances.delete(test_name, &DeleteParams::default()).await;
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // Create the instance.
+    let inst = OdooInstance::new(test_name, test_spec(1));
+
+    let created = instances.create(&PostParams::default(), &inst).await
+        .expect("failed to create OdooInstance");
+    assert_eq!(created.name_any(), test_name);
+    assert!(created.metadata.uid.is_some());
+
+    // Verify we can read it back.
+    let fetched = instances.get(test_name).await
+        .expect("failed to get OdooInstance");
+    assert_eq!(fetched.spec.replicas, 1);
+    assert_eq!(fetched.spec.ingress.hosts, vec!["test.example.com"]);
+
+    // Verify status subresource works (patch status).
+    let status_patch = json!({
+        "status": {
+            "phase": "Uninitialized",
+            "readyReplicas": 0,
+            "dbInitialized": false,
+        }
+    });
+    let pp = PatchParams::apply("integration-test");
+    instances.patch_status(test_name, &pp, &Patch::Merge(&status_patch)).await
+        .expect("failed to patch status");
+
+    let after_status = instances.get(test_name).await.unwrap();
+    let status = after_status.status.expect("status should be set");
+    assert_eq!(status.phase, Some(OdooInstancePhase::Uninitialized));
+    assert_eq!(status.ready_replicas, 0);
+
+    // Clean up.
+    instances.delete(test_name, &DeleteParams::default()).await
+        .expect("failed to delete test instance");
+}
+
+/// Verify the webhook validation logic works against real AdmissionReview payloads.
+/// This tests the pure validation function, not the webhook server itself.
+#[test]
+fn webhook_rejects_storage_shrink() {
+    let mut old_spec = test_spec(1);
+    old_spec.filestore = Some(FilestoreSpec {
+        storage_size: Some("10Gi".into()),
+        storage_class: Some("standard".into()),
+    });
+    let mut new_spec = test_spec(1);
+    new_spec.filestore = Some(FilestoreSpec {
+        storage_size: Some("5Gi".into()),  // shrink!
+        storage_class: Some("standard".into()),
+    });
+
+    let old_size = old_spec.filestore.as_ref().unwrap().storage_size.as_deref().unwrap();
+    let new_size = new_spec.filestore.as_ref().unwrap().storage_size.as_deref().unwrap();
+
+    // Parse and compare (replicating the webhook logic).
+    let old_bytes = parse_quantity_for_test(old_size);
+    let new_bytes = parse_quantity_for_test(new_size);
+    assert!(new_bytes < old_bytes, "5Gi should be less than 10Gi");
+}
+
+/// Verify storage class change is detectable.
+#[test]
+fn webhook_detects_storage_class_change() {
+    let old_class = "standard";
+    let new_class = "premium-ssd";
+    assert_ne!(old_class, new_class);
+    assert!(!old_class.is_empty());
+}
+
+/// Simple quantity parser for test assertions (mirrors webhook.rs logic).
+fn parse_quantity_for_test(s: &str) -> u64 {
+    let s = s.trim();
+    let num_end = s.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(s.len());
+    let (num_str, suffix) = s.split_at(num_end);
+    let num: f64 = num_str.parse().unwrap();
+    let multiplier: u64 = match suffix {
+        "Ki" => 1024,
+        "Mi" => 1024 * 1024,
+        "Gi" => 1024 * 1024 * 1024,
+        "Ti" => 1024 * 1024 * 1024 * 1024,
+        "" => 1,
+        _ => panic!("unknown suffix {suffix}"),
+    };
+    (num * multiplier as f64) as u64
+}

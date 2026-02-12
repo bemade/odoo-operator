@@ -33,11 +33,7 @@ spec:
         - name: {{ .Release.Name }}
           image: {{ .Values.operator.image }}
           imagePullPolicy: {{ .Values.operator.imagePullPolicy | default "Always" }}
-          command: ["/manager"]
           args:
-            - --leader-elect
-            - --health-probe-bind-address=:8081
-            - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
             - --postgres-clusters-secret={{ .Values.postgresClustersSecretRef.name }}
             - --default-odoo-image={{ .Values.defaults.odooImage }}
             - --default-storage-class={{ .Values.defaults.storageClass }}
@@ -48,18 +44,6 @@ spec:
             {{- if .Values.defaults.ingressIssuer }}
             - --default-ingress-issuer={{ .Values.defaults.ingressIssuer }}
             {{- end }}
-            {{- if .Values.defaults.postgresCluster }}
-            - --default-postgres-cluster={{ .Values.defaults.postgresCluster }}
-            {{- end }}
-            {{- if .Values.defaults.resources }}
-            - --default-resources={{ .Values.defaults.resources | toJson }}
-            {{- end }}
-            {{- if .Values.defaults.affinity }}
-            - --default-affinity={{ .Values.defaults.affinity | toJson }}
-            {{- end }}
-            {{- if .Values.defaults.tolerations }}
-            - --default-tolerations={{ .Values.defaults.tolerations | toJson }}
-            {{- end }}
           resources:
             {{- toYaml .Values.operator.resources | nindent 12 }}
           env:
@@ -67,6 +51,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           ports:
             - name: webhook-server
               containerPort: 9443
