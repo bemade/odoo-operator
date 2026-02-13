@@ -111,7 +111,7 @@ pub async fn apply_defaults(
     let spec_patch = json!({"spec": patch});
     api.patch(
         name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
+        &PatchParams::apply(FIELD_MANAGER),
         &Patch::Merge(&spec_patch),
     )
     .await?;
