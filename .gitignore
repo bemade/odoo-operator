@@ -4,4 +4,4 @@ __pycache__
 .vscode
 .idea
 .coverage
-src/
+/src/

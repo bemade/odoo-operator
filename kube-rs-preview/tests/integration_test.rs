@@ -1,7 +1,7 @@
 //! Integration tests for the odoo-operator.
 //!
 //! ## Pure logic tests (run always)
-//! Tests for `derive_phase`, `desired_replicas`, `owner_ref`, etc.
+//! Tests for state machine transition guards, `owner_ref`, etc.
 //! These need no cluster — they exercise extracted pure functions.
 //!
 //! ## Cluster tests (run with `cargo test -- --ignored`)
@@ -17,9 +17,8 @@ use kube::api::{DeleteParams, Patch, PatchParams, PostParams};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use serde_json::json;
 
-use odoo_operator::controller::odoo_instance::{
-    derive_phase, desired_replicas, owner_ref, ActiveJobState,
-};
+use odoo_operator::controller::odoo_instance::owner_ref;
+use odoo_operator::controller::state_machine::{ReconcileSnapshot, TRANSITIONS};
 use odoo_operator::crd::odoo_instance::{
     FilestoreSpec, IngressSpec, OdooInstance, OdooInstancePhase, OdooInstanceSpec,
 };
@@ -59,92 +58,530 @@ fn make_instance(replicas: i32) -> OdooInstance {
     inst
 }
 
-// ── derive_phase ─────────────────────────────────────────────────────────────
+fn default_snapshot() -> ReconcileSnapshot {
+    ReconcileSnapshot {
+        ready_replicas: 0,
+        db_initialized: false,
+        init_job_phase: None,
+        restore_job_phase: None,
+        upgrade_job_phase: None,
+        backup_job_active: false,
+        restore_job_active: false,
+        upgrade_job_active: false,
+        active_init_job: None,
+        active_restore_job: None,
+        active_upgrade_job: None,
+        active_backup_job: None,
+    }
+}
+
+/// Find the first matching transition from the given phase for the instance+snapshot.
+fn first_transition(
+    from: &OdooInstancePhase,
+    inst: &OdooInstance,
+    snap: &ReconcileSnapshot,
+) -> Option<OdooInstancePhase> {
+    TRANSITIONS
+        .iter()
+        .filter(|t| t.from == *from)
+        .find(|t| (t.guard)(inst, snap))
+        .map(|t| t.to.clone())
+}
+
+// ── Transition guard tests ──────────────────────────────────────────────────
 
 #[test]
-fn phase_stopped_when_replicas_zero() {
-    let inst = make_instance(0);
-    let phase = derive_phase(&inst, 0, &ActiveJobState::default(), true, None);
-    assert_eq!(phase, OdooInstancePhase::Stopped);
+fn provisioning_to_uninitialized_when_db_not_init() {
+    let inst = make_instance(1);
+    let snap = default_snapshot();
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Provisioning, &inst, &snap),
+        Some(OdooInstancePhase::Uninitialized)
+    );
 }
 
 #[test]
-fn phase_running_when_all_ready() {
+fn provisioning_to_starting_when_db_initialized() {
+    let inst = make_instance(1);
+    let snap = ReconcileSnapshot { db_initialized: true, ..default_snapshot() };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Provisioning, &inst, &snap),
+        Some(OdooInstancePhase::Starting)
+    );
+}
+
+#[test]
+fn uninitialized_to_initializing_when_init_running() {
+    let inst = make_instance(1);
+    let snap = ReconcileSnapshot {
+        init_job_phase: Some(Phase::Running),
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Uninitialized, &inst, &snap),
+        Some(OdooInstancePhase::Initializing)
+    );
+}
+
+#[test]
+fn uninitialized_to_restoring_when_restore_active() {
+    let inst = make_instance(1);
+    let snap = ReconcileSnapshot {
+        restore_job_active: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Uninitialized, &inst, &snap),
+        Some(OdooInstancePhase::Restoring)
+    );
+}
+
+#[test]
+fn initializing_to_starting_when_init_completed() {
+    let inst = make_instance(1);
+    let snap = ReconcileSnapshot {
+        init_job_phase: Some(Phase::Completed),
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Initializing, &inst, &snap),
+        Some(OdooInstancePhase::Starting)
+    );
+}
+
+#[test]
+fn initializing_to_init_failed_when_init_failed() {
+    let inst = make_instance(1);
+    let snap = ReconcileSnapshot {
+        init_job_phase: Some(Phase::Failed),
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Initializing, &inst, &snap),
+        Some(OdooInstancePhase::InitFailed)
+    );
+}
+
+#[test]
+fn starting_to_running_when_all_ready() {
     let inst = make_instance(2);
-    let phase = derive_phase(&inst, 2, &ActiveJobState::default(), true, None);
-    assert_eq!(phase, OdooInstancePhase::Running);
+    let snap = ReconcileSnapshot {
+        ready_replicas: 2,
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Starting, &inst, &snap),
+        Some(OdooInstancePhase::Running)
+    );
 }
 
 #[test]
-fn phase_starting_when_zero_ready() {
-    let inst = make_instance(1);
-    let phase = derive_phase(&inst, 0, &ActiveJobState::default(), true, None);
-    assert_eq!(phase, OdooInstancePhase::Starting);
+fn starting_to_stopped_when_replicas_zero() {
+    let inst = make_instance(0);
+    let snap = ReconcileSnapshot { db_initialized: true, ..default_snapshot() };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Starting, &inst, &snap),
+        Some(OdooInstancePhase::Stopped)
+    );
 }
 
 #[test]
-fn phase_degraded_when_partial_ready() {
+fn starting_stays_when_not_ready() {
+    let inst = make_instance(2);
+    let snap = ReconcileSnapshot {
+        ready_replicas: 0,
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Starting, &inst, &snap),
+        None
+    );
+}
+
+#[test]
+fn running_to_degraded_when_partial_ready() {
     let inst = make_instance(3);
-    let phase = derive_phase(&inst, 1, &ActiveJobState::default(), true, None);
-    assert_eq!(phase, OdooInstancePhase::Degraded);
+    let snap = ReconcileSnapshot {
+        ready_replicas: 1,
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Running, &inst, &snap),
+        Some(OdooInstancePhase::Degraded)
+    );
 }
 
 #[test]
-fn phase_restoring_takes_priority() {
+fn running_to_stopped_when_replicas_zero() {
+    let inst = make_instance(0);
+    let snap = ReconcileSnapshot {
+        ready_replicas: 0,
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Running, &inst, &snap),
+        Some(OdooInstancePhase::Stopped)
+    );
+}
+
+#[test]
+fn running_to_restoring_when_restore_active() {
     let inst = make_instance(1);
-    let jobs = ActiveJobState { restore_active: true, upgrade_active: true };
-    let phase = derive_phase(&inst, 1, &jobs, true, None);
-    assert_eq!(phase, OdooInstancePhase::Restoring);
+    let snap = ReconcileSnapshot {
+        ready_replicas: 1,
+        db_initialized: true,
+        restore_job_active: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Running, &inst, &snap),
+        Some(OdooInstancePhase::Restoring)
+    );
 }
 
 #[test]
-fn phase_upgrading_when_upgrade_active() {
+fn running_to_upgrading_when_upgrade_active() {
     let inst = make_instance(1);
-    let jobs = ActiveJobState { restore_active: false, upgrade_active: true };
-    let phase = derive_phase(&inst, 1, &jobs, true, None);
-    assert_eq!(phase, OdooInstancePhase::Upgrading);
+    let snap = ReconcileSnapshot {
+        ready_replicas: 1,
+        db_initialized: true,
+        upgrade_job_active: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Running, &inst, &snap),
+        Some(OdooInstancePhase::Upgrading)
+    );
 }
 
 #[test]
-fn phase_uninitialized_when_db_not_init_no_job() {
+fn running_to_backing_up_when_backup_active() {
     let inst = make_instance(1);
-    let phase = derive_phase(&inst, 0, &ActiveJobState::default(), false, None);
-    assert_eq!(phase, OdooInstancePhase::Uninitialized);
+    let snap = ReconcileSnapshot {
+        ready_replicas: 1,
+        db_initialized: true,
+        backup_job_active: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Running, &inst, &snap),
+        Some(OdooInstancePhase::BackingUp)
+    );
 }
 
 #[test]
-fn phase_initializing_when_init_job_running() {
+fn running_stays_when_healthy() {
+    let inst = make_instance(2);
+    let snap = ReconcileSnapshot {
+        ready_replicas: 2,
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Running, &inst, &snap),
+        None
+    );
+}
+
+#[test]
+fn backing_up_to_running_when_backup_done() {
     let inst = make_instance(1);
-    let phase = derive_phase(&inst, 0, &ActiveJobState::default(), false, Some(Phase::Running));
-    assert_eq!(phase, OdooInstancePhase::Initializing);
+    let snap = ReconcileSnapshot {
+        ready_replicas: 1,
+        db_initialized: true,
+        backup_job_active: false,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::BackingUp, &inst, &snap),
+        Some(OdooInstancePhase::Running)
+    );
 }
 
 #[test]
-fn phase_init_failed_when_init_job_failed() {
+fn upgrading_to_starting_when_upgrade_completed() {
     let inst = make_instance(1);
-    let phase = derive_phase(&inst, 0, &ActiveJobState::default(), false, Some(Phase::Failed));
-    assert_eq!(phase, OdooInstancePhase::InitFailed);
+    let snap = ReconcileSnapshot {
+        upgrade_job_phase: Some(Phase::Completed),
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Upgrading, &inst, &snap),
+        Some(OdooInstancePhase::Starting)
+    );
 }
 
-// ── desired_replicas ─────────────────────────────────────────────────────────
+#[test]
+fn upgrading_to_starting_when_upgrade_failed() {
+    let inst = make_instance(1);
+    let snap = ReconcileSnapshot {
+        upgrade_job_phase: Some(Phase::Failed),
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Upgrading, &inst, &snap),
+        Some(OdooInstancePhase::Starting)
+    );
+}
 
 #[test]
-fn desired_replicas_zero_when_not_initialized() {
+fn restoring_to_starting_when_restore_completed() {
+    let inst = make_instance(1);
+    let snap = ReconcileSnapshot {
+        restore_job_phase: Some(Phase::Completed),
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Restoring, &inst, &snap),
+        Some(OdooInstancePhase::Starting)
+    );
+}
+
+#[test]
+fn restoring_to_starting_when_restore_failed() {
+    let inst = make_instance(1);
+    let snap = ReconcileSnapshot {
+        restore_job_phase: Some(Phase::Failed),
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Restoring, &inst, &snap),
+        Some(OdooInstancePhase::Starting)
+    );
+}
+
+#[test]
+fn stopped_to_starting_when_replicas_positive() {
+    let inst = make_instance(2);
+    let snap = ReconcileSnapshot { db_initialized: true, ..default_snapshot() };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Stopped, &inst, &snap),
+        Some(OdooInstancePhase::Starting)
+    );
+}
+
+#[test]
+fn stopped_stays_when_replicas_zero() {
+    let inst = make_instance(0);
+    let snap = ReconcileSnapshot { db_initialized: true, ..default_snapshot() };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Stopped, &inst, &snap),
+        None
+    );
+}
+
+#[test]
+fn init_failed_to_initializing_on_retry() {
+    let inst = make_instance(1);
+    let snap = ReconcileSnapshot {
+        init_job_phase: Some(Phase::Running),
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::InitFailed, &inst, &snap),
+        Some(OdooInstancePhase::Initializing)
+    );
+}
+
+#[test]
+fn init_failed_to_restoring_on_restore() {
+    let inst = make_instance(1);
+    let snap = ReconcileSnapshot {
+        restore_job_active: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::InitFailed, &inst, &snap),
+        Some(OdooInstancePhase::Restoring)
+    );
+}
+
+#[test]
+fn degraded_to_running_when_all_ready() {
+    let inst = make_instance(2);
+    let snap = ReconcileSnapshot {
+        ready_replicas: 2,
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Degraded, &inst, &snap),
+        Some(OdooInstancePhase::Running)
+    );
+}
+
+#[test]
+fn degraded_to_starting_when_zero_ready() {
+    let inst = make_instance(2);
+    let snap = ReconcileSnapshot {
+        ready_replicas: 0,
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Degraded, &inst, &snap),
+        Some(OdooInstancePhase::Starting)
+    );
+}
+
+// ── New transitions added in audit ───────────────────────────────────────────
+
+#[test]
+fn starting_to_restoring_when_restore_active() {
+    let inst = make_instance(1);
+    let snap = ReconcileSnapshot {
+        restore_job_active: true,
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Starting, &inst, &snap),
+        Some(OdooInstancePhase::Restoring)
+    );
+}
+
+#[test]
+fn starting_to_upgrading_when_upgrade_active() {
+    let inst = make_instance(1);
+    let snap = ReconcileSnapshot {
+        upgrade_job_active: true,
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Starting, &inst, &snap),
+        Some(OdooInstancePhase::Upgrading)
+    );
+}
+
+#[test]
+fn starting_to_backing_up_when_backup_active() {
+    let inst = make_instance(1);
+    let snap = ReconcileSnapshot {
+        backup_job_active: true,
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Starting, &inst, &snap),
+        Some(OdooInstancePhase::BackingUp)
+    );
+}
+
+#[test]
+fn degraded_to_backing_up_when_backup_active() {
+    let inst = make_instance(2);
+    let snap = ReconcileSnapshot {
+        ready_replicas: 1,
+        db_initialized: true,
+        backup_job_active: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Degraded, &inst, &snap),
+        Some(OdooInstancePhase::BackingUp)
+    );
+}
+
+#[test]
+fn backing_up_to_stopped_when_replicas_zero() {
+    let inst = make_instance(0);
+    let snap = ReconcileSnapshot {
+        backup_job_active: true,
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::BackingUp, &inst, &snap),
+        Some(OdooInstancePhase::Stopped)
+    );
+}
+
+#[test]
+fn backing_up_to_degraded_when_partial_ready() {
     let inst = make_instance(3);
-    assert_eq!(desired_replicas(&inst, &ActiveJobState::default(), false), 0);
+    let snap = ReconcileSnapshot {
+        ready_replicas: 1,
+        db_initialized: true,
+        backup_job_active: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::BackingUp, &inst, &snap),
+        Some(OdooInstancePhase::Degraded)
+    );
 }
 
 #[test]
-fn desired_replicas_zero_when_jobs_active() {
-    let inst = make_instance(3);
-    let jobs = ActiveJobState { restore_active: true, upgrade_active: false };
-    assert_eq!(desired_replicas(&inst, &jobs, true), 0);
+fn backing_up_to_starting_when_zero_ready() {
+    let inst = make_instance(2);
+    let snap = ReconcileSnapshot {
+        ready_replicas: 0,
+        db_initialized: true,
+        backup_job_active: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::BackingUp, &inst, &snap),
+        Some(OdooInstancePhase::Starting)
+    );
 }
 
 #[test]
-fn desired_replicas_matches_spec_when_ready() {
-    let inst = make_instance(3);
-    assert_eq!(desired_replicas(&inst, &ActiveJobState::default(), true), 3);
+fn stopped_to_restoring_when_restore_active() {
+    let inst = make_instance(0);
+    let snap = ReconcileSnapshot {
+        restore_job_active: true,
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Stopped, &inst, &snap),
+        Some(OdooInstancePhase::Restoring)
+    );
+}
+
+#[test]
+fn stopped_to_upgrading_when_upgrade_active() {
+    let inst = make_instance(0);
+    let snap = ReconcileSnapshot {
+        upgrade_job_active: true,
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Stopped, &inst, &snap),
+        Some(OdooInstancePhase::Upgrading)
+    );
+}
+
+#[test]
+fn error_to_starting_when_db_initialized() {
+    let inst = make_instance(1);
+    let snap = ReconcileSnapshot {
+        db_initialized: true,
+        ..default_snapshot()
+    };
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Error, &inst, &snap),
+        Some(OdooInstancePhase::Starting)
+    );
+}
+
+#[test]
+fn error_to_uninitialized_when_db_not_initialized() {
+    let inst = make_instance(1);
+    let snap = default_snapshot();
+    assert_eq!(
+        first_transition(&OdooInstancePhase::Error, &inst, &snap),
+        Some(OdooInstancePhase::Uninitialized)
+    );
 }
 
 // ── owner_ref ────────────────────────────────────────────────────────────────
