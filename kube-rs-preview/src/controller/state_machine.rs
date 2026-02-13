@@ -1,16 +1,17 @@
 //! Declarative state machine for OdooInstance lifecycle phases.
 //!
-//! Each phase has an `on_enter()` method on [`OdooInstancePhase`] that fires
-//! once when the instance transitions into that state — one-shot outputs.
+//! Each phase has an `ensure()` method (via the [`State`] trait in
+//! [`super::states`]) that runs every reconcile tick — idempotent outputs
+//! that correct drift (PLC-style).
 //!
 //! Transitions are a static table of `(from, to, guard, action)`.  Guards are
 //! pure functions over `(&OdooInstance, &ReconcileSnapshot)`.  The reconciler
-//! evaluates guards each tick; when one fires, it patches the phase and calls
-//! `new_phase.on_enter()` to flip the outputs.
+//! calls `ensure()`, then evaluates guards; when one fires, it patches the
+//! phase and requeues so the new state's `ensure()` runs next tick.
 
 use std::time::Duration;
 
-use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::{apps::v1::Deployment, batch::v1::Job};
 use kube::api::{Api, ListParams, Patch, PatchParams, ResourceExt};
 use kube::runtime::controller::Action;
 use kube::Client;
@@ -31,20 +32,30 @@ use super::odoo_instance::Context;
 // ── ReconcileSnapshot ───────────────────────────────────────────────────────
 
 /// A point-in-time snapshot of the observed world, gathered once per reconcile.
-/// Guards are pure functions over the summary fields (phases, booleans).
-/// Handlers use the full CRD objects to read specs and patch statuses.
+/// Guards are pure functions over the summary fields.
+/// State ensure() methods use the full CRD objects to read specs.
 pub struct ReconcileSnapshot {
-    // Summary fields — used by guards (pure, sync).
+    // ── Deployment ────────────────────────────────────────────────────────
     pub ready_replicas: i32,
     pub db_initialized: bool,
-    pub init_job_phase: Option<Phase>,
-    pub restore_job_phase: Option<Phase>,
-    pub upgrade_job_phase: Option<Phase>,
-    pub backup_job_active: bool,
+
+    // ── Job CRD presence (is there an active CRD for this job type?) ─────
+    pub init_job_active: bool,
     pub restore_job_active: bool,
     pub upgrade_job_active: bool,
+    pub backup_job_active: bool,
 
-    // Active job CRD objects — used by handlers to read specs and patch status.
+    // ── K8s batch/v1 Job outcomes (from the actual Job, not the CRD) ─────
+    pub init_job_succeeded: bool,
+    pub init_job_failed: bool,
+    pub restore_job_succeeded: bool,
+    pub restore_job_failed: bool,
+    pub upgrade_job_succeeded: bool,
+    pub upgrade_job_failed: bool,
+    pub backup_job_succeeded: bool,
+    pub backup_job_failed: bool,
+
+    // ── Active job CRD objects (for ensure() to read specs) ───────────────
     pub active_init_job: Option<OdooInitJob>,
     pub active_restore_job: Option<OdooRestoreJob>,
     pub active_upgrade_job: Option<OdooUpgradeJob>,
@@ -54,7 +65,12 @@ pub struct ReconcileSnapshot {
 impl ReconcileSnapshot {
     /// Gather the snapshot from the cluster.  All List/Get calls happen here,
     /// so the rest of the reconcile loop is synchronous guard evaluation.
-    pub async fn gather(client: &Client, ns: &str, instance_name: &str, instance: &OdooInstance) -> Result<Self> {
+    pub async fn gather(
+        client: &Client,
+        ns: &str,
+        instance_name: &str,
+        instance: &OdooInstance,
+    ) -> Result<Self> {
         let db_initialized = instance
             .status
             .as_ref()
@@ -70,9 +86,11 @@ impl ReconcileSnapshot {
             }
         };
 
-        // Init jobs.
-        let mut init_job_phase: Option<Phase> = None;
+        let jobs_api: Api<Job> = Api::namespaced(client.clone(), ns);
+
+        // ── Init jobs ───────────────────────────────────────────────────
         let mut active_init_job: Option<OdooInitJob> = None;
+        let mut init_job_active = false;
         let mut db_init_from_jobs = db_initialized;
         {
             let inits: Api<OdooInitJob> = Api::namespaced(client.clone(), ns);
@@ -80,145 +98,143 @@ impl ReconcileSnapshot {
                 if job.spec.odoo_instance_ref.name != instance_name {
                     continue;
                 }
-                if let Some(ref status) = job.status {
-                    match status.phase.as_ref() {
-                        Some(Phase::Running) | Some(Phase::Pending) => {
-                            init_job_phase = Some(Phase::Running);
-                            active_init_job = Some(job);
-                            break; // Running takes priority
-                        }
-                        Some(Phase::Completed) => {
-                            db_init_from_jobs = true;
-                            init_job_phase = Some(Phase::Completed);
-                        }
-                        Some(Phase::Failed) if init_job_phase.is_none() => {
-                            init_job_phase = Some(Phase::Failed);
-                        }
-                        _ => {
-                            // Pending job with no phase yet — this is the active one.
-                            if active_init_job.is_none() {
-                                active_init_job = Some(job);
-                            }
-                        }
+                let phase = job.status.as_ref().and_then(|s| s.phase.as_ref());
+                match phase {
+                    Some(Phase::Completed) => {
+                        db_init_from_jobs = true;
                     }
-                } else {
-                    // No status at all — brand new CRD, this is the active one.
-                    if active_init_job.is_none() {
-                        active_init_job = Some(job);
+                    Some(Phase::Failed) => {}
+                    _ => {
+                        // Running, Pending, or no status — this is the active one.
+                        if active_init_job.is_none() {
+                            init_job_active = true;
+                            active_init_job = Some(job);
+                        }
                     }
                 }
             }
         }
 
-        // Restore jobs.
-        let mut restore_job_phase: Option<Phase> = None;
-        let mut restore_job_active = false;
+        // ── Restore jobs ────────────────────────────────────────────────
         let mut active_restore_job: Option<OdooRestoreJob> = None;
+        let mut restore_job_active = false;
         {
             let restores: Api<OdooRestoreJob> = Api::namespaced(client.clone(), ns);
             for job in restores.list(&ListParams::default()).await?.items {
                 if job.spec.odoo_instance_ref.name != instance_name {
                     continue;
                 }
-                if let Some(ref status) = job.status {
-                    match status.phase.as_ref() {
-                        Some(Phase::Running) | Some(Phase::Pending) => {
+                let phase = job.status.as_ref().and_then(|s| s.phase.as_ref());
+                match phase {
+                    Some(Phase::Completed) => {
+                        db_init_from_jobs = true;
+                    }
+                    Some(Phase::Failed) => {}
+                    _ => {
+                        if active_restore_job.is_none() {
                             restore_job_active = true;
-                            restore_job_phase = Some(Phase::Running);
                             active_restore_job = Some(job);
                         }
-                        Some(Phase::Completed) => {
-                            db_init_from_jobs = true;
-                            if restore_job_phase.is_none() {
-                                restore_job_phase = Some(Phase::Completed);
-                            }
-                        }
-                        Some(Phase::Failed) if restore_job_phase.is_none() => {
-                            restore_job_phase = Some(Phase::Failed);
-                        }
-                        _ => {
-                            if active_restore_job.is_none() {
-                                active_restore_job = Some(job);
-                            }
-                        }
                     }
-                } else if active_restore_job.is_none() {
-                    active_restore_job = Some(job);
                 }
             }
         }
 
-        // Upgrade jobs.
-        let mut upgrade_job_phase: Option<Phase> = None;
-        let mut upgrade_job_active = false;
+        // ── Upgrade jobs ────────────────────────────────────────────────
         let mut active_upgrade_job: Option<OdooUpgradeJob> = None;
+        let mut upgrade_job_active = false;
         {
             let upgrades: Api<OdooUpgradeJob> = Api::namespaced(client.clone(), ns);
             for job in upgrades.list(&ListParams::default()).await?.items {
                 if job.spec.odoo_instance_ref.name != instance_name {
                     continue;
                 }
-                if let Some(ref status) = job.status {
-                    match status.phase.as_ref() {
-                        Some(Phase::Running) | Some(Phase::Pending) => {
+                let phase = job.status.as_ref().and_then(|s| s.phase.as_ref());
+                match phase {
+                    Some(Phase::Completed) | Some(Phase::Failed) => {}
+                    _ => {
+                        if active_upgrade_job.is_none() {
                             upgrade_job_active = true;
-                            upgrade_job_phase = Some(Phase::Running);
                             active_upgrade_job = Some(job);
                         }
-                        Some(Phase::Completed) if upgrade_job_phase.is_none() => {
-                            upgrade_job_phase = Some(Phase::Completed);
-                        }
-                        Some(Phase::Failed) if upgrade_job_phase.is_none() => {
-                            upgrade_job_phase = Some(Phase::Failed);
-                        }
-                        _ => {
-                            if active_upgrade_job.is_none() {
-                                active_upgrade_job = Some(job);
-                            }
-                        }
                     }
-                } else if active_upgrade_job.is_none() {
-                    active_upgrade_job = Some(job);
                 }
             }
         }
 
-        // Backup jobs.
-        let mut backup_job_active = false;
+        // ── Backup jobs ─────────────────────────────────────────────────
         let mut active_backup_job: Option<OdooBackupJob> = None;
+        let mut backup_job_active = false;
         {
             let backups: Api<OdooBackupJob> = Api::namespaced(client.clone(), ns);
             for job in backups.list(&ListParams::default()).await?.items {
                 if job.spec.odoo_instance_ref.name != instance_name {
                     continue;
                 }
-                if let Some(ref status) = job.status {
-                    match status.phase.as_ref() {
-                        Some(Phase::Running) | Some(Phase::Pending) => {
+                let phase = job.status.as_ref().and_then(|s| s.phase.as_ref());
+                match phase {
+                    Some(Phase::Completed) | Some(Phase::Failed) => {}
+                    _ => {
+                        if active_backup_job.is_none() {
                             backup_job_active = true;
                             active_backup_job = Some(job);
                         }
-                        _ => {
-                            if active_backup_job.is_none() {
-                                active_backup_job = Some(job);
-                            }
-                        }
                     }
-                } else if active_backup_job.is_none() {
-                    active_backup_job = Some(job);
                 }
             }
         }
 
+        // ── K8s Job outcomes ────────────────────────────────────────────
+        // For each active CRD that has a jobName, look up the actual batch/v1
+        // Job and check its succeeded/failed counts.
+        let (init_job_succeeded, init_job_failed) = job_outcome(
+            &jobs_api,
+            active_init_job
+                .as_ref()
+                .and_then(|j| j.status.as_ref())
+                .and_then(|s| s.job_name.as_deref()),
+        )
+        .await;
+        let (restore_job_succeeded, restore_job_failed) = job_outcome(
+            &jobs_api,
+            active_restore_job
+                .as_ref()
+                .and_then(|j| j.status.as_ref())
+                .and_then(|s| s.job_name.as_deref()),
+        )
+        .await;
+        let (upgrade_job_succeeded, upgrade_job_failed) = job_outcome(
+            &jobs_api,
+            active_upgrade_job
+                .as_ref()
+                .and_then(|j| j.status.as_ref())
+                .and_then(|s| s.job_name.as_deref()),
+        )
+        .await;
+        let (backup_job_succeeded, backup_job_failed) = job_outcome(
+            &jobs_api,
+            active_backup_job
+                .as_ref()
+                .and_then(|j| j.status.as_ref())
+                .and_then(|s| s.job_name.as_deref()),
+        )
+        .await;
+
         Ok(Self {
             ready_replicas,
             db_initialized: db_init_from_jobs,
-            init_job_phase,
-            restore_job_phase,
-            upgrade_job_phase,
-            backup_job_active,
+            init_job_active,
             restore_job_active,
             upgrade_job_active,
+            backup_job_active,
+            init_job_succeeded,
+            init_job_failed,
+            restore_job_succeeded,
+            restore_job_failed,
+            upgrade_job_succeeded,
+            upgrade_job_failed,
+            backup_job_succeeded,
+            backup_job_failed,
             active_init_job,
             active_restore_job,
             active_upgrade_job,
@@ -227,31 +243,190 @@ impl ReconcileSnapshot {
     }
 }
 
+/// Look up a batch/v1 Job by name and return (succeeded, failed).
+async fn job_outcome(jobs_api: &Api<Job>, job_name: Option<&str>) -> (bool, bool) {
+    let Some(name) = job_name else {
+        return (false, false);
+    };
+    match jobs_api.get(name).await {
+        Ok(job) => {
+            let succeeded = job.status.as_ref().and_then(|s| s.succeeded).unwrap_or(0) > 0;
+            let failed = job.status.as_ref().and_then(|s| s.failed).unwrap_or(0) > 0;
+            (succeeded, failed)
+        }
+        Err(_) => (false, false),
+    }
+}
 
 // ── Transition actions ──────────────────────────────────────────────────────
 
 /// One-shot actions that fire on specific edges (the "/" in UML state diagrams).
+/// These handle CRD status patching, events, and webhooks that belong to the
+/// *transition*, not to the state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransitionAction {
     MarkDbInitialized,
+    CompleteInitJob,
+    FailInitJob,
+    CompleteRestoreJob,
+    FailRestoreJob,
+    CompleteUpgradeJob,
+    FailUpgradeJob,
+    CompleteBackupJob,
+    FailBackupJob,
 }
 
-async fn execute_action(
+pub async fn execute_action(
     action: TransitionAction,
     instance: &OdooInstance,
     ctx: &Context,
+    snapshot: &ReconcileSnapshot,
 ) -> Result<()> {
+    use TransitionAction::*;
+    let ns = instance.namespace().unwrap_or_default();
+    let client = &ctx.client;
+
     match action {
-        TransitionAction::MarkDbInitialized => {
-            let ns = instance.namespace().unwrap_or_default();
+        MarkDbInitialized => {
             let name = instance.name_any();
-            let api: Api<OdooInstance> = Api::namespaced(ctx.client.clone(), &ns);
+            let api: Api<OdooInstance> = Api::namespaced(client.clone(), &ns);
             let patch = json!({"status": {"dbInitialized": true}});
-            api.patch_status(&name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
+            api.patch_status(
+                &name,
+                &PatchParams::apply(FIELD_MANAGER),
+                &Patch::Merge(&patch),
+            )
+            .await?;
+        }
+        CompleteInitJob | FailInitJob => {
+            if let Some(ref job) = snapshot.active_init_job {
+                let crd_name = job.name_any();
+                let now = crate::helpers::utc_now_odoo();
+                let (phase_str, msg) = if matches!(action, CompleteInitJob) {
+                    ("Completed", None)
+                } else {
+                    ("Failed", Some("init job failed"))
+                };
+                let mut patch_val = json!({"status": {"phase": phase_str, "completionTime": &now}});
+                if let Some(m) = msg {
+                    patch_val["status"]["message"] = json!(m);
+                }
+                let api: Api<OdooInitJob> = Api::namespaced(client.clone(), &ns);
+                api.patch_status(
+                    &crd_name,
+                    &PatchParams::apply(FIELD_MANAGER),
+                    &Patch::Merge(&patch_val),
+                )
                 .await?;
-            Ok(())
+            }
+        }
+        CompleteRestoreJob | FailRestoreJob => {
+            if let Some(ref job) = snapshot.active_restore_job {
+                let crd_name = job.name_any();
+                let now = crate::helpers::utc_now_odoo();
+                let (phase_str, phase_enum, msg) = if matches!(action, CompleteRestoreJob) {
+                    ("Completed", Phase::Completed, None)
+                } else {
+                    ("Failed", Phase::Failed, Some("restore job failed"))
+                };
+                let mut patch_val = json!({"status": {"phase": phase_str, "completionTime": &now}});
+                if let Some(m) = msg {
+                    patch_val["status"]["message"] = json!(m);
+                }
+                let api: Api<OdooRestoreJob> = Api::namespaced(client.clone(), &ns);
+                api.patch_status(
+                    &crd_name,
+                    &PatchParams::apply(FIELD_MANAGER),
+                    &Patch::Merge(&patch_val),
+                )
+                .await?;
+                if let Some(ref wh) = job.spec.webhook {
+                    crate::notify::notify_job_webhook(
+                        client,
+                        &ctx.http_client,
+                        &ns,
+                        wh,
+                        &phase_enum,
+                        job.status.as_ref().and_then(|s| s.job_name.as_deref()),
+                        msg,
+                        Some(&now),
+                    )
+                    .await;
+                }
+            }
+        }
+        CompleteUpgradeJob | FailUpgradeJob => {
+            if let Some(ref job) = snapshot.active_upgrade_job {
+                let crd_name = job.name_any();
+                let now = crate::helpers::utc_now_odoo();
+                let (phase_str, phase_enum, msg) = if matches!(action, CompleteUpgradeJob) {
+                    ("Completed", Phase::Completed, None)
+                } else {
+                    ("Failed", Phase::Failed, Some("upgrade job failed"))
+                };
+                let mut patch_val = json!({"status": {"phase": phase_str, "completionTime": &now}});
+                if let Some(m) = msg {
+                    patch_val["status"]["message"] = json!(m);
+                }
+                let api: Api<OdooUpgradeJob> = Api::namespaced(client.clone(), &ns);
+                api.patch_status(
+                    &crd_name,
+                    &PatchParams::apply(FIELD_MANAGER),
+                    &Patch::Merge(&patch_val),
+                )
+                .await?;
+                if let Some(ref wh) = job.spec.webhook {
+                    crate::notify::notify_job_webhook(
+                        client,
+                        &ctx.http_client,
+                        &ns,
+                        wh,
+                        &phase_enum,
+                        job.status.as_ref().and_then(|s| s.job_name.as_deref()),
+                        msg,
+                        Some(&now),
+                    )
+                    .await;
+                }
+            }
+        }
+        CompleteBackupJob | FailBackupJob => {
+            if let Some(ref job) = snapshot.active_backup_job {
+                let crd_name = job.name_any();
+                let now = crate::helpers::utc_now_odoo();
+                let (phase_str, phase_enum, msg) = if matches!(action, CompleteBackupJob) {
+                    ("Completed", Phase::Completed, None)
+                } else {
+                    ("Failed", Phase::Failed, Some("backup job failed"))
+                };
+                let mut patch_val = json!({"status": {"phase": phase_str, "completionTime": &now}});
+                if let Some(m) = msg {
+                    patch_val["status"]["message"] = json!(m);
+                }
+                let api: Api<OdooBackupJob> = Api::namespaced(client.clone(), &ns);
+                api.patch_status(
+                    &crd_name,
+                    &PatchParams::apply(FIELD_MANAGER),
+                    &Patch::Merge(&patch_val),
+                )
+                .await?;
+                if let Some(ref wh) = job.spec.webhook {
+                    crate::notify::notify_job_webhook(
+                        client,
+                        &ctx.http_client,
+                        &ns,
+                        wh,
+                        &phase_enum,
+                        job.status.as_ref().and_then(|s| s.job_name.as_deref()),
+                        msg,
+                        Some(&now),
+                    )
+                    .await;
+                }
+            }
         }
     }
+    Ok(())
 }
 
 // ── Transition table ────────────────────────────────────────────────────────
@@ -261,7 +436,7 @@ pub struct Transition {
     pub from: OdooInstancePhase,
     pub to: OdooInstancePhase,
     pub guard: fn(&OdooInstance, &ReconcileSnapshot) -> bool,
-    pub action: Option<TransitionAction>,
+    pub actions: &'static [TransitionAction],
 }
 
 use OdooInstancePhase::*;
@@ -273,142 +448,282 @@ pub static TRANSITIONS: &[Transition] = &[
     // Provisioning is the initial phase.  We transition out once the
     // instance controller has ensured all child resources.  For now the
     // ensure_* calls run before the state machine, so we always transition.
-    Transition { from: Provisioning, to: Uninitialized,
+    Transition {
+        from: Provisioning,
+        to: Uninitialized,
         guard: |_, s| !s.db_initialized,
-        action: None },
-    Transition { from: Provisioning, to: Starting,
+        actions: &[],
+    },
+    Transition {
+        from: Provisioning,
+        to: Starting,
         guard: |_, s| s.db_initialized,
-        action: None },
-
+        actions: &[],
+    },
     // ── Uninitialized ───────────────────────────────────────
-    Transition { from: Uninitialized, to: Initializing,
-        guard: |_, s| matches!(s.init_job_phase, Some(Phase::Running)),
-        action: None },
+    Transition {
+        from: Uninitialized,
+        to: Initializing,
+        guard: |_, s| s.init_job_active,
+        actions: &[],
+    },
     // A restore can also bring us out of Uninitialized.
-    Transition { from: Uninitialized, to: Restoring,
+    Transition {
+        from: Uninitialized,
+        to: Restoring,
         guard: |_, s| s.restore_job_active,
-        action: None },
-
+        actions: &[],
+    },
     // ── Initializing ────────────────────────────────────────
-    Transition { from: Initializing, to: Starting,
-        guard: |_, s| matches!(s.init_job_phase, Some(Phase::Completed)),
-        action: Some(TransitionAction::MarkDbInitialized) },
-    Transition { from: Initializing, to: InitFailed,
-        guard: |_, s| matches!(s.init_job_phase, Some(Phase::Failed)),
-        action: None },
-
+    Transition {
+        from: Initializing,
+        to: Starting,
+        guard: |_, s| s.init_job_succeeded,
+        actions: &[
+            TransitionAction::CompleteInitJob,
+            TransitionAction::MarkDbInitialized,
+        ],
+    },
+    Transition {
+        from: Initializing,
+        to: InitFailed,
+        guard: |_, s| s.init_job_failed,
+        actions: &[TransitionAction::FailInitJob],
+    },
     // ── InitFailed ──────────────────────────────────────────
     // A new init job can retry.
-    Transition { from: InitFailed, to: Initializing,
-        guard: |_, s| matches!(s.init_job_phase, Some(Phase::Running)),
-        action: None },
+    Transition {
+        from: InitFailed,
+        to: Initializing,
+        guard: |_, s| s.init_job_active,
+        actions: &[],
+    },
     // A restore can also recover from InitFailed.
-    Transition { from: InitFailed, to: Restoring,
+    Transition {
+        from: InitFailed,
+        to: Restoring,
         guard: |_, s| s.restore_job_active,
-        action: None },
-
+        actions: &[],
+    },
     // ── Starting ────────────────────────────────────────────
-    Transition { from: Starting, to: Stopped,
+    Transition {
+        from: Starting,
+        to: Stopped,
         guard: |i, _| i.spec.replicas == 0,
-        action: None },
-    Transition { from: Starting, to: Restoring,
+        actions: &[],
+    },
+    Transition {
+        from: Starting,
+        to: Restoring,
         guard: |_, s| s.restore_job_active,
-        action: None },
-    Transition { from: Starting, to: Upgrading,
+        actions: &[],
+    },
+    Transition {
+        from: Starting,
+        to: Upgrading,
         guard: |_, s| s.upgrade_job_active,
-        action: None },
-    Transition { from: Starting, to: BackingUp,
+        actions: &[],
+    },
+    Transition {
+        from: Starting,
+        to: BackingUp,
         guard: |_, s| s.backup_job_active,
-        action: None },
-    Transition { from: Starting, to: Running,
+        actions: &[],
+    },
+    Transition {
+        from: Starting,
+        to: Running,
         guard: |i, s| s.ready_replicas >= i.spec.replicas && i.spec.replicas > 0,
-        action: None },
-
+        actions: &[],
+    },
     // ── Running ─────────────────────────────────────────────
-    Transition { from: Running, to: Stopped,
+    Transition {
+        from: Running,
+        to: Stopped,
         guard: |i, _| i.spec.replicas == 0,
-        action: None },
-    Transition { from: Running, to: Restoring,
+        actions: &[],
+    },
+    Transition {
+        from: Running,
+        to: Restoring,
         guard: |_, s| s.restore_job_active,
-        action: None },
-    Transition { from: Running, to: Upgrading,
+        actions: &[],
+    },
+    Transition {
+        from: Running,
+        to: Upgrading,
         guard: |_, s| s.upgrade_job_active,
-        action: None },
-    Transition { from: Running, to: BackingUp,
+        actions: &[],
+    },
+    Transition {
+        from: Running,
+        to: BackingUp,
         guard: |_, s| s.backup_job_active,
-        action: None },
-    Transition { from: Running, to: Degraded,
+        actions: &[],
+    },
+    Transition {
+        from: Running,
+        to: Degraded,
         guard: |i, s| s.ready_replicas < i.spec.replicas && s.ready_replicas > 0,
-        action: None },
-    Transition { from: Running, to: Starting,
+        actions: &[],
+    },
+    Transition {
+        from: Running,
+        to: Starting,
         guard: |i, s| s.ready_replicas < i.spec.replicas && s.ready_replicas == 0,
-        action: None },
-
+        actions: &[],
+    },
     // ── Degraded ────────────────────────────────────────────
-    Transition { from: Degraded, to: Stopped,
+    Transition {
+        from: Degraded,
+        to: Stopped,
         guard: |i, _| i.spec.replicas == 0,
-        action: None },
-    Transition { from: Degraded, to: Restoring,
+        actions: &[],
+    },
+    Transition {
+        from: Degraded,
+        to: Restoring,
         guard: |_, s| s.restore_job_active,
-        action: None },
-    Transition { from: Degraded, to: Upgrading,
+        actions: &[],
+    },
+    Transition {
+        from: Degraded,
+        to: Upgrading,
         guard: |_, s| s.upgrade_job_active,
-        action: None },
-    Transition { from: Degraded, to: BackingUp,
+        actions: &[],
+    },
+    Transition {
+        from: Degraded,
+        to: BackingUp,
         guard: |_, s| s.backup_job_active,
-        action: None },
-    Transition { from: Degraded, to: Running,
+        actions: &[],
+    },
+    Transition {
+        from: Degraded,
+        to: Running,
         guard: |i, s| s.ready_replicas >= i.spec.replicas,
-        action: None },
-    Transition { from: Degraded, to: Starting,
+        actions: &[],
+    },
+    Transition {
+        from: Degraded,
+        to: Starting,
         guard: |_, s| s.ready_replicas == 0,
-        action: None },
-
+        actions: &[],
+    },
     // ── BackingUp ───────────────────────────────────────────
-    Transition { from: BackingUp, to: Stopped,
-        guard: |i, _| i.spec.replicas == 0,
-        action: None },
-    Transition { from: BackingUp, to: Running,
-        guard: |i, s| !s.backup_job_active && s.ready_replicas >= i.spec.replicas,
-        action: None },
-    Transition { from: BackingUp, to: Degraded,
-        guard: |i, s| s.ready_replicas > 0 && s.ready_replicas < i.spec.replicas,
-        action: None },
-    Transition { from: BackingUp, to: Starting,
-        guard: |i, s| s.ready_replicas == 0 && i.spec.replicas > 0,
-        action: None },
-
+    Transition {
+        from: BackingUp,
+        to: Stopped,
+        guard: |i, s| s.backup_job_succeeded && i.spec.replicas == 0,
+        actions: &[TransitionAction::CompleteBackupJob],
+    },
+    Transition {
+        from: BackingUp,
+        to: Stopped,
+        guard: |i, s| s.backup_job_failed && i.spec.replicas == 0,
+        actions: &[TransitionAction::FailBackupJob],
+    },
+    Transition {
+        from: BackingUp,
+        to: Running,
+        guard: |i, s| s.backup_job_succeeded && s.ready_replicas >= i.spec.replicas,
+        actions: &[TransitionAction::CompleteBackupJob],
+    },
+    Transition {
+        from: BackingUp,
+        to: Running,
+        guard: |i, s| s.backup_job_failed && s.ready_replicas >= i.spec.replicas,
+        actions: &[TransitionAction::FailBackupJob],
+    },
+    Transition {
+        from: BackingUp,
+        to: Degraded,
+        guard: |i, s| {
+            s.backup_job_succeeded && s.ready_replicas > 0 && s.ready_replicas < i.spec.replicas
+        },
+        actions: &[TransitionAction::CompleteBackupJob],
+    },
+    Transition {
+        from: BackingUp,
+        to: Degraded,
+        guard: |i, s| {
+            s.backup_job_failed && s.ready_replicas > 0 && s.ready_replicas < i.spec.replicas
+        },
+        actions: &[TransitionAction::FailBackupJob],
+    },
+    Transition {
+        from: BackingUp,
+        to: Starting,
+        guard: |i, s| s.backup_job_succeeded && s.ready_replicas == 0 && i.spec.replicas > 0,
+        actions: &[TransitionAction::CompleteBackupJob],
+    },
+    Transition {
+        from: BackingUp,
+        to: Starting,
+        guard: |i, s| s.backup_job_failed && s.ready_replicas == 0 && i.spec.replicas > 0,
+        actions: &[TransitionAction::FailBackupJob],
+    },
     // ── Upgrading ───────────────────────────────────────────
-    Transition { from: Upgrading, to: Starting,
-        guard: |_, s| matches!(s.upgrade_job_phase, Some(Phase::Completed) | Some(Phase::Failed)),
-        action: None },
-
+    Transition {
+        from: Upgrading,
+        to: Starting,
+        guard: |_, s| s.upgrade_job_succeeded,
+        actions: &[TransitionAction::CompleteUpgradeJob],
+    },
+    Transition {
+        from: Upgrading,
+        to: Starting,
+        guard: |_, s| s.upgrade_job_failed,
+        actions: &[TransitionAction::FailUpgradeJob],
+    },
     // ── Restoring ───────────────────────────────────────────
-    Transition { from: Restoring, to: Starting,
-        guard: |_, s| matches!(s.restore_job_phase, Some(Phase::Completed)),
-        action: Some(TransitionAction::MarkDbInitialized) },
-    Transition { from: Restoring, to: Starting,
-        guard: |_, s| matches!(s.restore_job_phase, Some(Phase::Failed)),
-        action: None },
-
+    Transition {
+        from: Restoring,
+        to: Starting,
+        guard: |_, s| s.restore_job_succeeded,
+        actions: &[
+            TransitionAction::CompleteRestoreJob,
+            TransitionAction::MarkDbInitialized,
+        ],
+    },
+    Transition {
+        from: Restoring,
+        to: Starting,
+        guard: |_, s| s.restore_job_failed,
+        actions: &[TransitionAction::FailRestoreJob],
+    },
     // ── Stopped ─────────────────────────────────────────────
-    Transition { from: Stopped, to: Restoring,
+    Transition {
+        from: Stopped,
+        to: Restoring,
         guard: |_, s| s.restore_job_active,
-        action: None },
-    Transition { from: Stopped, to: Upgrading,
+        actions: &[],
+    },
+    Transition {
+        from: Stopped,
+        to: Upgrading,
         guard: |_, s| s.upgrade_job_active,
-        action: None },
-    Transition { from: Stopped, to: Starting,
+        actions: &[],
+    },
+    Transition {
+        from: Stopped,
+        to: Starting,
         guard: |i, _| i.spec.replicas > 0,
-        action: None },
-
+        actions: &[],
+    },
     // ── Error ───────────────────────────────────────────────
-    Transition { from: Error, to: Starting,
+    Transition {
+        from: Error,
+        to: Starting,
         guard: |_, s| s.db_initialized,
-        action: None },
-    Transition { from: Error, to: Uninitialized,
+        actions: &[],
+    },
+    Transition {
+        from: Error,
+        to: Uninitialized,
         guard: |_, s| !s.db_initialized,
-        action: None },
+        actions: &[],
+    },
 ];
 
 // ── State machine runner ────────────────────────────────────────────────────
@@ -426,7 +741,11 @@ pub async fn run_state_machine(
         .and_then(|s| s.phase.clone())
         .unwrap_or(Provisioning);
 
-    // Evaluate transitions — first matching guard wins.
+    // 1. State outputs — idempotent, corrects drift.
+    let state = super::states::state_for(&phase);
+    state.ensure(instance, ctx, snapshot).await?;
+
+    // 2. Evaluate transitions — first matching guard wins.
     for t in TRANSITIONS.iter().filter(|t| t.from == phase) {
         if (t.guard)(instance, snapshot) {
             info!(
@@ -436,9 +755,9 @@ pub async fn run_state_machine(
                 "phase transition"
             );
 
-            // Fire edge action (UML "/").
-            if let Some(action) = t.action {
-                execute_action(action, instance, ctx).await?;
+            // Fire edge actions (UML "/").
+            for action in t.actions {
+                execute_action(*action, instance, ctx, snapshot).await?;
             }
 
             // Patch the phase.
@@ -446,18 +765,19 @@ pub async fn run_state_machine(
             let name = instance.name_any();
             let api: Api<OdooInstance> = Api::namespaced(ctx.client.clone(), &ns);
             let patch = json!({"status": {"phase": format!("{}", t.to)}});
-            api.patch_status(&name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
-                .await?;
+            api.patch_status(
+                &name,
+                &PatchParams::apply(FIELD_MANAGER),
+                &Patch::Merge(&patch),
+            )
+            .await?;
 
-            // Call on_enter() on the new state — one-shot outputs.
-            super::states::state_for(&t.to).on_enter(instance, ctx, snapshot).await?;
-
-            // Requeue to re-evaluate guards in the new state.
+            // Requeue immediately so the new state's ensure() runs.
             return Ok(Action::requeue(Duration::ZERO));
         }
     }
 
-    // No transition — stay in current state, poll guards periodically.
+    // 3. No transition — stay in current state, poll periodically.
     Ok(requeue_for(&phase))
 }
 
@@ -479,7 +799,11 @@ pub async fn scale_deployment(client: &Client, name: &str, ns: &str, replicas: i
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), ns);
     let patch = json!({"spec": {"replicas": replicas}});
     deployments
-        .patch(name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
+        .patch(
+            name,
+            &PatchParams::apply(FIELD_MANAGER),
+            &Patch::Merge(&patch),
+        )
         .await?;
     Ok(())
 }

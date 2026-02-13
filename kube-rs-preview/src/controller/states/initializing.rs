@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use kube::api::{Api, Patch, PatchParams, PostParams, ResourceExt};
 use serde_json::json;
 use tracing::info;
+use k8s_openapi::api::core::v1::Container;
+use k8s_openapi::api::batch::v1::Job;
 
 use crate::crd::odoo_init_job::OdooInitJob;
 use crate::crd::odoo_instance::OdooInstance;
@@ -9,8 +11,9 @@ use crate::error::Result;
 
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::FIELD_MANAGER;
-use crate::controller::odoo_init_job::build_init_job;
 use crate::controller::state_machine::scale_deployment;
+
+use crate::controller::helpers::{odoo_volume_mounts, OdooJobBuilder};
 
 /// Initializing: init job is running, deployment must be scaled down.
 /// On entry: scale to 0, create the K8s Job if the CRD hasn't started one
@@ -19,7 +22,7 @@ pub struct Initializing;
 
 #[async_trait]
 impl State for Initializing {
-    async fn on_enter(&self, instance: &OdooInstance, ctx: &Context, snap: &ReconcileSnapshot) -> Result<()> {
+    async fn ensure(&self, instance: &OdooInstance, ctx: &Context, snap: &ReconcileSnapshot) -> Result<()> {
         let ns = instance.namespace().unwrap_or_default();
         let name = instance.name_any();
         scale_deployment(&ctx.client, &name, &ns, 0).await?;
@@ -55,4 +58,32 @@ impl State for Initializing {
         }
         Ok(())
     }
+}
+
+pub fn build_init_job(
+    cr_name: &str,
+    ns: &str,
+    image: &str,
+    db_name: &str,
+    modules: &[String],
+    instance: &OdooInstance,
+    init_job: &OdooInitJob,
+) -> Job {
+    OdooJobBuilder::new(&format!("{cr_name}-"), ns, init_job, instance)
+        .containers(vec![Container {
+            name: "init".to_string(),
+            image: Some(image.to_string()),
+            command: Some(vec!["/entrypoint.sh".into(), "odoo".into()]),
+            args: Some(vec![
+                "-i".into(),
+                modules.join(","),
+                "-d".into(),
+                db_name.to_string(),
+                "--no-http".into(),
+                "--stop-after-init".into(),
+            ]),
+            volume_mounts: Some(odoo_volume_mounts()),
+            ..Default::default()
+        }])
+        .build()
 }

@@ -139,13 +139,10 @@ async fn main() -> anyhow::Result<()> {
         .map(|| warp::reply::with_status("ok", warp::http::StatusCode::OK));
     let health_routes = healthz.or(readyz);
 
-    // Run all five controllers + webhook server + health probes as concurrent tasks.
+    // Run the OdooInstance controller (which now absorbs all job lifecycle
+    // logic via the state machine), webhook server, and health probes.
     tokio::select! {
         _ = controller::odoo_instance::run(ctx.clone()) => {},
-        _ = controller::odoo_init_job::run(ctx.clone()) => {},
-        _ = controller::odoo_backup_job::run(ctx.clone()) => {},
-        _ = controller::odoo_restore_job::run(ctx.clone()) => {},
-        _ = controller::odoo_upgrade_job::run(ctx.clone()) => {},
         _ = webhook::run(webhook_addr, &tls_cert, &tls_key) => {},
         _ = warp::serve(health_routes).run(health_addr) => {},
     }

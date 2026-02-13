@@ -12,7 +12,7 @@ pub struct Starting;
 
 #[async_trait]
 impl State for Starting {
-    async fn on_enter(&self, instance: &OdooInstance, ctx: &Context, _snap: &ReconcileSnapshot) -> Result<()> {
+    async fn ensure(&self, instance: &OdooInstance, ctx: &Context, _snap: &ReconcileSnapshot) -> Result<()> {
         let ns = instance.namespace().unwrap_or_default();
         let name = instance.name_any();
         let replicas = instance.spec.replicas.max(1);

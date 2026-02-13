@@ -37,11 +37,13 @@ pub use stopped::Stopped;
 pub use uninitialized::Uninitialized;
 pub use upgrading::Upgrading;
 
-/// Defines the one-shot outputs for a phase — called once when the instance
-/// transitions into this state.
+/// Idempotent outputs for a phase — called every reconcile tick while the
+/// instance is in this state.  Examines the snapshot and corrects any drift.
+/// Must be safe to call repeatedly (PLC-style: "in this state, these outputs
+/// are energised").
 #[async_trait]
 pub trait State: Send + Sync {
-    async fn on_enter(
+    async fn ensure(
         &self,
         instance: &OdooInstance,
         ctx: &Context,

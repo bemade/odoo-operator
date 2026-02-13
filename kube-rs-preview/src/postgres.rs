@@ -128,10 +128,8 @@ fn quote_ident(ident: &str) -> String {
 }
 
 /// No-op implementation for testing.
-#[cfg(test)]
 pub struct NoopPostgresManager;
 
-#[cfg(test)]
 #[async_trait::async_trait]
 impl PostgresManager for NoopPostgresManager {
     async fn ensure_role(&self, _: &PostgresClusterConfig, _: &str, _: &str) -> Result<()> {

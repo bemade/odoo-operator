@@ -10,7 +10,7 @@ pub struct Running;
 
 #[async_trait]
 impl State for Running {
-    async fn on_enter(&self, _instance: &OdooInstance, _ctx: &Context, _snap: &ReconcileSnapshot) -> Result<()> {
+    async fn ensure(&self, _instance: &OdooInstance, _ctx: &Context, _snap: &ReconcileSnapshot) -> Result<()> {
         Ok(())
     }
 }

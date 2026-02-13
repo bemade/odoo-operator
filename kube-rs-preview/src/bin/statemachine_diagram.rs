@@ -47,10 +47,22 @@ fn generate() -> String {
             current_from = from.clone();
         }
 
-        // Build label from action (if any).
-        let label = match t.action {
-            Some(TransitionAction::MarkDbInitialized) => " : / MarkDbInitialized",
-            None => "",
+        // Build label from actions (if any).
+        let label = if t.actions.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<&str> = t.actions.iter().map(|a| match a {
+                TransitionAction::MarkDbInitialized => "MarkDbInitialized",
+                TransitionAction::CompleteInitJob => "CompleteInitJob",
+                TransitionAction::FailInitJob => "FailInitJob",
+                TransitionAction::CompleteRestoreJob => "CompleteRestoreJob",
+                TransitionAction::FailRestoreJob => "FailRestoreJob",
+                TransitionAction::CompleteUpgradeJob => "CompleteUpgradeJob",
+                TransitionAction::FailUpgradeJob => "FailUpgradeJob",
+                TransitionAction::CompleteBackupJob => "CompleteBackupJob",
+                TransitionAction::FailBackupJob => "FailBackupJob",
+            }).collect();
+            format!(" : / {}", names.join(", "))
         };
 
         out.push_str(&format!("    {from} --> {to}{label}\n"));

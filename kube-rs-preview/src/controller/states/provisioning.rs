@@ -11,7 +11,7 @@ pub struct Provisioning;
 
 #[async_trait]
 impl State for Provisioning {
-    async fn on_enter(&self, _instance: &OdooInstance, _ctx: &Context, _snap: &ReconcileSnapshot) -> Result<()> {
+    async fn ensure(&self, _instance: &OdooInstance, _ctx: &Context, _snap: &ReconcileSnapshot) -> Result<()> {
         // TODO: absorb ensure_* calls from reconcile_instance
         Ok(())
     }
