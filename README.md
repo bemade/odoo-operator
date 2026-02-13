@@ -3,8 +3,7 @@
 A Kubernetes operator for managing Odoo instances. Declaratively deploy, initialize,
 upgrade, back up, and restore Odoo databases using custom resources.
 
-Built with [kubebuilder](https://book.kubebuilder.io/) / controller-runtime. Deployed
-via Helm.
+Built with [kube-rs](https://kube.rs) in Rust. Deployed via Helm.
 
 ## Custom Resources
 
@@ -12,7 +11,7 @@ via Helm.
 |---|---|
 | `OdooInstance` | Declares a running Odoo deployment: image, replicas, ingress, filestore, database |
 | `OdooInitJob` | One-shot job to initialize a fresh database |
-| `OdooUpgradeJob` | Runs `odoo -u all` against an existing database, then rolls the deployment |
+| `OdooUpgradeJob` | Runs `odoo -u` against an existing database, then rolls the deployment |
 | `OdooBackupJob` | Dumps the database and filestore to object storage |
 | `OdooRestoreJob` | Restores a backup into an OdooInstance |
 
@@ -45,29 +44,9 @@ kubectl create secret generic pg-clusters -n odoo-operator \
 
 ### 2. Install the chart
 
-#### With a values file (recommended)
-
-Get the sample values file at:
-
-`https://raw.githubusercontent.com/bemade/odoo-operator/refs/heads/main/kubebuilder/charts/odoo-operator/values.yaml`
-
-Edit the file according to your requirements, then:
-
 ```sh
-helm upgrade --install odoo-operator oci://registry.bemade.org/charts/odoo-operator \
+helm upgrade --install odoo-operator oci://ghcr.io/bemade/odoo-operator/charts/odoo-operator \
   --namespace odoo-operator \
-  -f <values_file_path.yaml>
-```
-
-If installing with Rancher or similar tools, simply choose to edit the helm values
-prior to installation.
-
-#### With command line values
-
-```sh
-helm upgrade --install odoo-operator oci://registry.bemade.org/charts/odoo-operator \
-  --namespace odoo-operator \
-  --set postgresClustersSecretRef.name=pg-clusters \
   --set defaults.ingressClass=nginx \
   --set defaults.ingressIssuer=letsencrypt-prod
 ```
@@ -114,6 +93,7 @@ EOF
 | `image` | operator default | Odoo container image |
 | `replicas` | `1` | Number of Odoo pods. Set to `0` to stop |
 | `adminPassword` | — | Odoo master password |
+| `imagePullSecret` | — | Name of a `kubernetes.io/dockerconfigjson` secret in the operator namespace (auto-copied to instance namespace) |
 | `ingress.hosts` | — | Hostnames to expose the instance on |
 | `ingress.issuer` | operator default | cert-manager ClusterIssuer for TLS |
 | `ingress.class` | operator default | IngressClass name |
@@ -127,12 +107,21 @@ EOF
 | `affinity` | operator default | Pod affinity rules |
 | `tolerations` | operator default | Pod tolerations |
 
+### Status conditions
+
+The operator sets standard Kubernetes conditions on each OdooInstance:
+
+| Condition | Description |
+|---|---|
+| `Ready` | `True` when the instance is in the `Running` phase |
+| `Progressing` | `True` during transient phases (Provisioning, Initializing, Starting, Upgrading, Restoring, BackingUp) |
+
 ### Webhook validation
 
 The validating webhook rejects:
 - `spec.filestore.storageSize` decreases
 - `spec.filestore.storageClass` changes after initial set
-- `spec.database.cluster` changes after initial set (cluster migration not yet implemented)
+- `spec.database.cluster` changes after initial set
 
 ### Operator flags
 
@@ -148,17 +137,81 @@ The validating webhook rejects:
 | `--default-affinity` | — | JSON `Affinity` when `spec.affinity` is unset |
 | `--default-tolerations` | — | JSON `[]Toleration` when `spec.tolerations` is unset |
 
+## State Machine
+
+The OdooInstance lifecycle is driven by a declarative state machine with transitions
+defined in a static table in `src/controller/state_machine.rs`.
+
+See [STATE_MACHINE.md](STATE_MACHINE.md) for the full diagram (auto-generated with `make state-machine`).
+
+## Project Layout
+
+```
+├── Cargo.toml
+├── Dockerfile
+├── Makefile
+├── charts/odoo-operator/          # Helm chart
+├── scripts/                       # Shell scripts embedded into Jobs
+│   ├── backup.sh
+│   ├── restore.sh
+│   ├── s3-download.sh
+│   ├── s3-upload.sh
+│   └── odoo-download.sh
+├── tests/
+│   ├── integration/               # envtest integration tests (12 tests)
+│   │   ├── main.rs
+│   │   ├── common.rs              # Shared harness, helpers, TestContext
+│   │   ├── bootstrap.rs
+│   │   ├── child_resources.rs
+│   │   ├── scaling.rs
+│   │   ├── degraded.rs
+│   │   ├── init_job.rs
+│   │   ├── backup_job.rs
+│   │   ├── upgrade_job.rs
+│   │   ├── restore_job.rs
+│   │   └── finalizer.rs
+│   ├── controller_helpers_test.rs  # Unit tests for OdooJobBuilder, helpers
+│   ├── helpers_test.rs             # Unit tests for odoo.conf, crypto
+│   └── webhook_test.rs             # Admission webhook tests
+└── src/
+    ├── main.rs                     # Entry point (clap, tokio::select!)
+    ├── lib.rs
+    ├── error.rs                    # Error enum (thiserror)
+    ├── helpers.rs                  # OperatorDefaults, odoo.conf builder, crypto
+    ├── notify.rs                   # Webhook notifications + S3 credentials
+    ├── postgres.rs                 # PostgresManager async trait
+    ├── webhook.rs                  # Validating admission webhook (warp)
+    ├── crd/                        # Custom Resource Definitions
+    │   ├── odoo_instance.rs
+    │   ├── odoo_init_job.rs
+    │   ├── odoo_backup_job.rs
+    │   ├── odoo_restore_job.rs
+    │   └── odoo_upgrade_job.rs
+    └── controller/
+        ├── odoo_instance.rs        # Main reconciler, finalizer, events
+        ├── state_machine.rs        # ReconcileSnapshot, transitions, guards
+        ├── states/                 # One file per OdooInstancePhase
+        ├── child_resources.rs      # ensure_* functions for K8s resources
+        └── helpers.rs              # OdooJobBuilder, shared constants
+```
+
 ## Development
 
 ```sh
-# Run tests
-cd operator && go test ./...
+# Run all tests (unit + integration)
+cargo test
 
-# Build and load into minikube
-~/reload-operator.sh
+# Run integration tests only (requires envtest binaries)
+cargo test --test integration
 
-# Regenerate CRD manifests after type changes
-cd operator && make manifests && make helm-crds
+# Lint
+cargo fmt --check && cargo clippy -- -D warnings
+
+# Generate CRDs and sync to Helm chart
+make helm-crds
+
+# Build and deploy to minikube
+make install
 ```
 
 ## License

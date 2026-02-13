@@ -67,7 +67,7 @@ This needs design work around atomicity and failure recovery before the webhook 
 ### Observability
 
 - Expose Prometheus metrics for reconcile duration, phase transitions, upgrade outcomes
-- `status.conditions[]` following standard Kubernetes conventions (alongside the existing `status.phase`)
+- ~~`status.conditions[]` following standard Kubernetes conventions~~ ✅ Done — `Ready` and `Progressing` conditions emitted
 - `status.observedGeneration` for drift detection
 
 ### Pre-flight Validation
@@ -103,7 +103,7 @@ Pre-built dashboards for OdooInstance health, upgrade history, backup status.
 
 ## Decision Log
 
-### 2026-02-11: Rewrite from Python/Kopf to Go/kubebuilder
+### 2026-02-11: Exploratory rewrite from Python/Kopf to Go/kubebuilder
 
 **Decision**: Replace the Python Kopf operator entirely with a Go kubebuilder operator.
 
@@ -115,6 +115,33 @@ Pre-built dashboards for OdooInstance health, upgrade history, backup status.
 - The Go binary is a single statically-linked ~40MB container vs a Python image with many dependencies
 
 **Result**: 67 passing controller tests, full feature parity, deployed in ~5 hours.
+
+---
+
+### 2026-02-13: Exploratory rewrite from Go/kubebuilder to Rust/kube-rs
+
+**Decision**: Replace the Go kubebuilder operator with a Rust kube-rs operator.
+
+**Reasoning**:
+- Zero codegen: `#[derive(CustomResource)]` replaces `make manifests` / `make generate` / magic comments
+- No "never edit" files (CRD bases, `zz_generated.deepcopy.go`, scaffold markers)
+- `thiserror` enums force exhaustive error handling at compile time
+- ~47 MB image vs ~247 MB with Go, ~10 MB runtime memory vs ~30 MB
+- Event-driven state machine with static transition table is cleaner in Rust's type system
+- State and transition tables are defined in code, not in comments or separate files,
+  and easily audited by human or AI eyes.
+- `tracing` gives async-aware structured logging with spans
+- envtest is available in a "Rustified" version with the envtest crate, closing the testing
+  gap vs. Go.
+
+**Architecture changes**:
+- PLC-inspired state machine: `ensure()` called every tick (idempotent outputs), static `TRANSITIONS` table with guards and one-shot actions
+- Shared `envtest` server across all integration tests via `std::sync::OnceLock`, isolated by Kubernetes namespaces — 12 tests in ~30s parallel
+- Validating admission webhook via `warp` HTTPS server with cert-manager TLS
+- Automatic migration: strips legacy `kopf.zalando.org/KopfFinalizerMarker` finalizers
+- Standard Kubernetes `Ready` and `Progressing` conditions on status
+
+**Result**: 12 integration tests + unit tests, full feature parity, ~15 MB distroless container.
 
 ---
 

@@ -1,9 +1,0 @@
-apiVersion: bemade.org/v1alpha2
-kind: OdooInstance
-metadata:
-  labels:
-    app.kubernetes.io/name: odoo-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: odooinstance-sample
-spec:
-  # TODO(user): Add fields here

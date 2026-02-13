@@ -1,9 +1,0 @@
-apiVersion: bemade.bemade.org/v1alpha1
-kind: OdooInitJob
-metadata:
-  labels:
-    app.kubernetes.io/name: odoo-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: odooinitjob-sample
-spec:
-  # TODO(user): Add fields here
