@@ -37,6 +37,7 @@ use super::odoo_instance::Context;
 pub struct ReconcileSnapshot {
     // ── Deployment ────────────────────────────────────────────────────────
     pub ready_replicas: i32,
+    pub deployment_replicas: i32,
     pub db_initialized: bool,
 
     // ── Job CRD presence (is there an active CRD for this job type?) ─────
@@ -77,12 +78,15 @@ impl ReconcileSnapshot {
             .map(|s| s.db_initialized)
             .unwrap_or(false);
 
-        // Deployment ready replicas.
-        let ready_replicas = {
+        // Deployment replicas (spec + ready).
+        let (deployment_replicas, ready_replicas) = {
             let deps: Api<Deployment> = Api::namespaced(client.clone(), ns);
             match deps.get(instance_name).await {
-                Ok(dep) => dep.status.and_then(|s| s.ready_replicas).unwrap_or(0),
-                Err(_) => 0,
+                Ok(dep) => (
+                    dep.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0),
+                    dep.status.and_then(|s| s.ready_replicas).unwrap_or(0),
+                ),
+                Err(_) => (0, 0),
             }
         };
 
@@ -222,6 +226,7 @@ impl ReconcileSnapshot {
 
         Ok(Self {
             ready_replicas,
+            deployment_replicas,
             db_initialized: db_init_from_jobs,
             init_job_active,
             restore_job_active,
