@@ -3,6 +3,9 @@ kind: ClusterRole
 metadata:
   name: odoo-operator
   namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
 rules:
   # Full lifecycle management of all Odoo custom resources
   - apiGroups: ["bemade.org"]

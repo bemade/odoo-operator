@@ -16,7 +16,7 @@ spec:
     metadata:
       name: {{ .Release.Name }}-validate-config
     spec:
-      serviceAccountName: {{ .Release.Name }}
+      serviceAccountName: odoo-operator
       restartPolicy: Never
       containers:
         - name: validate

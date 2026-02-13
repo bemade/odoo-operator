@@ -849,7 +849,7 @@ pub async fn scale_deployment(client: &Client, name: &str, ns: &str, replicas: i
     deployments
         .patch(
             name,
-            &PatchParams::apply(FIELD_MANAGER),
+            &PatchParams::apply(FIELD_MANAGER).force(),
             &Patch::Merge(&patch),
         )
         .await?;

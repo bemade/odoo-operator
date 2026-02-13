@@ -111,7 +111,7 @@ pub async fn apply_defaults(
     let spec_patch = json!({"spec": patch});
     api.patch(
         name,
-        &PatchParams::apply(FIELD_MANAGER),
+        &PatchParams::apply(FIELD_MANAGER).force(),
         &Patch::Merge(&spec_patch),
     )
     .await?;
@@ -331,7 +331,7 @@ pub async fn ensure_config_map(
 
     cms.patch(
         &cm_name,
-        &PatchParams::apply(FIELD_MANAGER),
+        &PatchParams::apply(FIELD_MANAGER).force(),
         &Patch::Apply(&cm),
     )
     .await?;
@@ -379,7 +379,7 @@ pub async fn ensure_service(
 
     svcs.patch(
         name,
-        &PatchParams::apply(FIELD_MANAGER),
+        &PatchParams::apply(FIELD_MANAGER).force(),
         &Patch::Apply(&svc),
     )
     .await?;
@@ -466,7 +466,7 @@ pub async fn ensure_ingress(
     ingresses
         .patch(
             name,
-            &PatchParams::apply(FIELD_MANAGER),
+            &PatchParams::apply(FIELD_MANAGER).force(),
             &Patch::Apply(&ing),
         )
         .await?;

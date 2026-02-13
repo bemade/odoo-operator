@@ -52,9 +52,7 @@ defaults:
   tolerations: []
 
 # Validating webhook configuration
-webhook:
-  # ClusterIssuer used by cert-manager to issue the webhook TLS certificate.
-  certIssuer: "selfsigned-cluster-issuer"
+webhook: {}
 
 # Odoo Manager ServiceAccount (for external Odoo instances to manage the cluster)
 odooManager:
