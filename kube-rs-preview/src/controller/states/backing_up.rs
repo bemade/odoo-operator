@@ -18,9 +18,7 @@ use crate::helpers::sanitise_uid;
 use crate::notify;
 
 use super::{Context, ReconcileSnapshot, State};
-use crate::controller::helpers::{
-    cm_env, env, odoo_volume_mounts, OdooJobBuilder, FIELD_MANAGER,
-};
+use crate::controller::helpers::{cm_env, env, odoo_volume_mounts, OdooJobBuilder, FIELD_MANAGER};
 
 const BACKUP_SCRIPT: &str = include_str!("../../../scripts/backup.sh");
 const UPLOAD_SCRIPT: &str = include_str!("../../../scripts/s3-upload.sh");
@@ -34,14 +32,24 @@ pub struct BackingUp;
 
 #[async_trait]
 impl State for BackingUp {
-    async fn ensure(&self, instance: &OdooInstance, ctx: &Context, snap: &ReconcileSnapshot) -> Result<()> {
+    async fn ensure(
+        &self,
+        instance: &OdooInstance,
+        ctx: &Context,
+        snap: &ReconcileSnapshot,
+    ) -> Result<()> {
         let backup_job = match snap.active_backup_job {
             Some(ref bj) => bj,
             None => return Ok(()),
         };
 
         // Only create the K8s Job if the CRD hasn't started one yet.
-        if backup_job.status.as_ref().and_then(|s| s.job_name.as_ref()).is_some() {
+        if backup_job
+            .status
+            .as_ref()
+            .and_then(|s| s.job_name.as_ref())
+            .is_some()
+        {
             return Ok(());
         }
 
@@ -69,7 +77,11 @@ impl State for BackingUp {
             format!("{instance_name}-backup")
         };
 
-        let with_filestore = if backup_job.spec.with_filestore { "true" } else { "false" };
+        let with_filestore = if backup_job.spec.with_filestore {
+            "true"
+        } else {
+            "false"
+        };
 
         let backup_env = vec![
             env("INSTANCE_NAME", instance_name.clone()),
@@ -95,7 +107,8 @@ impl State for BackingUp {
         if let Some(ref secret_ref) = dest.s3_credentials_secret_ref {
             let secret_ns = secret_ref.namespace.as_deref().unwrap_or(&ns);
             let secret_name = secret_ref.name.as_deref().unwrap_or_default();
-            if let Ok((ak, sk)) = notify::read_s3_credentials(client, secret_name, secret_ns).await {
+            if let Ok((ak, sk)) = notify::read_s3_credentials(client, secret_name, secret_ns).await
+            {
                 upload_env.push(env("AWS_ACCESS_KEY_ID", ak));
                 upload_env.push(env("AWS_SECRET_ACCESS_KEY", sk));
             }
@@ -118,16 +131,14 @@ impl State for BackingUp {
 
         let pod_affinity = k8s_openapi::api::core::v1::Affinity {
             pod_affinity: Some(k8s_openapi::api::core::v1::PodAffinity {
-                required_during_scheduling_ignored_during_execution: Some(vec![
-                    PodAffinityTerm {
-                        label_selector: Some(LabelSelector {
-                            match_labels: Some(BTreeMap::from([("app".into(), instance_name.clone())])),
-                            ..Default::default()
-                        }),
-                        topology_key: "kubernetes.io/hostname".into(),
+                required_during_scheduling_ignored_during_execution: Some(vec![PodAffinityTerm {
+                    label_selector: Some(LabelSelector {
+                        match_labels: Some(BTreeMap::from([("app".into(), instance_name.clone())])),
                         ..Default::default()
-                    },
-                ]),
+                    }),
+                    topology_key: "kubernetes.io/hostname".into(),
+                    ..Default::default()
+                }]),
                 ..Default::default()
             }),
             ..Default::default()
@@ -161,9 +172,14 @@ impl State for BackingUp {
         info!(%crd_name, %k8s_job_name, "created backup job");
 
         crate::controller::odoo_instance::publish_event(
-            ctx, backup_job, EventType::Normal, "BackupStarted", "Reconcile",
+            ctx,
+            backup_job,
+            EventType::Normal,
+            "BackupStarted",
+            "Reconcile",
             Some(format!("Created backup job {k8s_job_name}")),
-        ).await;
+        )
+        .await;
 
         let api: Api<OdooBackupJob> = Api::namespaced(client.clone(), &ns);
         let patch = json!({
@@ -173,7 +189,12 @@ impl State for BackingUp {
                 "startTime": crate::helpers::utc_now_odoo(),
             }
         });
-        api.patch_status(&crd_name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch)).await?;
+        api.patch_status(
+            &crd_name,
+            &PatchParams::apply(FIELD_MANAGER),
+            &Patch::Merge(&patch),
+        )
+        .await?;
 
         Ok(())
     }

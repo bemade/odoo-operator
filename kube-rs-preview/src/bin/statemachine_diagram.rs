@@ -28,7 +28,9 @@ fn main() {
 fn generate() -> String {
     let mut out = String::new();
     out.push_str("# OdooInstance State Machine\n\n");
-    out.push_str("Auto-generated from the `TRANSITIONS` table in `controller/state_machine.rs`.\n\n");
+    out.push_str(
+        "Auto-generated from the `TRANSITIONS` table in `controller/state_machine.rs`.\n\n",
+    );
     out.push_str("```mermaid\nstateDiagram-v2\n");
 
     // Start arrow.
@@ -51,17 +53,21 @@ fn generate() -> String {
         let label = if t.actions.is_empty() {
             String::new()
         } else {
-            let names: Vec<&str> = t.actions.iter().map(|a| match a {
-                TransitionAction::MarkDbInitialized => "MarkDbInitialized",
-                TransitionAction::CompleteInitJob => "CompleteInitJob",
-                TransitionAction::FailInitJob => "FailInitJob",
-                TransitionAction::CompleteRestoreJob => "CompleteRestoreJob",
-                TransitionAction::FailRestoreJob => "FailRestoreJob",
-                TransitionAction::CompleteUpgradeJob => "CompleteUpgradeJob",
-                TransitionAction::FailUpgradeJob => "FailUpgradeJob",
-                TransitionAction::CompleteBackupJob => "CompleteBackupJob",
-                TransitionAction::FailBackupJob => "FailBackupJob",
-            }).collect();
+            let names: Vec<&str> = t
+                .actions
+                .iter()
+                .map(|a| match a {
+                    TransitionAction::MarkDbInitialized => "MarkDbInitialized",
+                    TransitionAction::CompleteInitJob => "CompleteInitJob",
+                    TransitionAction::FailInitJob => "FailInitJob",
+                    TransitionAction::CompleteRestoreJob => "CompleteRestoreJob",
+                    TransitionAction::FailRestoreJob => "FailRestoreJob",
+                    TransitionAction::CompleteUpgradeJob => "CompleteUpgradeJob",
+                    TransitionAction::FailUpgradeJob => "FailUpgradeJob",
+                    TransitionAction::CompleteBackupJob => "CompleteBackupJob",
+                    TransitionAction::FailBackupJob => "FailBackupJob",
+                })
+                .collect();
             format!(" : / {}", names.join(", "))
         };
 

@@ -52,11 +52,7 @@ pub fn sanitise_uid(uid: &str) -> String {
 
 /// Derive the database name from the instance UID.
 pub fn db_name(instance: &OdooInstance) -> String {
-    let uid = instance
-        .metadata
-        .uid
-        .as_deref()
-        .unwrap_or("unknown");
+    let uid = instance.metadata.uid.as_deref().unwrap_or("unknown");
     format!("odoo_{}", sanitise_uid(uid))
 }
 

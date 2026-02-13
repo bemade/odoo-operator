@@ -18,10 +18,16 @@ async fn reconcile_creates_child_resources() {
     );
 
     let secrets: Api<Secret> = Api::namespaced(c.clone(), ns);
-    assert!(secrets.get("test-child-odoo-user").await.is_ok(), "odoo-user secret missing");
+    assert!(
+        secrets.get("test-child-odoo-user").await.is_ok(),
+        "odoo-user secret missing"
+    );
 
     let cms: Api<ConfigMap> = Api::namespaced(c.clone(), ns);
-    assert!(cms.get("test-child-odoo-conf").await.is_ok(), "odoo-conf configmap missing");
+    assert!(
+        cms.get("test-child-odoo-conf").await.is_ok(),
+        "odoo-conf configmap missing"
+    );
 
     let svcs: Api<Service> = Api::namespaced(c.clone(), ns);
     assert!(svcs.get("test-child").await.is_ok(), "service missing");

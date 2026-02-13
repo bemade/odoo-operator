@@ -318,7 +318,10 @@ fn test_builder_empty_init_containers_becomes_none() {
 
     let job = OdooJobBuilder::new("x-", "ns", &init_job, &instance)
         .init_containers(vec![])
-        .containers(vec![Container { name: "main".into(), ..Default::default() }])
+        .containers(vec![Container {
+            name: "main".into(),
+            ..Default::default()
+        }])
         .build();
 
     let pod = job.spec.unwrap().template.spec.unwrap();

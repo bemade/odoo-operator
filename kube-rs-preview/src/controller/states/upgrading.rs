@@ -23,7 +23,12 @@ pub struct Upgrading;
 
 #[async_trait]
 impl State for Upgrading {
-    async fn ensure(&self, instance: &OdooInstance, ctx: &Context, snap: &ReconcileSnapshot) -> Result<()> {
+    async fn ensure(
+        &self,
+        instance: &OdooInstance,
+        ctx: &Context,
+        snap: &ReconcileSnapshot,
+    ) -> Result<()> {
         let ns = instance.namespace().unwrap_or_default();
         let inst_name = instance.name_any();
         scale_deployment(&ctx.client, &inst_name, &ns, 0).await?;
@@ -34,7 +39,12 @@ impl State for Upgrading {
         };
 
         // Only create the K8s Job if the CRD hasn't started one yet.
-        if upgrade_job.status.as_ref().and_then(|s| s.job_name.as_ref()).is_some() {
+        if upgrade_job
+            .status
+            .as_ref()
+            .and_then(|s| s.job_name.as_ref())
+            .is_some()
+        {
             return Ok(());
         }
 
@@ -44,7 +54,12 @@ impl State for Upgrading {
         let uid = instance.metadata.uid.as_deref().unwrap_or("unknown");
         let db = format!("odoo_{}", sanitise_uid(uid));
 
-        let mut args = vec!["-d".to_string(), db, "--no-http".to_string(), "--stop-after-init".to_string()];
+        let mut args = vec![
+            "-d".to_string(),
+            db,
+            "--no-http".to_string(),
+            "--stop-after-init".to_string(),
+        ];
         if !upgrade_job.spec.modules.is_empty() {
             args.push("-u".to_string());
             args.push(upgrade_job.spec.modules.join(","));
@@ -76,9 +91,14 @@ impl State for Upgrading {
         info!(%crd_name, %k8s_job_name, "created upgrade job");
 
         crate::controller::odoo_instance::publish_event(
-            ctx, upgrade_job, EventType::Normal, "UpgradeStarted", "Reconcile",
+            ctx,
+            upgrade_job,
+            EventType::Normal,
+            "UpgradeStarted",
+            "Reconcile",
             Some(format!("Created upgrade job {k8s_job_name}")),
-        ).await;
+        )
+        .await;
 
         let api: Api<OdooUpgradeJob> = Api::namespaced(client.clone(), &ns);
         let patch = json!({
@@ -88,7 +108,12 @@ impl State for Upgrading {
                 "startTime": crate::helpers::utc_now_odoo(),
             }
         });
-        api.patch_status(&crd_name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch)).await?;
+        api.patch_status(
+            &crd_name,
+            &PatchParams::apply(FIELD_MANAGER),
+            &Patch::Merge(&patch),
+        )
+        .await?;
 
         Ok(())
     }

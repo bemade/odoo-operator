@@ -11,7 +11,10 @@ fn test_sanitise_uid_replaces_non_alphanumeric() {
 
 #[test]
 fn test_odoo_username_format() {
-    assert_eq!(odoo_username("production", "my-odoo"), "odoo.production.my-odoo");
+    assert_eq!(
+        odoo_username("production", "my-odoo"),
+        "odoo.production.my-odoo"
+    );
     assert_eq!(odoo_username("default", "test"), "odoo.default.test");
 }
 
@@ -83,7 +86,9 @@ fn test_build_odoo_conf_with_extra_options() {
 fn test_build_odoo_conf_prepends_standard_addons_path() {
     let conf = build_odoo_conf("u", "p", "a", "h", 5432, "d", &None);
     // The standard addons paths should be prepended.
-    assert!(conf.contains("addons_path = /opt/odoo/addons,/opt/odoo/odoo/addons,/mnt/extra-addons\n"));
+    assert!(
+        conf.contains("addons_path = /opt/odoo/addons,/opt/odoo/odoo/addons,/mnt/extra-addons\n")
+    );
 }
 
 #[test]

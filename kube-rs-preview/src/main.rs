@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use kube::Client;
 use kube::runtime::events::Reporter;
+use kube::Client;
 use tracing::info;
 use warp::Filter;
 
@@ -17,7 +17,10 @@ use odoo_operator::postgres::PgPostgresManager;
 use odoo_operator::webhook;
 
 #[derive(Parser, Debug)]
-#[command(name = "odoo-operator", about = "Kubernetes operator for Odoo instances")]
+#[command(
+    name = "odoo-operator",
+    about = "Kubernetes operator for Odoo instances"
+)]
 struct Args {
     /// Default Odoo container image when spec.image is not set.
     #[arg(long, default_value = "odoo:18.0", env = "DEFAULT_ODOO_IMAGE")]
@@ -40,7 +43,11 @@ struct Args {
     default_ingress_issuer: String,
 
     /// Name of the Secret containing postgres cluster configuration.
-    #[arg(long, default_value = "postgres-clusters", env = "POSTGRES_CLUSTERS_SECRET")]
+    #[arg(
+        long,
+        default_value = "postgres-clusters",
+        env = "POSTGRES_CLUSTERS_SECRET"
+    )]
     postgres_clusters_secret: String,
 
     /// Namespace where the operator is deployed (for reading shared secrets).
@@ -52,11 +59,19 @@ struct Args {
     webhook_port: u16,
 
     /// Path to the TLS certificate for the webhook server.
-    #[arg(long, default_value = "/tmp/k8s-webhook-server/serving-certs/tls.crt", env = "WEBHOOK_TLS_CERT")]
+    #[arg(
+        long,
+        default_value = "/tmp/k8s-webhook-server/serving-certs/tls.crt",
+        env = "WEBHOOK_TLS_CERT"
+    )]
     webhook_tls_cert: String,
 
     /// Path to the TLS key for the webhook server.
-    #[arg(long, default_value = "/tmp/k8s-webhook-server/serving-certs/tls.key", env = "WEBHOOK_TLS_KEY")]
+    #[arg(
+        long,
+        default_value = "/tmp/k8s-webhook-server/serving-certs/tls.key",
+        env = "WEBHOOK_TLS_KEY"
+    )]
     webhook_tls_key: String,
 
     /// Bind address for health probe endpoints (/healthz, /readyz).
@@ -81,9 +96,7 @@ async fn main() -> anyhow::Result<()> {
             .json()
             .init();
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .init();
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 
     let client = Client::try_default().await?;

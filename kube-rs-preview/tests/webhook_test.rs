@@ -5,16 +5,19 @@
 
 use kube::CustomResourceExt;
 
-use odoo_operator::crd::odoo_instance::OdooInstance;
-use odoo_operator::crd::odoo_init_job::OdooInitJob;
 use odoo_operator::crd::odoo_backup_job::OdooBackupJob;
+use odoo_operator::crd::odoo_init_job::OdooInitJob;
+use odoo_operator::crd::odoo_instance::OdooInstance;
 use odoo_operator::crd::odoo_restore_job::OdooRestoreJob;
 use odoo_operator::crd::odoo_upgrade_job::OdooUpgradeJob;
 
 #[test]
 fn test_odoo_instance_crd_generates_valid_schema() {
     let crd = OdooInstance::crd();
-    assert_eq!(crd.metadata.name.as_deref(), Some("odooinstances.bemade.org"));
+    assert_eq!(
+        crd.metadata.name.as_deref(),
+        Some("odooinstances.bemade.org")
+    );
     let spec = &crd.spec;
     assert_eq!(spec.group, "bemade.org");
     assert_eq!(spec.names.kind, "OdooInstance");
@@ -26,28 +29,40 @@ fn test_odoo_instance_crd_generates_valid_schema() {
 #[test]
 fn test_odoo_init_job_crd_generates_valid_schema() {
     let crd = OdooInitJob::crd();
-    assert_eq!(crd.metadata.name.as_deref(), Some("odooinitjobs.bemade.org"));
+    assert_eq!(
+        crd.metadata.name.as_deref(),
+        Some("odooinitjobs.bemade.org")
+    );
     assert_eq!(crd.spec.names.kind, "OdooInitJob");
 }
 
 #[test]
 fn test_odoo_backup_job_crd_generates_valid_schema() {
     let crd = OdooBackupJob::crd();
-    assert_eq!(crd.metadata.name.as_deref(), Some("odoobackupjobs.bemade.org"));
+    assert_eq!(
+        crd.metadata.name.as_deref(),
+        Some("odoobackupjobs.bemade.org")
+    );
     assert_eq!(crd.spec.names.kind, "OdooBackupJob");
 }
 
 #[test]
 fn test_odoo_restore_job_crd_generates_valid_schema() {
     let crd = OdooRestoreJob::crd();
-    assert_eq!(crd.metadata.name.as_deref(), Some("odoorestorejobs.bemade.org"));
+    assert_eq!(
+        crd.metadata.name.as_deref(),
+        Some("odoorestorejobs.bemade.org")
+    );
     assert_eq!(crd.spec.names.kind, "OdooRestoreJob");
 }
 
 #[test]
 fn test_odoo_upgrade_job_crd_generates_valid_schema() {
     let crd = OdooUpgradeJob::crd();
-    assert_eq!(crd.metadata.name.as_deref(), Some("odooupgradejobs.bemade.org"));
+    assert_eq!(
+        crd.metadata.name.as_deref(),
+        Some("odooupgradejobs.bemade.org")
+    );
     assert_eq!(crd.spec.names.kind, "OdooUpgradeJob");
 }
 
@@ -60,12 +75,7 @@ fn test_all_crds_have_v1alpha1_version() {
         OdooRestoreJob::crd(),
         OdooUpgradeJob::crd(),
     ] {
-        let versions: Vec<&str> = crd
-            .spec
-            .versions
-            .iter()
-            .map(|v| v.name.as_str())
-            .collect();
+        let versions: Vec<&str> = crd.spec.versions.iter().map(|v| v.name.as_str()).collect();
         assert!(
             versions.contains(&"v1alpha1"),
             "CRD {} missing v1alpha1 version",

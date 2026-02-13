@@ -6,11 +6,8 @@
 
 use kube::CustomResourceExt;
 use odoo_operator::crd::{
-    odoo_backup_job::OdooBackupJob,
-    odoo_init_job::OdooInitJob,
-    odoo_instance::OdooInstance,
-    odoo_restore_job::OdooRestoreJob,
-    odoo_upgrade_job::OdooUpgradeJob,
+    odoo_backup_job::OdooBackupJob, odoo_init_job::OdooInitJob, odoo_instance::OdooInstance,
+    odoo_restore_job::OdooRestoreJob, odoo_upgrade_job::OdooUpgradeJob,
 };
 use std::path::PathBuf;
 
@@ -21,11 +18,26 @@ fn main() {
         .map(PathBuf::from);
 
     let crds = vec![
-        ("odoo-crd.yaml", serde_yaml::to_string(&OdooInstance::crd()).unwrap()),
-        ("initjob-crd.yaml", serde_yaml::to_string(&OdooInitJob::crd()).unwrap()),
-        ("backupjob-crd.yaml", serde_yaml::to_string(&OdooBackupJob::crd()).unwrap()),
-        ("restorejob-crd.yaml", serde_yaml::to_string(&OdooRestoreJob::crd()).unwrap()),
-        ("upgradejob-crd.yaml", serde_yaml::to_string(&OdooUpgradeJob::crd()).unwrap()),
+        (
+            "odoo-crd.yaml",
+            serde_yaml::to_string(&OdooInstance::crd()).unwrap(),
+        ),
+        (
+            "initjob-crd.yaml",
+            serde_yaml::to_string(&OdooInitJob::crd()).unwrap(),
+        ),
+        (
+            "backupjob-crd.yaml",
+            serde_yaml::to_string(&OdooBackupJob::crd()).unwrap(),
+        ),
+        (
+            "restorejob-crd.yaml",
+            serde_yaml::to_string(&OdooRestoreJob::crd()).unwrap(),
+        ),
+        (
+            "upgradejob-crd.yaml",
+            serde_yaml::to_string(&OdooUpgradeJob::crd()).unwrap(),
+        ),
     ];
 
     match out_dir {

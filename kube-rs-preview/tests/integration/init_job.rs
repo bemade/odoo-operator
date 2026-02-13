@@ -74,7 +74,10 @@ async fn init_job_failure_and_retry() {
         "spec": { "odooInstanceRef": { "name": "test-initfail" } }
     }))
     .unwrap();
-    init_api.create(&PostParams::default(), &init_job).await.unwrap();
+    init_api
+        .create(&PostParams::default(), &init_job)
+        .await
+        .unwrap();
 
     assert!(
         wait_for_phase(c, ns, "test-initfail", OdooInstancePhase::Initializing).await,
@@ -97,7 +100,10 @@ async fn init_job_failure_and_retry() {
         "spec": { "odooInstanceRef": { "name": "test-initfail" } }
     }))
     .unwrap();
-    init_api.create(&PostParams::default(), &retry_job).await.unwrap();
+    init_api
+        .create(&PostParams::default(), &retry_job)
+        .await
+        .unwrap();
 
     assert!(
         wait_for_phase(c, ns, "test-initfail", OdooInstancePhase::Initializing).await,

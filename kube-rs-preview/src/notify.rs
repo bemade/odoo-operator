@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use kube::{api::Api, Client};
 use k8s_openapi::api::core::v1::Secret;
+use kube::{api::Api, Client};
 use serde_json::json;
 use tracing::warn;
 
@@ -42,10 +42,7 @@ pub async fn notify_job_webhook(
     let http = http_client.clone();
 
     tokio::spawn(async move {
-        let mut req = http
-            .post(&url)
-            .json(&data)
-            .timeout(Duration::from_secs(10));
+        let mut req = http.post(&url).json(&data).timeout(Duration::from_secs(10));
 
         if let Some(tok) = token {
             req = req.bearer_auth(tok);

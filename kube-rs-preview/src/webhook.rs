@@ -114,8 +114,10 @@ fn validate(req: AdmissionRequest<OdooInstance>) -> AdmissionResponse {
 /// Compare two Kubernetes quantity strings and reject if new < old.
 /// Uses a simplified parser that handles common suffixes (Ki, Mi, Gi, Ti).
 fn compare_quantities(old: &str, new: &str) -> Result<(), String> {
-    let old_bytes = parse_quantity(old).map_err(|e| format!("invalid old quantity {old:?}: {e}"))?;
-    let new_bytes = parse_quantity(new).map_err(|e| format!("invalid new quantity {new:?}: {e}"))?;
+    let old_bytes =
+        parse_quantity(old).map_err(|e| format!("invalid old quantity {old:?}: {e}"))?;
+    let new_bytes =
+        parse_quantity(new).map_err(|e| format!("invalid new quantity {new:?}: {e}"))?;
 
     if new_bytes < old_bytes {
         return Err(format!(

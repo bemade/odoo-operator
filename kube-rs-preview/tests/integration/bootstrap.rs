@@ -6,7 +6,13 @@ use odoo_operator::crd::odoo_instance::OdooInstancePhase;
 async fn envtest_boots_and_reconciles() {
     let ctx = TestContext::new("test-boot").await;
     assert!(
-        wait_for_phase(&ctx.client, &ctx.ns, "test-boot", OdooInstancePhase::Uninitialized).await,
+        wait_for_phase(
+            &ctx.client,
+            &ctx.ns,
+            "test-boot",
+            OdooInstancePhase::Uninitialized
+        )
+        .await,
         "expected Uninitialized"
     );
 }

@@ -8,12 +8,12 @@
 
 mod common;
 
+mod backup_job;
 mod bootstrap;
 mod child_resources;
-mod init_job;
-mod backup_job;
-mod upgrade_job;
-mod restore_job;
-mod scaling;
 mod degraded;
 mod finalizer;
+mod init_job;
+mod restore_job;
+mod scaling;
+mod upgrade_job;

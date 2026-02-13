@@ -1,9 +1,9 @@
 use async_trait::async_trait;
+use k8s_openapi::api::batch::v1::Job;
+use k8s_openapi::api::core::v1::Container;
 use kube::api::{Api, Patch, PatchParams, PostParams, ResourceExt};
 use serde_json::json;
 use tracing::info;
-use k8s_openapi::api::core::v1::Container;
-use k8s_openapi::api::batch::v1::Job;
 
 use crate::crd::odoo_init_job::OdooInitJob;
 use crate::crd::odoo_instance::OdooInstance;
@@ -22,14 +22,24 @@ pub struct Initializing;
 
 #[async_trait]
 impl State for Initializing {
-    async fn ensure(&self, instance: &OdooInstance, ctx: &Context, snap: &ReconcileSnapshot) -> Result<()> {
+    async fn ensure(
+        &self,
+        instance: &OdooInstance,
+        ctx: &Context,
+        snap: &ReconcileSnapshot,
+    ) -> Result<()> {
         let ns = instance.namespace().unwrap_or_default();
         let name = instance.name_any();
         scale_deployment(&ctx.client, &name, &ns, 0).await?;
 
         if let Some(ref init_job) = snap.active_init_job {
             let crd_name = init_job.name_any();
-            if init_job.status.as_ref().and_then(|s| s.job_name.as_ref()).is_none() {
+            if init_job
+                .status
+                .as_ref()
+                .and_then(|s| s.job_name.as_ref())
+                .is_none()
+            {
                 let image = instance.spec.image.as_deref().unwrap_or("odoo:18.0");
                 let uid = instance.metadata.uid.as_deref().unwrap_or("unknown");
                 let db = format!("odoo_{}", crate::helpers::sanitise_uid(uid));
@@ -53,7 +63,12 @@ impl State for Initializing {
                         "startTime": crate::helpers::utc_now_odoo(),
                     }
                 });
-                api.patch_status(&crd_name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch)).await?;
+                api.patch_status(
+                    &crd_name,
+                    &PatchParams::apply(FIELD_MANAGER),
+                    &Patch::Merge(&patch),
+                )
+                .await?;
             }
         }
         Ok(())

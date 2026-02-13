@@ -85,10 +85,9 @@ fn init_shared() -> SharedEnv {
 
         let server = env.create().expect("failed to start envtest server");
         let kubeconfig = server.kubeconfig().expect("failed to get kubeconfig");
-        let config =
-            Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
-                .await
-                .expect("failed to build config");
+        let config = Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
+            .await
+            .expect("failed to build config");
         let client = Client::try_from(config).expect("failed to create client");
 
         // Create the postgres-clusters secret in the operator namespace ("default").
@@ -185,8 +184,7 @@ impl TestContext {
         // Create the OdooInstance.
         let api: Api<OdooInstance> = Api::namespaced(client.clone(), &ns);
         let inst: OdooInstance =
-            serde_json::from_value(test_instance_json(instance_name, &ns, replicas))
-                .unwrap();
+            serde_json::from_value(test_instance_json(instance_name, &ns, replicas)).unwrap();
         api.create(&PostParams::default(), &inst)
             .await
             .expect("failed to create OdooInstance");
@@ -304,9 +302,13 @@ pub async fn fake_deployment_ready(client: &Client, ns: &str, name: &str, replic
         "deployment {name} never appeared"
     );
     let patch = json!({ "status": { "readyReplicas": replicas, "replicas": replicas } });
-    deps.patch_status(name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
-        .await
-        .expect("failed to patch deployment status");
+    deps.patch_status(
+        name,
+        &PatchParams::apply(FIELD_MANAGER),
+        &Patch::Merge(&patch),
+    )
+    .await
+    .expect("failed to patch deployment status");
 }
 
 /// Continuously patch Deployment readyReplicas in the background.
@@ -322,7 +324,11 @@ pub fn keep_deployment_ready(
         let patch = json!({ "status": { "readyReplicas": replicas, "replicas": replicas } });
         loop {
             let _ = deps
-                .patch_status(&name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
+                .patch_status(
+                    &name,
+                    &PatchParams::apply(FIELD_MANAGER),
+                    &Patch::Merge(&patch),
+                )
                 .await;
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -359,18 +365,26 @@ where
 pub async fn fake_job_succeeded(client: &Client, ns: &str, job_name: &str) {
     let jobs: Api<Job> = Api::namespaced(client.clone(), ns);
     let patch = json!({ "status": { "succeeded": 1 } });
-    jobs.patch_status(job_name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
-        .await
-        .expect("failed to patch job status");
+    jobs.patch_status(
+        job_name,
+        &PatchParams::apply(FIELD_MANAGER),
+        &Patch::Merge(&patch),
+    )
+    .await
+    .expect("failed to patch job status");
 }
 
 /// Patch a batch/v1 Job's status to simulate failure (failed=1).
 pub async fn fake_job_failed(client: &Client, ns: &str, job_name: &str) {
     let jobs: Api<Job> = Api::namespaced(client.clone(), ns);
     let patch = json!({ "status": { "failed": 1 } });
-    jobs.patch_status(job_name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
-        .await
-        .expect("failed to patch job status (failure)");
+    jobs.patch_status(
+        job_name,
+        &PatchParams::apply(FIELD_MANAGER),
+        &Patch::Merge(&patch),
+    )
+    .await
+    .expect("failed to patch job status (failure)");
 }
 
 /// Patch the OdooInstance spec (e.g. replicas).
@@ -382,9 +396,13 @@ pub async fn patch_instance_spec(
 ) {
     let api: Api<OdooInstance> = Api::namespaced(client.clone(), ns);
     let patch = json!({ "spec": spec_patch });
-    api.patch(name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
-        .await
-        .expect("failed to patch instance spec");
+    api.patch(
+        name,
+        &PatchParams::apply(FIELD_MANAGER),
+        &Patch::Merge(&patch),
+    )
+    .await
+    .expect("failed to patch instance spec");
 }
 
 /// Fast-track an instance from Uninitialized → Running via a completed init
@@ -424,12 +442,7 @@ pub async fn fast_track_to_running(ctx: &TestContext, init_job_name: &str) -> Jo
     );
 
     fake_deployment_ready(client, ns, instance_name, replicas).await;
-    let handle = keep_deployment_ready(
-        client.clone(),
-        ns.clone(),
-        instance_name.into(),
-        replicas,
-    );
+    let handle = keep_deployment_ready(client.clone(), ns.clone(), instance_name.into(), replicas);
 
     assert!(
         wait_for_phase(client, ns, instance_name, OdooInstancePhase::Running).await,

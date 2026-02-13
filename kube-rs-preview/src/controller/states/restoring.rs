@@ -16,9 +16,7 @@ use crate::helpers::sanitise_uid;
 use crate::notify;
 
 use super::{Context, ReconcileSnapshot, State};
-use crate::controller::helpers::{
-    cm_env, env, odoo_volume_mounts, OdooJobBuilder, FIELD_MANAGER,
-};
+use crate::controller::helpers::{cm_env, env, odoo_volume_mounts, OdooJobBuilder, FIELD_MANAGER};
 use crate::controller::state_machine::scale_deployment;
 
 const S3_DOWNLOAD_SCRIPT: &str = include_str!("../../../scripts/s3-download.sh");
@@ -34,7 +32,12 @@ pub struct Restoring;
 
 #[async_trait]
 impl State for Restoring {
-    async fn ensure(&self, instance: &OdooInstance, ctx: &Context, snap: &ReconcileSnapshot) -> Result<()> {
+    async fn ensure(
+        &self,
+        instance: &OdooInstance,
+        ctx: &Context,
+        snap: &ReconcileSnapshot,
+    ) -> Result<()> {
         let ns = instance.namespace().unwrap_or_default();
         let inst_name = instance.name_any();
         scale_deployment(&ctx.client, &inst_name, &ns, 0).await?;
@@ -45,7 +48,12 @@ impl State for Restoring {
         };
 
         // Only create the K8s Job if the CRD hasn't started one yet.
-        if restore_job.status.as_ref().and_then(|s| s.job_name.as_ref()).is_some() {
+        if restore_job
+            .status
+            .as_ref()
+            .and_then(|s| s.job_name.as_ref())
+            .is_some()
+        {
             return Ok(());
         }
 
@@ -57,7 +65,11 @@ impl State for Restoring {
         let db = format!("odoo_{}", sanitise_uid(uid));
         let odoo_conf_name = format!("{instance_name}-odoo-conf");
 
-        let neutralize = if restore_job.spec.neutralize { "True" } else { "False" };
+        let neutralize = if restore_job.spec.neutralize {
+            "True"
+        } else {
+            "False"
+        };
         let output_file = match restore_job.spec.format {
             BackupFormat::Dump => "/mnt/backup/dump.dump",
             BackupFormat::Sql => "/mnt/backup/dump.sql",
@@ -97,7 +109,9 @@ impl State for Restoring {
                     if let Some(ref secret_ref) = s3.s3_credentials_secret_ref {
                         let secret_ns = secret_ref.namespace.as_deref().unwrap_or(&ns);
                         let secret_name = secret_ref.name.as_deref().unwrap_or_default();
-                        if let Ok((ak, sk)) = notify::read_s3_credentials(client, secret_name, secret_ns).await {
+                        if let Ok((ak, sk)) =
+                            notify::read_s3_credentials(client, secret_name, secret_ns).await
+                        {
                             dl_env.push(env("AWS_ACCESS_KEY_ID", ak));
                             dl_env.push(env("AWS_SECRET_ACCESS_KEY", sk));
                         }
@@ -105,7 +119,11 @@ impl State for Restoring {
                     init_containers.push(Container {
                         name: "download".into(),
                         image: Some("quay.io/minio/mc:latest".into()),
-                        command: Some(vec!["/bin/sh".into(), "-c".into(), S3_DOWNLOAD_SCRIPT.into()]),
+                        command: Some(vec![
+                            "/bin/sh".into(),
+                            "-c".into(),
+                            S3_DOWNLOAD_SCRIPT.into(),
+                        ]),
                         env: Some(dl_env),
                         volume_mounts: Some(vec![shared_mount.clone()]),
                         ..Default::default()
@@ -114,18 +132,32 @@ impl State for Restoring {
             }
             RestoreSourceType::Odoo => {
                 if let Some(ref odoo_src) = src.odoo {
-                    let backup_format = if restore_job.spec.format != BackupFormat::Zip { "dump" } else { "zip" };
+                    let backup_format = if restore_job.spec.format != BackupFormat::Zip {
+                        "dump"
+                    } else {
+                        "zip"
+                    };
                     let dl_env = vec![
                         env("ODOO_URL", odoo_src.url.clone()),
-                        env("SOURCE_DB", odoo_src.source_database.clone().unwrap_or_default()),
-                        env("MASTER_PASSWORD", odoo_src.master_password.clone().unwrap_or_default()),
+                        env(
+                            "SOURCE_DB",
+                            odoo_src.source_database.clone().unwrap_or_default(),
+                        ),
+                        env(
+                            "MASTER_PASSWORD",
+                            odoo_src.master_password.clone().unwrap_or_default(),
+                        ),
                         env("BACKUP_FORMAT", backup_format),
                         env("OUTPUT_FILE", output_file),
                     ];
                     init_containers.push(Container {
                         name: "download".into(),
                         image: Some("curlimages/curl:latest".into()),
-                        command: Some(vec!["/bin/sh".into(), "-c".into(), ODOO_DOWNLOAD_SCRIPT.into()]),
+                        command: Some(vec![
+                            "/bin/sh".into(),
+                            "-c".into(),
+                            ODOO_DOWNLOAD_SCRIPT.into(),
+                        ]),
                         env: Some(dl_env),
                         volume_mounts: Some(vec![shared_mount.clone()]),
                         ..Default::default()
@@ -163,9 +195,14 @@ impl State for Restoring {
         info!(%crd_name, %k8s_job_name, "created restore job");
 
         crate::controller::odoo_instance::publish_event(
-            ctx, restore_job, EventType::Normal, "RestoreStarted", "Reconcile",
+            ctx,
+            restore_job,
+            EventType::Normal,
+            "RestoreStarted",
+            "Reconcile",
             Some(format!("Created restore job {k8s_job_name}")),
-        ).await;
+        )
+        .await;
 
         let api: Api<OdooRestoreJob> = Api::namespaced(client.clone(), &ns);
         let patch = json!({
@@ -175,7 +212,12 @@ impl State for Restoring {
                 "startTime": crate::helpers::utc_now_odoo(),
             }
         });
-        api.patch_status(&crd_name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch)).await?;
+        api.patch_status(
+            &crd_name,
+            &PatchParams::apply(FIELD_MANAGER),
+            &Patch::Merge(&patch),
+        )
+        .await?;
 
         Ok(())
     }

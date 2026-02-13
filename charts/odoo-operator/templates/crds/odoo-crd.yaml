@@ -762,6 +762,7 @@ spec:
                 - Stopped
                 - Upgrading
                 - Restoring
+                - BackingUp
                 - Error
                 nullable: true
                 type: string
