@@ -146,54 +146,18 @@ See [STATE_MACHINE.md](STATE_MACHINE.md) for the full diagram (auto-generated wi
 
 ## Project Layout
 
-```
-├── Cargo.toml
-├── Dockerfile
-├── Makefile
-├── charts/odoo-operator/          # Helm chart
-├── scripts/                       # Shell scripts embedded into Jobs
-│   ├── backup.sh
-│   ├── restore.sh
-│   ├── s3-download.sh
-│   ├── s3-upload.sh
-│   └── odoo-download.sh
-├── tests/
-│   ├── integration/               # envtest integration tests (12 tests)
-│   │   ├── main.rs
-│   │   ├── common.rs              # Shared harness, helpers, TestContext
-│   │   ├── bootstrap.rs
-│   │   ├── child_resources.rs
-│   │   ├── scaling.rs
-│   │   ├── degraded.rs
-│   │   ├── init_job.rs
-│   │   ├── backup_job.rs
-│   │   ├── upgrade_job.rs
-│   │   ├── restore_job.rs
-│   │   └── finalizer.rs
-│   ├── controller_helpers_test.rs  # Unit tests for OdooJobBuilder, helpers
-│   ├── helpers_test.rs             # Unit tests for odoo.conf, crypto
-│   └── webhook_test.rs             # Admission webhook tests
-└── src/
-    ├── main.rs                     # Entry point (clap, tokio::select!)
-    ├── lib.rs
-    ├── error.rs                    # Error enum (thiserror)
-    ├── helpers.rs                  # OperatorDefaults, odoo.conf builder, crypto
-    ├── notify.rs                   # Webhook notifications + S3 credentials
-    ├── postgres.rs                 # PostgresManager async trait
-    ├── webhook.rs                  # Validating admission webhook (warp)
-    ├── crd/                        # Custom Resource Definitions
-    │   ├── odoo_instance.rs
-    │   ├── odoo_init_job.rs
-    │   ├── odoo_backup_job.rs
-    │   ├── odoo_restore_job.rs
-    │   └── odoo_upgrade_job.rs
-    └── controller/
-        ├── odoo_instance.rs        # Main reconciler, finalizer, events
-        ├── state_machine.rs        # ReconcileSnapshot, transitions, guards
-        ├── states/                 # One file per OdooInstancePhase
-        ├── child_resources.rs      # ensure_* functions for K8s resources
-        └── helpers.rs              # OdooJobBuilder, shared constants
-```
+| Directory | Contents |
+|---|---|
+| `src/crd/` | Custom Resource types (OdooInstance, OdooInitJob, etc.) |
+| `src/controller/` | Reconciler, declarative state machine, child resource management |
+| `src/controller/states/` | One file per OdooInstancePhase (12 states), each with an idempotent `ensure()` |
+| `src/bin/` | CLI tools — CRD YAML generator, Mermaid state diagram generator |
+| `scripts/` | Shell scripts embedded into backup/restore/init Jobs |
+| `charts/odoo-operator/` | Helm chart |
+| `tests/integration/` | envtest-based integration tests (17 tests, parallel via per-test namespaces) |
+| `tests/` | Unit tests for helpers, job builder, and admission webhook |
+| `testing/` | Local dev/test fixtures (pg-clusters secret, Helm overrides) |
+| `.github/workflows/` | CI (lint + test on PRs) and release (image + Helm chart on tag push) |
 
 ## Development
 
