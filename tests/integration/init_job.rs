@@ -7,7 +7,7 @@ use odoo_operator::crd::odoo_instance::OdooInstancePhase;
 
 /// Uninitialized → Initializing → Starting → Running
 #[tokio::test]
-async fn init_job_lifecycle() {
+async fn init_job_lifecycle() -> anyhow::Result<()> {
     let ctx = TestContext::new("test-init").await;
     let (c, ns) = (&ctx.client, ctx.ns.as_str());
 
@@ -37,6 +37,10 @@ async fn init_job_lifecycle() {
         "expected Initializing after init job created"
     );
 
+    // Check that deployments are scaled to 0 during init
+    check_deployment_scale(c, ns, "test-init", 0).await?;
+    check_deployment_scale(c, ns, "test-init-cron", 0).await?;
+
     let k8s_job = wait_for_k8s_job_name::<OdooInitJob>(c, ns, "test-init-job").await;
     fake_job_succeeded(c, ns, &k8s_job).await;
 
@@ -51,13 +55,16 @@ async fn init_job_lifecycle() {
         wait_for_phase(c, ns, "test-init", OdooInstancePhase::Running).await,
         "expected Running after deployment ready"
     );
+    check_deployment_scale(c, ns, "test-init", 1).await?;
+    check_deployment_scale(c, ns, "test-init-cron", 1).await?;
 
     ready_handle.abort();
+    Ok(())
 }
 
 /// Uninitialized → Initializing → InitFailed → (retry) Initializing → Starting
 #[tokio::test]
-async fn init_job_failure_and_retry() {
+async fn init_job_failure_and_retry() -> anyhow::Result<()> {
     let ctx = TestContext::new("test-initfail").await;
     let (c, ns) = (&ctx.client, ctx.ns.as_str());
 
@@ -91,6 +98,8 @@ async fn init_job_failure_and_retry() {
         wait_for_phase(c, ns, "test-initfail", OdooInstancePhase::InitFailed).await,
         "expected InitFailed after job failure"
     );
+    check_deployment_scale(c, ns, "test-initfail", 0).await?;
+    check_deployment_scale(c, ns, "test-initfail-cron", 0).await?;
 
     // Retry with a second init job.
     let retry_job: OdooInitJob = serde_json::from_value(json!({
@@ -117,4 +126,5 @@ async fn init_job_failure_and_retry() {
         wait_for_phase(c, ns, "test-initfail", OdooInstancePhase::Starting).await,
         "expected Starting after retry succeeded"
     );
+    Ok(())
 }

@@ -33,7 +33,8 @@ use crate::helpers::{build_odoo_conf, db_name, generate_password, odoo_username,
 use crate::postgres::PostgresClusterConfig;
 
 use super::helpers::{
-    image_pull_secrets, odoo_security_context, odoo_volume_mounts, odoo_volumes, FIELD_MANAGER,
+    cron_depl_name, image_pull_secrets, odoo_security_context, odoo_volume_mounts, odoo_volumes,
+    FIELD_MANAGER,
 };
 use super::odoo_instance::Context;
 
@@ -101,6 +102,15 @@ pub async fn apply_defaults(
     }
     if instance.spec.tolerations.is_empty() && !ctx.defaults.tolerations.is_empty() {
         patch.insert("tolerations".into(), json!(ctx.defaults.tolerations));
+    }
+
+    // Cron resources
+    let mut cron_patch = serde_json::Map::new();
+    if instance.spec.cron.resources.is_none() && ctx.defaults.resources.is_some() {
+        cron_patch.insert("resources".into(), json!(ctx.defaults.resources));
+    }
+    if !cron_patch.is_empty() {
+        patch.insert("cron".into(), json!(cron_patch));
     }
 
     if patch.is_empty() {
@@ -590,7 +600,12 @@ pub async fn ensure_deployment(
                         name: format!("odoo-{name}"),
                         image: Some(image.to_string()),
                         image_pull_policy: Some("IfNotPresent".to_string()),
-                        command: Some(vec!["/entrypoint.sh".to_string(), "odoo".to_string()]),
+                        command: Some(vec![
+                            "/entrypoint.sh".to_string(),
+                            "odoo".to_string(),
+                            "--max-cron-threads".to_string(),
+                            "0".to_string(),
+                        ]),
                         ports: Some(vec![
                             ContainerPort {
                                 name: Some("http".to_string()),
@@ -637,6 +652,123 @@ pub async fn ensure_deployment(
     deployments
         .patch(
             name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(&dep),
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn ensure_cron_deployment(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    instance: &OdooInstance,
+    ctx: &Context,
+    oref: &OwnerReference,
+) -> Result<()> {
+    let deployments: Api<Deployment> = Api::namespaced(client.clone(), ns);
+
+    // Replicas are managed by the state machine via scale_deployment().
+    // Here we only ensure the Deployment spec (image, probes, volumes, etc.)
+    // exists.  We read the current replica count so we don't clobber it.
+    let depl_name = cron_depl_name(instance);
+    let current_replicas = match deployments.get(depl_name.as_str()).await {
+        Ok(dep) => dep.spec.and_then(|s| s.replicas).unwrap_or(0),
+        Err(_) => 0,
+    };
+    let replicas = current_replicas;
+    let image = instance
+        .spec
+        .image
+        .as_deref()
+        .unwrap_or(&ctx.defaults.odoo_image);
+
+    let strategy_type = instance
+        .spec
+        .strategy
+        .as_ref()
+        .map(|s| &s.strategy_type)
+        .unwrap_or(&DeploymentStrategyType::Recreate);
+    let k8s_strategy = match strategy_type {
+        DeploymentStrategyType::Recreate => "Recreate",
+        DeploymentStrategyType::RollingUpdate => "RollingUpdate",
+    };
+
+    // Hash odoo.conf for rollout trigger.
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+    let cm = cms.get(&format!("{name}-odoo-conf")).await?;
+    let conf_content = cm
+        .data
+        .as_ref()
+        .and_then(|d| d.get("odoo.conf"))
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let conf_hash = sha256_hex(conf_content);
+
+    let dep = Deployment {
+        metadata: ObjectMeta {
+            name: Some(depl_name.clone()),
+            namespace: Some(ns.to_string()),
+            labels: Some(BTreeMap::from([("app".to_string(), name.to_string())])),
+            owner_references: Some(vec![oref.clone()]),
+            ..Default::default()
+        },
+        spec: Some(DeploymentSpec {
+            replicas: Some(replicas),
+            selector: LabelSelector {
+                match_labels: Some(BTreeMap::from([("app".to_string(), depl_name.to_string())])),
+                ..Default::default()
+            },
+            strategy: Some(DeploymentStrategy {
+                type_: Some(k8s_strategy.to_string()),
+                ..Default::default()
+            }),
+            template: PodTemplateSpec {
+                metadata: Some(ObjectMeta {
+                    labels: Some(BTreeMap::from([("app".to_string(), depl_name.to_string())])),
+                    annotations: Some(BTreeMap::from([(
+                        "bemade.org/odoo-conf-hash".to_string(),
+                        conf_hash,
+                    )])),
+                    ..Default::default()
+                }),
+                spec: Some(PodSpec {
+                    image_pull_secrets: image_pull_secrets(instance),
+                    affinity: instance.spec.affinity.clone(),
+                    tolerations: if instance.spec.tolerations.is_empty() {
+                        None
+                    } else {
+                        Some(instance.spec.tolerations.clone())
+                    },
+                    security_context: Some(odoo_security_context()),
+                    volumes: Some(odoo_volumes(name)),
+                    containers: vec![Container {
+                        name: format!("odoo-cron-{name}"),
+                        image: Some(image.to_string()),
+                        image_pull_policy: Some("IfNotPresent".to_string()),
+                        command: Some(vec![
+                            "/entrypoint.sh".to_string(),
+                            "odoo".to_string(),
+                            "--workers".to_string(),
+                            "0".to_string(),
+                            "--no-http".to_string(),
+                        ]),
+                        volume_mounts: Some(odoo_volume_mounts()),
+                        resources: instance.spec.cron.resources.clone(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    deployments
+        .patch(
+            depl_name.as_str(),
             &PatchParams::apply(FIELD_MANAGER).force(),
             &Patch::Apply(&dep),
         )

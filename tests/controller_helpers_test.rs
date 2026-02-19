@@ -4,7 +4,7 @@ use kube::api::ObjectMeta;
 
 use odoo_operator::controller::helpers::*;
 use odoo_operator::crd::odoo_init_job::{OdooInitJob, OdooInitJobSpec};
-use odoo_operator::crd::odoo_instance::{IngressSpec, OdooInstance, OdooInstanceSpec};
+use odoo_operator::crd::odoo_instance::{CronSpec, IngressSpec, OdooInstance, OdooInstanceSpec};
 use odoo_operator::crd::shared::OdooInstanceRef;
 
 /// Build a minimal OdooInstance for testing.
@@ -21,6 +21,10 @@ fn test_instance(name: &str, pull_secret: Option<&str>) -> OdooInstance {
             image_pull_secret: pull_secret.map(|s| s.to_string()),
             admin_password: "admin".to_string(),
             replicas: 1,
+            cron: CronSpec {
+                replicas: 1,
+                resources: None,
+            },
             ingress: IngressSpec {
                 hosts: vec!["test.example.com".to_string()],
                 issuer: None,

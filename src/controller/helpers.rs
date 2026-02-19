@@ -129,6 +129,11 @@ pub fn cm_env(env_name: &str, cm_name: &str, key: &str) -> EnvVar {
     }
 }
 
+/// Get the cron deployment name for an odoo instance
+pub fn cron_depl_name(instance: &OdooInstance) -> String {
+    instance.name_any().to_string() + "-cron"
+}
+
 // ── OdooJobBuilder ──────────────────────────────────────────────────────────
 
 /// Builder for batch/v1 `Job` resources used by the operator's job controllers.

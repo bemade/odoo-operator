@@ -307,6 +307,7 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
     child_resources::ensure_service(client, &ns, &name, &oref).await?;
     child_resources::ensure_ingress(client, &ns, &name, instance, &oref).await?;
     child_resources::ensure_deployment(client, &ns, &name, instance, ctx, &oref).await?;
+    child_resources::ensure_cron_deployment(client, &ns, &name, instance, ctx, &oref).await?;
 
     // Gather the observed world into a snapshot.
     let snapshot =

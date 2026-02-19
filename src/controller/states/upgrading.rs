@@ -11,7 +11,9 @@ use crate::error::Result;
 use crate::helpers::sanitise_uid;
 
 use super::{Context, ReconcileSnapshot, State};
-use crate::controller::helpers::{odoo_volume_mounts, OdooJobBuilder, FIELD_MANAGER};
+use crate::controller::helpers::{
+    cron_depl_name, odoo_volume_mounts, OdooJobBuilder, FIELD_MANAGER,
+};
 use crate::controller::state_machine::scale_deployment;
 
 /// Upgrading: upgrade job running, deployment must be down.
@@ -30,8 +32,8 @@ impl State for Upgrading {
         snap: &ReconcileSnapshot,
     ) -> Result<()> {
         let ns = instance.namespace().unwrap_or_default();
-        let inst_name = instance.name_any();
-        scale_deployment(&ctx.client, &inst_name, &ns, 0).await?;
+        // Scale only the cron deployment
+        scale_deployment(&ctx.client, cron_depl_name(instance).as_str(), &ns, 0).await?;
 
         let upgrade_job = match snap.active_upgrade_job {
             Some(ref uj) => uj,

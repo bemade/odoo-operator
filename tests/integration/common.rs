@@ -204,6 +204,9 @@ fn test_instance_json(name: &str, ns: &str, replicas: i32) -> serde_json::Value 
         "metadata": { "name": name, "namespace": ns },
         "spec": {
             "replicas": replicas,
+            "cron": {
+                "replicas": 1,
+            },
             "adminPassword": "admin",
             "image": "odoo:18.0",
             "ingress": {
@@ -450,4 +453,24 @@ pub async fn fast_track_to_running(ctx: &TestContext, init_job_name: &str) -> Jo
     );
 
     handle
+}
+
+pub async fn check_deployment_scale(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    replicas: i32,
+) -> anyhow::Result<()> {
+    let deployments: Api<Deployment> = Api::namespaced(client.clone(), ns);
+    let deployment = deployments.get(name).await?;
+    let actual = deployment.spec.and_then(|s| s.replicas).unwrap_or(0);
+    if actual != replicas {
+        anyhow::bail!(
+            "deployment {} has the wrong replica count: {} instead of {}",
+            name,
+            actual,
+            replicas
+        );
+    }
+    Ok(())
 }

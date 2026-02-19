@@ -86,6 +86,25 @@ fn default_health_path() -> String {
     "/web/health".to_string()
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CronSpec {
+    #[serde(default = "default_replicas")]
+    pub replicas: i32,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceRequirements>,
+}
+
+impl Default for CronSpec {
+    fn default() -> Self {
+        CronSpec {
+            replicas: default_replicas(),
+            resources: None,
+        }
+    }
+}
+
 // ── CRD ───────────────────────────────────────────────────────────────────────
 
 /// OdooInstance is the Schema for the odooinstances API.
@@ -116,6 +135,9 @@ pub struct OdooInstanceSpec {
 
     #[serde(default = "default_replicas")]
     pub replicas: i32,
+
+    #[serde(default)]
+    pub cron: CronSpec,
 
     pub ingress: IngressSpec,
 

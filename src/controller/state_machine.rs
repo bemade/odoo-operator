@@ -26,7 +26,7 @@ use crate::crd::odoo_upgrade_job::OdooUpgradeJob;
 use crate::crd::shared::Phase;
 use crate::error::Result;
 
-use super::helpers::FIELD_MANAGER;
+use super::helpers::{cron_depl_name, FIELD_MANAGER};
 use super::odoo_instance::Context;
 
 // ── JobStatus ────────────────────────────────────────────────────────────────
@@ -60,6 +60,8 @@ pub struct ReconcileSnapshot {
     // ── Deployment ────────────────────────────────────────────────────────
     pub ready_replicas: i32,
     pub deployment_replicas: i32,
+    pub cron_ready_replicas: i32,
+    pub cron_deployment_replicas: i32,
     pub db_initialized: bool,
 
     // ── Job CR status (combines presence + K8s Job outcome) ──────────────
@@ -94,6 +96,18 @@ impl ReconcileSnapshot {
         let (deployment_replicas, ready_replicas) = {
             let deps: Api<Deployment> = Api::namespaced(client.clone(), ns);
             match deps.get(instance_name).await {
+                Ok(dep) => (
+                    dep.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0),
+                    dep.status.and_then(|s| s.ready_replicas).unwrap_or(0),
+                ),
+                Err(_) => (0, 0),
+            }
+        };
+
+        // Cron replicas (spec + ready).
+        let (cron_deployment_replicas, cron_ready_replicas) = {
+            let deps: Api<Deployment> = Api::namespaced(client.clone(), ns);
+            match deps.get(cron_depl_name(instance).as_str()).await {
                 Ok(dep) => (
                     dep.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0),
                     dep.status.and_then(|s| s.ready_replicas).unwrap_or(0),
@@ -242,6 +256,8 @@ impl ReconcileSnapshot {
         Ok(Self {
             ready_replicas,
             deployment_replicas,
+            cron_ready_replicas,
+            cron_deployment_replicas,
             db_initialized: db_init_from_jobs,
             init_job,
             restore_job,
@@ -401,6 +417,13 @@ pub async fn execute_action(
                 } else {
                     ("Failed", Phase::Failed, Some("upgrade job failed"))
                 };
+                // Restart the main deployment when an upgrade job completes
+                // successfully. No need to restart on failure and no need to restart
+                // the cron deployment since it gets scaled to 0 during upgrade anyway.
+                if phase_enum == Phase::Completed {
+                    let deps: Api<Deployment> = Api::namespaced(client.clone(), &ns);
+                    deps.restart(instance.name_any().as_str()).await?;
+                }
                 let mut patch_val = json!({"status": {"phase": phase_str, "completionTime": &now}});
                 if let Some(m) = msg {
                     patch_val["status"]["message"] = json!(m);

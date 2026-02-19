@@ -89,4 +89,8 @@ async fn reconcile_creates_child_resources() {
 
     let deps: Api<Deployment> = Api::namespaced(c.clone(), ns);
     assert!(deps.get("test-child").await.is_ok(), "deployment missing");
+    assert!(
+        deps.get("test-child-cron").await.is_ok(),
+        "cron deployment is missing"
+    );
 }

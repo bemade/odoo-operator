@@ -1,3 +1,4 @@
+use k8s_openapi::api::apps::v1::Deployment;
 use kube::api::{Api, PostParams};
 use serde_json::json;
 
@@ -7,7 +8,7 @@ use odoo_operator::crd::odoo_restore_job::OdooRestoreJob;
 
 /// Uninitialized → Restoring → Starting → Running
 #[tokio::test]
-async fn restore_job_lifecycle() {
+async fn restore_job_lifecycle() -> anyhow::Result<()> {
     let ctx = TestContext::new("test-restore").await;
     let (c, ns) = (&ctx.client, ctx.ns.as_str());
 
@@ -44,6 +45,23 @@ async fn restore_job_lifecycle() {
         "expected Restoring after restore job created"
     );
 
+    // Make sure all deployments are scaled down during restore
+    check_deployment_scale(c, ns, "test-restore", 0).await?;
+    check_deployment_scale(c, ns, "test-restore-cron", 0).await?;
+
+    let deployments: Api<Deployment> = Api::namespaced(c.clone(), ns);
+    let main_deployment = deployments.get("test-restore").await;
+    let cron_deployment = deployments.get("test-restore-cron").await;
+
+    assert!(
+        main_deployment.is_ok_and(|depl| depl.spec.unwrap().replicas.unwrap() == 0),
+        "main deployment should be scaled to 0 during restore"
+    );
+    assert!(
+        cron_deployment.is_ok_and(|depl| depl.spec.unwrap().replicas.unwrap() == 0),
+        "cron deployment should be scaled to 0 during restore"
+    );
+
     let k8s_job = wait_for_k8s_job_name::<OdooRestoreJob>(c, ns, "test-restore-job").await;
     fake_job_succeeded(c, ns, &k8s_job).await;
 
@@ -51,6 +69,8 @@ async fn restore_job_lifecycle() {
         wait_for_phase(c, ns, "test-restore", OdooInstancePhase::Starting).await,
         "expected Starting after restore completed"
     );
+    check_deployment_scale(c, ns, "test-restore", 1).await?;
+    check_deployment_scale(c, ns, "test-restore-cron", 1).await?;
 
     let ready_handle = keep_deployment_ready(c.clone(), ns.into(), "test-restore".into(), 1);
 
@@ -60,4 +80,5 @@ async fn restore_job_lifecycle() {
     );
 
     ready_handle.abort();
+    Ok(())
 }
