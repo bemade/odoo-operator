@@ -96,6 +96,15 @@ pub struct CronSpec {
     pub resources: Option<ResourceRequirements>,
 }
 
+impl Default for CronSpec {
+    fn default() -> Self {
+        CronSpec {
+            replicas: default_replicas(),
+            resources: None,
+        }
+    }
+}
+
 // ── CRD ───────────────────────────────────────────────────────────────────────
 
 /// OdooInstance is the Schema for the odooinstances API.
@@ -127,6 +136,7 @@ pub struct OdooInstanceSpec {
     #[serde(default = "default_replicas")]
     pub replicas: i32,
 
+    #[serde(default)]
     pub cron: CronSpec,
 
     pub ingress: IngressSpec,

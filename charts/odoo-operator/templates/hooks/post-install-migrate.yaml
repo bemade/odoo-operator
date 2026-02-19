@@ -8,7 +8,7 @@ metadata:
   annotations:
     "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "0"
-    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
 spec:
   ttlSecondsAfterFinished: 300
   backoffLimit: 1
@@ -33,6 +33,13 @@ spec:
               set -e
 
               echo "=== Odoo Operator Post-Install Migration ==="
+
+              # Wait for RBAC to propagate before issuing any kubectl commands.
+              echo "Waiting for RBAC to propagate..."
+              until kubectl auth can-i delete validatingwebhookconfigurations 2>/dev/null; do
+                sleep 2
+              done
+              echo "RBAC ready."
 
               # Clean up stale Kopf webhook configurations (left over from Python operator)
               echo "Removing stale Kopf webhook configurations if present..."
