@@ -1,5 +1,6 @@
 .PHONY: build test test-all test-cluster crds helm-crds check fmt clippy \
-       docker-build docker-push docker-load state-machine
+       docker-build docker-push docker-load state-machine \
+       release-patch release-minor release-major
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -82,6 +83,25 @@ helm-crds: crds
 ## Regenerate STATE_MACHINE.md from the TRANSITIONS table in code.
 state-machine:
 	cargo run --bin statemachine_diagram -- --out STATE_MACHINE.md
+
+# ── Release ───────────────────────────────────────────────────────────────────
+
+## Cut a release: make release-patch / release-minor / release-major
+release-patch release-minor release-major:
+	@command -v cargo-bump >/dev/null 2>&1 || \
+	  (echo "ERROR: cargo-bump not installed — run: cargo install cargo-bump" && exit 1)
+	@git diff --quiet && git diff --cached --quiet || \
+	  (echo "ERROR: working tree is dirty — commit or stash changes first" && exit 1)
+	cargo bump $(subst release-,,$@)
+	$(eval VERSION := $(shell grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/'))
+	sed -i 's/^version:.*/version: $(VERSION)/' charts/odoo-operator/Chart.yaml
+	sed -i 's/^appVersion:.*/appVersion: "$(VERSION)"/' charts/odoo-operator/Chart.yaml
+	cargo generate-lockfile
+	git add Cargo.toml Cargo.lock charts/odoo-operator/Chart.yaml
+	git commit -m "chore: bump version to $(VERSION)"
+	git tag "v$(VERSION)"
+	git push origin HEAD "v$(VERSION)"
+	@echo "Done — CI will build and publish v$(VERSION)."
 
 install: docker-build helm-crds
 	kubectl scale deployment/odoo-operator -n odoo-operator --replicas=0

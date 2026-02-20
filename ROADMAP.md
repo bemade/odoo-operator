@@ -11,31 +11,14 @@
 - **Kubernetes Events**: emitted on phase transitions, spec defaulting, child resource errors
 - **Filestore expansion**: PVC storage request increased automatically when `spec.filestore.storageSize` is raised (requires `allowVolumeExpansion: true` on the StorageClass)
 - **CRD migration**: v1 legacy shim + post-install hook migrates objects from old Kopf operator storage; webhook infrastructure from the previous Python operator cleaned up automatically on install/upgrade
+- **Split Crons**: v0.13.3 splits the cron deployment from the main web worker
+  deployment. This should allow running large OdooUpgradeJobs while the main deployment
+  stays active. **This feature is actively under test and may roll back in a future
+  version if performance is not as expected.**
 
 ---
 
 ## High Priority
-
-### Split Web/Cron Deployments
-
-Currently a single Deployment handles both web workers and cron threads. Splitting into two Deployments would:
-
-- Allow cron to be scaled to 0 during upgrades, eliminating serialization errors (`ir_module_module` lock contention that plagued Odoo.sh)
-- Enable independent resource allocation and scaling for web vs cron
-- Give cleaner logs and metrics per workload type
-
-**Proposed spec addition**:
-```yaml
-spec:
-  replicas: 3        # web workers
-  cron:
-    replicas: 1
-    resources: ...   # defaults to spec.resources if unset
-```
-
-The operator would always create both deployments; `spec.cron.replicas: 0` disables cron.
-
----
 
 ### Auto-Upgrade on Image Change
 

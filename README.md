@@ -51,6 +51,14 @@ helm upgrade --install odoo-operator oci://ghcr.io/bemade/odoo-operator/charts/o
   --set defaults.ingressIssuer=letsencrypt-prod
 ```
 
+**NOTE**: If you have a previously installed version of the chart, you may need to
+completely uninstall and reinstall it. This chart is still in early and active
+development and breaking changes are still frequent. Uninstalling the chart does not
+remove all your running OdooInstances. You may also need to clear the odoo-operator
+ServiceAccount resource along with the ClusterRole and ClusterRoleBinding of the same
+name. These previously had Helm hook values on them that break installation of later
+versions starting at v0.13.3.
+
 ### 3. Deploy an Odoo instance
 
 ```yaml

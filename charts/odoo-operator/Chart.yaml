@@ -6,10 +6,10 @@ description: A Kubernetes operator for managing Odoo instances
 type: application
 
 # Chart version - increment with changes to the chart
-version: 0.13.2
+version: 0.13.3
 
 # Application version - the version of the operator itself
-appVersion: "0.13.2"
+appVersion: "0.13.3"
 
 # Keywords for this chart
 keywords:
