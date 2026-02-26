@@ -16,7 +16,9 @@ use crate::helpers::sanitise_uid;
 use crate::notify;
 
 use super::{Context, ReconcileSnapshot, State};
-use crate::controller::helpers::{cm_env, env, odoo_volume_mounts, OdooJobBuilder, FIELD_MANAGER};
+use crate::controller::helpers::{
+    cm_env, cron_depl_name, env, odoo_volume_mounts, OdooJobBuilder, FIELD_MANAGER,
+};
 use crate::controller::state_machine::scale_deployment;
 
 const S3_DOWNLOAD_SCRIPT: &str = include_str!("../../../scripts/s3-download.sh");
@@ -41,6 +43,7 @@ impl State for Restoring {
         let ns = instance.namespace().unwrap_or_default();
         let inst_name = instance.name_any();
         scale_deployment(&ctx.client, &inst_name, &ns, 0).await?;
+        scale_deployment(&ctx.client, cron_depl_name(instance).as_str(), &ns, 0).await?;
 
         let restore_job = match snap.active_restore_job {
             Some(ref rj) => rj,
