@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::{
     apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy},
     core::v1::{
-        ConfigMap, Container, ContainerPort, HTTPGetAction, PersistentVolumeClaim,
+        ConfigMap, Container, ContainerPort, ExecAction, HTTPGetAction, PersistentVolumeClaim,
         PersistentVolumeClaimSpec, PodSpec, PodTemplateSpec, Probe, Secret, Service, ServicePort,
         ServiceSpec, VolumeResourceRequirements,
     },
@@ -743,20 +743,50 @@ pub async fn ensure_cron_deployment(
                     },
                     security_context: Some(odoo_security_context()),
                     volumes: Some(odoo_volumes(name)),
-                    containers: vec![Container {
-                        name: format!("odoo-cron-{name}"),
-                        image: Some(image.to_string()),
-                        image_pull_policy: Some("IfNotPresent".to_string()),
-                        command: Some(vec![
-                            "/entrypoint.sh".to_string(),
-                            "odoo".to_string(),
-                            "--workers".to_string(),
-                            "0".to_string(),
-                            "--no-http".to_string(),
-                        ]),
-                        volume_mounts: Some(odoo_volume_mounts()),
-                        resources: instance.spec.cron.resources.clone(),
-                        ..Default::default()
+                    containers: vec![{
+                        // Cron pods run --no-http, so there is no HTTP endpoint
+                        // for probes.  Instead we check that the cron thread is
+                        // still alive by counting threads under /proc/1/task.
+                        // A healthy pod always has ≥2 (main + cron); if the cron
+                        // thread crashes the count drops to 1 permanently.
+                        let thread_check_cmd = vec![
+                            "python3".to_string(),
+                            "-c".to_string(),
+                            "import os,sys\ntry:\n if len(os.listdir('/proc/1/task'))<2: sys.exit(1)\nexcept: sys.exit(1)".to_string(),
+                        ];
+                        let make_thread_probe = || Probe {
+                            exec: Some(ExecAction {
+                                command: Some(thread_check_cmd.clone()),
+                            }),
+                            timeout_seconds: Some(5),
+                            ..Default::default()
+                        };
+                        Container {
+                            name: format!("odoo-cron-{name}"),
+                            image: Some(image.to_string()),
+                            image_pull_policy: Some("IfNotPresent".to_string()),
+                            command: Some(vec![
+                                "/entrypoint.sh".to_string(),
+                                "odoo".to_string(),
+                                "--workers".to_string(),
+                                "0".to_string(),
+                                "--no-http".to_string(),
+                            ]),
+                            volume_mounts: Some(odoo_volume_mounts()),
+                            resources: instance.spec.cron.resources.clone(),
+                            startup_probe: Some(Probe {
+                                initial_delay_seconds: Some(5),
+                                period_seconds: Some(10),
+                                failure_threshold: Some(30),
+                                ..make_thread_probe()
+                            }),
+                            liveness_probe: Some(Probe {
+                                period_seconds: Some(30),
+                                failure_threshold: Some(3),
+                                ..make_thread_probe()
+                            }),
+                            ..Default::default()
+                        }
                     }],
                     ..Default::default()
                 }),
