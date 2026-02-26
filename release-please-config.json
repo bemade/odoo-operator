@@ -4,6 +4,7 @@
   "packages": {
     ".": {
       "release-type": "rust",
+      "include-component-in-tag": false,
       "extra-files": [
         {
           "type": "yaml",
