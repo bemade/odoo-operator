@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.7](https://github.com/bemade/odoo-operator/compare/v0.13.6...v0.13.7) (2026-02-26)
+
+
+### Bug Fixes
+
+* scale down cron deployment during restore to avoid pooler stale connections ([#15](https://github.com/bemade/odoo-operator/issues/15)) ([5d7a522](https://github.com/bemade/odoo-operator/commit/5d7a5226e92c0bda0a10d12e8ff475af9e73661a))
+
 ## [0.13.6](https://github.com/bemade/odoo-operator/compare/v0.13.5...v0.13.6) (2026-02-26)
 
 
