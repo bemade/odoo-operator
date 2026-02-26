@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.5](https://github.com/bemade/odoo-operator/compare/v0.13.4...v0.13.5) (2026-02-26)
+
+
+### Bug Fixes
+
+* trigger release workflow on GitHub release published event ([#10](https://github.com/bemade/odoo-operator/issues/10)) ([ed0c97f](https://github.com/bemade/odoo-operator/commit/ed0c97fc099128d0dbeb2bfce3e93eb7855833d7))
+
 ## [0.13.4](https://github.com/bemade/odoo-operator/compare/v0.13.3...v0.13.4) (2026-02-26)
 
 
