@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.8](https://github.com/bemade/odoo-operator/compare/v0.13.7...v0.13.8) (2026-02-26)
+
+
+### Bug Fixes
+
+* add liveness probe to cron pods to detect dead cron threads ([#17](https://github.com/bemade/odoo-operator/issues/17)) ([ca15d5f](https://github.com/bemade/odoo-operator/commit/ca15d5f65db104404a6e93e1d8b812a495fa6ffa))
+
 ## [0.13.7](https://github.com/bemade/odoo-operator/compare/v0.13.6...v0.13.7) (2026-02-26)
 
 
