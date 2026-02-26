@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.6](https://github.com/bemade/odoo-operator/compare/v0.13.5...v0.13.6) (2026-02-26)
+
+
+### Bug Fixes
+
+* fold release pipeline into release-please workflow to avoid GITHUB_TOKEN cascade restriction ([#12](https://github.com/bemade/odoo-operator/issues/12)) ([e934f88](https://github.com/bemade/odoo-operator/commit/e934f88b13cde3abefdb132544177a98297d404a))
+
 ## [0.13.5](https://github.com/bemade/odoo-operator/compare/v0.13.4...v0.13.5) (2026-02-26)
 
 
