@@ -21,18 +21,20 @@ echo "Neutralize: $NEUTRALIZE"
 echo "Backup directory contents:"
 ls -lh /mnt/backup/
 
-echo "=== Dropping existing database if present ==="
-odoo db --db_host "$HOST" --db_port "$PORT" --db_user "$USER" --db_password "$PASSWORD" \
-  drop "$DB_NAME" || true
-
 if [ -f /mnt/backup/dump.dump ]; then
     echo "Found dump.dump — using pg_restore method"
+    echo "=== Dropping existing database if present ==="
+    odoo db --db_host "$HOST" --db_port "$PORT" --db_user "$USER" --db_password "$PASSWORD" \
+      drop "$DB_NAME" || true
     createdb -h "$HOST" -p "$PORT" -U "$USER" "$DB_NAME"
     # pg_restore may emit warnings (ownership, sequences) but still succeed; || true guards that.
     pg_restore -h "$HOST" -p "$PORT" -U "$USER" -d "$DB_NAME" --no-owner /mnt/backup/dump.dump || true
 
 elif [ -f /mnt/backup/dump.sql ]; then
     echo "Found dump.sql — using psql method"
+    echo "=== Dropping existing database if present ==="
+    odoo db --db_host "$HOST" --db_port "$PORT" --db_user "$USER" --db_password "$PASSWORD" \
+      drop "$DB_NAME" || true
     createdb -h "$HOST" -p "$PORT" -U "$USER" "$DB_NAME"
     # psql may emit non-fatal errors; || true guards that.
     psql -h "$HOST" -p "$PORT" -U "$USER" -d "$DB_NAME" -f /mnt/backup/dump.sql || true
@@ -42,7 +44,8 @@ elif [ -f /mnt/backup/backup.zip ]; then
     ls -lh /mnt/backup/backup.zip
     NEUTRALIZE_FLAG=""
     [ "$NEUTRALIZE" = "True" ] && NEUTRALIZE_FLAG="-n"
-    # odoo db load handles DB creation; || true — see pg_restore comment above.
+    # -f makes odoo db load drop-and-recreate internally; no pre-drop needed here.
+    # Pre-dropping would cause a pooler race condition (exp_db_exist stale cache → double drop).
     odoo db --db_host "$HOST" --db_port "$PORT" --db_user "$USER" --db_password "$PASSWORD" \
       load $NEUTRALIZE_FLAG -f "$DB_NAME" /mnt/backup/backup.zip || true
 
