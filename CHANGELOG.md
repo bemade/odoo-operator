@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.9](https://github.com/bemade/odoo-operator/compare/v0.13.8...v0.13.9) (2026-02-27)
+
+
+### Bug Fixes
+
+* publish helm chart to GHCR OCI registry ([#19](https://github.com/bemade/odoo-operator/issues/19)) ([32404b0](https://github.com/bemade/odoo-operator/commit/32404b0d6e36faf9973173f44792f3aed54506a9))
+
 ## [0.13.8](https://github.com/bemade/odoo-operator/compare/v0.13.7...v0.13.8) (2026-02-26)
 
 
