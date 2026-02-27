@@ -64,6 +64,7 @@ jobs:
     if: needs.release-please.outputs.release_created == 'true'
     permissions:
       contents: write
+      packages: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -84,3 +85,11 @@ jobs:
           skip_existing: true
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Log in to GHCR for OCI push
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Push chart to OCI registry
+        run: |
+          helm package charts/odoo-operator
+          helm push odoo-operator-*.tgz oci://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/charts
