@@ -13,7 +13,7 @@ use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::FIELD_MANAGER;
 use crate::controller::state_machine::scale_deployment;
 
-use crate::controller::helpers::{odoo_volume_mounts, OdooJobBuilder};
+use crate::controller::helpers::{cron_depl_name, odoo_volume_mounts, OdooJobBuilder};
 
 /// Initializing: init job is running, deployment must be scaled down.
 /// On entry: scale to 0, create the K8s Job if the CRD hasn't started one
@@ -31,6 +31,7 @@ impl State for Initializing {
         let ns = instance.namespace().unwrap_or_default();
         let name = instance.name_any();
         scale_deployment(&ctx.client, &name, &ns, 0).await?;
+        scale_deployment(&ctx.client, cron_depl_name(instance).as_str(), &ns, 0).await?;
 
         if let Some(ref init_job) = snap.active_init_job {
             let crd_name = init_job.name_any();
