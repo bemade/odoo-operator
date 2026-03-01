@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.10](https://github.com/bemade/odoo-operator/compare/v0.13.9...v0.13.10) (2026-03-01)
+
+
+### Bug Fixes
+
+* add v1alpha2 legacy CRD version for Python operator upgrades ([#22](https://github.com/bemade/odoo-operator/issues/22)) ([e3c70d8](https://github.com/bemade/odoo-operator/commit/e3c70d890a9bf534ee2f2087a747a375b9c4458a))
+
 ## [0.13.9](https://github.com/bemade/odoo-operator/compare/v0.13.8...v0.13.9) (2026-02-27)
 
 
