@@ -99,7 +99,7 @@ EOF
 | Field | Default | Description |
 |---|---|---|
 | `image` | operator default | Odoo container image |
-| `replicas` | `1` | Number of Odoo pods. Set to `0` to stop |
+| `replicas` | `1` | Number of web pods. Set to `0` to stop the instance |
 | `adminPassword` | — | Odoo master password |
 | `imagePullSecret` | — | Name of a `kubernetes.io/dockerconfigjson` secret in the operator namespace (auto-copied to instance namespace) |
 | `ingress.hosts` | — | Hostnames to expose the instance on |
@@ -108,12 +108,36 @@ EOF
 | `database.cluster` | secret default | Postgres cluster name from the pg-clusters secret |
 | `filestore.storageSize` | `2Gi` | PVC size. Can only be increased, not decreased |
 | `filestore.storageClass` | operator default | StorageClass for the filestore PVC. Immutable after creation |
-| `resources` | operator default | CPU/memory requests and limits |
+| `resources` | operator default | CPU/memory requests and limits for web pods |
+| `cron.replicas` | `1` | Number of cron pods (see [Web/Cron Split](#webcron-split) below) |
+| `cron.resources` | same as `resources` | CPU/memory requests and limits for cron pods |
 | `strategy.type` | `Recreate` | Deployment strategy (`Recreate` or `RollingUpdate`) |
-| `probes.*` | `/web/health` | Liveness/readiness/startup probe paths |
+| `strategy.rollingUpdate.maxUnavailable` | `25%` | Max unavailable pods during rolling update |
+| `strategy.rollingUpdate.maxSurge` | `25%` | Max extra pods during rolling update |
+| `probes.startupPath` | `/web/health` | Startup probe path |
+| `probes.livenessPath` | `/web/health` | Liveness probe path |
+| `probes.readinessPath` | `/web/health` | Readiness probe path |
 | `configOptions` | — | Extra key-value pairs appended to `odoo.conf` |
+| `webhook.url` | — | URL to receive status change callbacks |
 | `affinity` | operator default | Pod affinity rules |
 | `tolerations` | operator default | Pod tolerations |
+
+### Web/Cron Split
+
+Each OdooInstance creates two Deployments:
+
+- **Web** (`<name>`) — runs with `--max-cron-threads=0`, serves HTTP traffic on
+  ports 8069 and 8072 (websocket). Scaled by `spec.replicas`.
+- **Cron** (`<name>-cron`) — runs with `--no-http`, processes scheduled actions
+  only. Scaled by `spec.cron.replicas`.
+
+This separation means you can scale web workers independently of cron processing.
+Cron pods don't need an HTTP port, so they have no service or ingress routing. During
+upgrades and restores, the cron deployment is automatically scaled to zero to avoid
+stale connections.
+
+You don't need to set `workers` or `max_cron_threads` in `configOptions` — the
+operator handles this automatically via the command-line flags on each deployment.
 
 ### Status conditions
 
