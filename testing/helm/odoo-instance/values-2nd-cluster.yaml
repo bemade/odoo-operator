@@ -1,0 +1,25 @@
+image: odoo:18.0
+imagePullSecret: null
+adminPassword: abc123
+replicas: 1
+resources:
+  requests:
+    cpu: 200m
+    memory: 250Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+filestore:
+  storageSize: 2Gi
+  storageClass: standard
+ingress:
+  hosts:
+    - test2.odoo.local
+  issuer: selfsigned-cluster-issuer
+database:
+  cluster: cnpg
+configOptions:
+  workers: "2"
+  limit_time_real: "600"
+  limit_time_cpu: "600"
+  addons_path: "/mnt/extra-addons"
