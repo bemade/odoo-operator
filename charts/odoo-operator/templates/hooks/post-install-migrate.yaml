@@ -78,19 +78,29 @@ spec:
                 fi
               fi
               
-              # Migrate all bemade.org CRD objects from v1 to v1alpha1 storage.
-              # This is a one-time operation: once v1 is gone from storedVersions
-              # the function skips patching (which would otherwise hit the webhook
-              # while the operator pod is still starting up during upgrades).
+              # Migrate all bemade.org CRD objects to v1alpha1 storage.
+              # Handles migration from both v1 (old Kopf operator) and v1alpha2
+              # (Python operator with CRD versioning, commit 37dc25f).
+              # This is a one-time operation: once old versions are gone from
+              # storedVersions the function skips patching (which would otherwise
+              # hit the webhook while the operator pod is still starting up
+              # during upgrades).
               migrate_resource() {
                 local plural="$1"
                 STORED=$(kubectl get crd "${plural}.bemade.org" \
                   -o jsonpath='{.status.storedVersions}' 2>/dev/null || echo "[]")
-                if ! echo "$STORED" | grep -q '"v1"'; then
-                  echo "$plural: v1 already removed from storedVersions, skipping migration"
+                NEED_MIGRATE=false
+                for old_ver in v1 v1alpha2; do
+                  if echo "$STORED" | grep -q "\"${old_ver}\""; then
+                    NEED_MIGRATE=true
+                    echo "$plural: found ${old_ver} in storedVersions, migration needed"
+                  fi
+                done
+                if [ "$NEED_MIGRATE" = "false" ]; then
+                  echo "$plural: only v1alpha1 in storedVersions, skipping migration"
                   return 0
                 fi
-                echo "Migrating $plural from v1 to v1alpha1 storage..."
+                echo "Migrating $plural to v1alpha1 storage..."
                 kubectl get "${plural}.v1alpha1.bemade.org" --all-namespaces -o json 2>/dev/null | \
                   jq -r '.items[] | "\(.metadata.namespace) \(.metadata.name)"' | \
                   while read -r namespace name; do
@@ -108,9 +118,9 @@ spec:
               migrate_resource odooupgradejobs
               migrate_resource odooinitjobs
 
-              # Clear v1 from status.storedVersions on each CRD now that all
-              # objects have been rewritten in v1alpha1 storage.
-              echo "Clearing v1 from CRD status.storedVersions..."
+              # Clear old versions from status.storedVersions on each CRD now
+              # that all objects have been rewritten in v1alpha1 storage.
+              echo "Clearing old versions from CRD status.storedVersions..."
               for crd in odooinstances.bemade.org odoobackupjobs.bemade.org odoorestorejobs.bemade.org odooupgradejobs.bemade.org odooinitjobs.bemade.org; do
                 kubectl patch crd "$crd" \
                   --type=json \
