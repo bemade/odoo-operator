@@ -1724,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "odoo-operator"
-version = "0.13.9"
+version = "0.13.10"
 dependencies = [
  "anyhow",
  "assert-json-diff",
