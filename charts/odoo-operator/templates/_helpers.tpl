@@ -66,3 +66,45 @@ scale subresource, required for OdooInstance which supports kubectl scale.
       statusReplicasPath: .status.readyReplicas
     status: {}
 {{- end }}
+
+{{/*
+v1alpha2LegacyVersion injects a served-but-not-stored v1alpha2 version entry
+into the OdooInstance CRD.  This is required for Helm upgrades on clusters that
+previously ran the Python Kopf operator with the v1alpha2 storage version
+(commit 37dc25f).  Kubernetes refuses to remove a version from
+spec.versions while it is still listed in status.storedVersions, so we keep
+v1alpha2 served (with an open schema) until all objects have been rewritten
+in v1alpha1 storage by the post-install migration hook.
+*/}}
+{{- define "odoo-operator.v1alpha2LegacyVersion" -}}
+- additionalPrinterColumns:
+  - jsonPath: .spec.image
+    name: Image
+    type: string
+  - jsonPath: .status.readyReplicas
+    name: Replicas
+    type: string
+  - jsonPath: .status.phase
+    name: Phase
+    type: string
+  - jsonPath: .status.url
+    name: URL
+    type: string
+  - jsonPath: .metadata.creationTimestamp
+    name: Age
+    type: date
+  deprecated: true
+  deprecationWarning: "bemade.org/v1alpha2 is deprecated; migrate to bemade.org/v1alpha1"
+  name: v1alpha2
+  schema:
+    openAPIV3Schema:
+      type: object
+      x-kubernetes-preserve-unknown-fields: true
+  served: true
+  storage: false
+  subresources:
+    scale:
+      specReplicasPath: .spec.replicas
+      statusReplicasPath: .status.readyReplicas
+    status: {}
+{{- end }}

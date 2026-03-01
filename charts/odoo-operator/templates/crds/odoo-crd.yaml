@@ -17,6 +17,7 @@ spec:
   scope: Namespaced
   versions:
 {{- include "odoo-operator.v1LegacyVersionWithScale" . | nindent 2 }}
+{{- include "odoo-operator.v1alpha2LegacyVersion" . | nindent 2 }}
   - additionalPrinterColumns:
     - jsonPath: .spec.image
       name: Image
