@@ -96,6 +96,7 @@ pub fn build_odoo_conf(
     options.insert("list_db", "False".to_string());
     options.insert("http_interface", "0.0.0.0".to_string());
     options.insert("http_port", "8069".to_string());
+    options.insert("max_cron_threads", "2".to_string());
 
     if !admin_password.is_empty() {
         options.insert("admin_passwd", admin_password.to_string());
@@ -131,6 +132,7 @@ pub fn build_odoo_conf(
         "list_db",
         "http_interface",
         "http_port",
+        "max_cron_threads",
         "admin_passwd",
     ];
 
