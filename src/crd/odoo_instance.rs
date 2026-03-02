@@ -108,6 +108,43 @@ impl Default for CronSpec {
     }
 }
 
+/// InitSpec configures automatic database initialization when the instance
+/// first reaches the Uninitialized phase. The operator creates an OdooInitJob
+/// CR automatically — no external controller needed.
+///
+/// Defaults to initializing with `["base"]` modules. Set `enabled: false` to
+/// skip auto-init (e.g. when restoring from backup or using an external tool).
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InitSpec {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default = "default_init_modules")]
+    pub modules: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<super::shared::WebhookConfig>,
+}
+
+impl Default for InitSpec {
+    fn default() -> Self {
+        InitSpec {
+            enabled: true,
+            modules: default_init_modules(),
+            webhook: None,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_init_modules() -> Vec<String> {
+    vec!["base".to_string()]
+}
+
 // ── CRD ───────────────────────────────────────────────────────────────────────
 
 /// OdooInstance is the Schema for the odooinstances API.
@@ -155,6 +192,9 @@ pub struct OdooInstanceSpec {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database: Option<DatabaseSpec>,
+
+    #[serde(default)]
+    pub init: InitSpec,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<StrategySpec>,

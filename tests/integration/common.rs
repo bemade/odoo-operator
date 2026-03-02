@@ -159,6 +159,30 @@ impl TestContext {
         Self::new_with_replicas(instance_name, 1).await
     }
 
+    /// Create a test context with only a namespace (no OdooInstance).
+    /// Use this when you need to create the instance with custom fields.
+    pub async fn new_ns() -> Self {
+        let env = shared();
+        let client = env.client.clone();
+
+        let id = NS_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let ns = format!("test-{id}");
+
+        let ns_api: Api<Namespace> = Api::all(client.clone());
+        let ns_obj: Namespace = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": { "name": &ns }
+        }))
+        .unwrap();
+        ns_api
+            .create(&PostParams::default(), &ns_obj)
+            .await
+            .expect("failed to create test namespace");
+
+        Self { client, ns }
+    }
+
     /// Create a new test context with a custom replica count.
     pub async fn new_with_replicas(instance_name: &str, replicas: i32) -> Self {
         let env = shared();
@@ -217,6 +241,9 @@ fn test_instance_json(name: &str, ns: &str, replicas: i32) -> serde_json::Value 
             "filestore": {
                 "storageSize": "1Gi",
                 "storageClass": "standard",
+            },
+            "init": {
+                "enabled": false,
             },
         }
     })

@@ -17,7 +17,6 @@ spec:
   scope: Namespaced
   versions:
 {{- include "odoo-operator.v1LegacyVersionWithScale" . | nindent 2 }}
-{{- include "odoo-operator.v1alpha2LegacyVersion" . | nindent 2 }}
   - additionalPrinterColumns:
     - jsonPath: .spec.image
       name: Image
@@ -640,6 +639,50 @@ spec:
                     type: string
                 required:
                 - hosts
+                type: object
+              init:
+                default:
+                  enabled: true
+                  modules:
+                  - base
+                description: |-
+                  InitSpec configures automatic database initialization when the instance first reaches the Uninitialized phase. The operator creates an OdooInitJob CR automatically — no external controller needed.
+
+                  Defaults to initializing with `["base"]` modules. Set `enabled: false` to skip auto-init (e.g. when restoring from backup or using an external tool).
+                properties:
+                  enabled:
+                    default: true
+                    type: boolean
+                  modules:
+                    default:
+                    - base
+                    items:
+                      type: string
+                    type: array
+                  webhook:
+                    description: WebhookConfig defines an optional webhook callback for job completion notifications.
+                    nullable: true
+                    properties:
+                      secretTokenSecretRef:
+                        description: SecretKeySelector selects a key from a Secret.
+                        nullable: true
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      token:
+                        nullable: true
+                        type: string
+                      url:
+                        type: string
+                    required:
+                    - url
+                    type: object
                 type: object
               probes:
                 description: ProbesSpec configures the HTTP health check paths for Kubernetes probes.

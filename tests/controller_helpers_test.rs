@@ -34,6 +34,7 @@ fn test_instance(name: &str, pull_secret: Option<&str>) -> OdooInstance {
             filestore: None,
             config_options: None,
             database: None,
+            init: Default::default(),
             strategy: None,
             webhook: None,
             probes: None,
