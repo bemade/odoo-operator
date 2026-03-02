@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.12](https://github.com/bemade/odoo-operator/compare/v0.13.11...v0.13.12) (2026-03-02)
+
+
+### Bug Fixes
+
+* move max_cron_threads from hardcoded CLI arg to odoo.conf ([#29](https://github.com/bemade/odoo-operator/issues/29)) ([eb2aeb7](https://github.com/bemade/odoo-operator/commit/eb2aeb7574a1f02c7650c72127f0b36ed4363fb1))
+
 ## [0.13.11](https://github.com/bemade/odoo-operator/compare/v0.13.10...v0.13.11) (2026-03-02)
 
 
