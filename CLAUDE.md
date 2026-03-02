@@ -89,6 +89,7 @@ subresource patches. Key helpers in `tests/integration/common.rs`:
 
 - PRs: fmt + clippy + unit tests + integration tests
 - Release: release-please on master → Docker image + Helm chart to GHCR
+- Use conventional commit messages so that CI functions correctly
 
 ## Key Files
 
