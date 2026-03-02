@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/bemade/odoo-operator/compare/v0.13.12...v0.14.0) (2026-03-02)
+
+
+### Features
+
+* add optional database name to OdooInstance spec ([#32](https://github.com/bemade/odoo-operator/issues/32)) ([d57cb73](https://github.com/bemade/odoo-operator/commit/d57cb7345df0f65fd4cf7b7c700c8678f08e6f6f))
+
 ## [0.13.12](https://github.com/bemade/odoo-operator/compare/v0.13.11...v0.13.12) (2026-03-02)
 
 
