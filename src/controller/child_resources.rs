@@ -769,8 +769,6 @@ pub async fn ensure_cron_deployment(
                                 "--workers".to_string(),
                                 "0".to_string(),
                                 "--no-http".to_string(),
-                                "--max-cron-threads".to_string(),
-                                "1".to_string(),
                             ]),
                             volume_mounts: Some(odoo_volume_mounts()),
                             resources: instance.spec.cron.resources.clone(),
