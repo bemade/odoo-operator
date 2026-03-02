@@ -2,3 +2,4 @@
 /crds
 *.swp
 *.swo
+__pycache__

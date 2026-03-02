@@ -744,23 +744,21 @@ pub async fn ensure_cron_deployment(
                     security_context: Some(odoo_security_context()),
                     volumes: Some(odoo_volumes(name)),
                     containers: vec![{
-                        // Cron pods run --no-http, so there is no HTTP endpoint
-                        // for probes.  Instead we check that the cron thread is
-                        // still alive by counting threads under /proc/1/task.
-                        // A healthy pod always has ≥2 (main + cron); if the cron
-                        // thread crashes the count drops to 1 permanently.
-                        let thread_check_cmd = vec![
+                        // Cron pods run --no-http so there is no HTTP endpoint
+                        // for probes.  Instead we query PostgreSQL directly to
+                        // detect a stuck cron system.
+                        // See scripts/cron_{startup,liveness}_probe.py.
+                        let startup_cmd = vec![
                             "python3".to_string(),
                             "-c".to_string(),
-                            "import os,sys\ntry:\n if len(os.listdir('/proc/1/task'))<2: sys.exit(1)\nexcept: sys.exit(1)".to_string(),
+                            include_str!("../../scripts/cron_startup_probe.py").to_string(),
                         ];
-                        let make_thread_probe = || Probe {
-                            exec: Some(ExecAction {
-                                command: Some(thread_check_cmd.clone()),
-                            }),
-                            timeout_seconds: Some(5),
-                            ..Default::default()
-                        };
+                        let liveness_cmd = vec![
+                            "python3".to_string(),
+                            "-c".to_string(),
+                            include_str!("../../scripts/cron_liveness_probe.py").to_string(),
+                        ];
+
                         Container {
                             name: format!("odoo-cron-{name}"),
                             image: Some(image.to_string()),
@@ -771,19 +769,29 @@ pub async fn ensure_cron_deployment(
                                 "--workers".to_string(),
                                 "0".to_string(),
                                 "--no-http".to_string(),
+                                "--max-cron-threads".to_string(),
+                                "1".to_string(),
                             ]),
                             volume_mounts: Some(odoo_volume_mounts()),
                             resources: instance.spec.cron.resources.clone(),
                             startup_probe: Some(Probe {
                                 initial_delay_seconds: Some(5),
                                 period_seconds: Some(10),
+                                timeout_seconds: Some(5),
                                 failure_threshold: Some(30),
-                                ..make_thread_probe()
+                                exec: Some(ExecAction {
+                                    command: Some(startup_cmd),
+                                }),
+                                ..Default::default()
                             }),
                             liveness_probe: Some(Probe {
                                 period_seconds: Some(30),
+                                timeout_seconds: Some(5),
                                 failure_threshold: Some(3),
-                                ..make_thread_probe()
+                                exec: Some(ExecAction {
+                                    command: Some(liveness_cmd),
+                                }),
+                                ..Default::default()
                             }),
                             ..Default::default()
                         }
