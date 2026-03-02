@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.11](https://github.com/bemade/odoo-operator/compare/v0.13.10...v0.13.11) (2026-03-02)
+
+
+### Bug Fixes
+
+* cron liveness probe v2 ([#27](https://github.com/bemade/odoo-operator/issues/27)) ([297d693](https://github.com/bemade/odoo-operator/commit/297d693fcd81cd6ada41e18a25f03af0f32b970e))
+
 ## [0.13.10](https://github.com/bemade/odoo-operator/compare/v0.13.9...v0.13.10) (2026-03-01)
 
 
