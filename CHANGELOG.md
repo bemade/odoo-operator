@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/bemade/odoo-operator/compare/v1.0.0...v1.1.0) (2026-03-04)
+
+
+### Features
+
+* add Gateway API support via opt-in gatewayRef field ([#36](https://github.com/bemade/odoo-operator/issues/36)) ([c7df401](https://github.com/bemade/odoo-operator/commit/c7df401e1df1547bc1932d7b848d06b66cb26821))
+
 ## [1.0.0](https://github.com/bemade/odoo-operator/compare/v0.14.0...v1.0.0) (2026-03-02)
 
 
