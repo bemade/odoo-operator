@@ -42,6 +42,15 @@ struct Args {
     #[arg(long, default_value = "", env = "DEFAULT_INGRESS_ISSUER")]
     default_ingress_issuer: String,
 
+    /// Default Gateway name for HTTPRoute parentRef. When both name and namespace
+    /// are non-empty, instances without an explicit gatewayRef get one automatically.
+    #[arg(long, default_value = "", env = "DEFAULT_GATEWAY_REF_NAME")]
+    default_gateway_ref_name: String,
+
+    /// Default Gateway namespace for HTTPRoute parentRef.
+    #[arg(long, default_value = "", env = "DEFAULT_GATEWAY_REF_NAMESPACE")]
+    default_gateway_ref_namespace: String,
+
     /// Name of the Secret containing postgres cluster configuration.
     #[arg(
         long,
@@ -115,6 +124,8 @@ async fn main() -> anyhow::Result<()> {
             storage_size: args.default_storage_size,
             ingress_class: args.default_ingress_class,
             ingress_issuer: args.default_ingress_issuer,
+            gateway_ref_name: args.default_gateway_ref_name,
+            gateway_ref_namespace: args.default_gateway_ref_namespace,
             ..Default::default()
         },
         operator_namespace: args.operator_namespace,

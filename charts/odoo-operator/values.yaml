@@ -38,6 +38,13 @@ defaults:
   ingressClass: ""
   # Default cert-manager ClusterIssuer when spec.ingress.issuer is not set.
   ingressIssuer: ""
+  # Default Gateway API Gateway name for HTTPRoute parentRef.
+  # When both gatewayRefName and gatewayRefNamespace are non-empty,
+  # instances without an explicit gatewayRef get one automatically (creates
+  # HTTPRoute instead of Ingress).
+  gatewayRefName: ""
+  # Default Gateway API Gateway namespace for HTTPRoute parentRef.
+  gatewayRefNamespace: ""
   # Default CPU/memory resource requests and limits for Odoo pods.
   resources:
     requests:

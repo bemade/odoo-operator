@@ -10,6 +10,7 @@ description = "Kubernetes operator for managing Odoo instances"
 # Kubernetes
 kube = { version = "0.98", features = ["runtime", "derive", "client", "admission"] }
 k8s-openapi = { version = "0.24", features = ["v1_32", "schemars"] }
+gateway-api = "0.14.2"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

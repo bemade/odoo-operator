@@ -305,7 +305,7 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
     child_resources::ensure_filestore_pvc(client, &ns, &name, instance, ctx, &oref).await?;
     child_resources::ensure_config_map(client, &ns, &name, instance, &pg_cluster, &oref).await?;
     child_resources::ensure_service(client, &ns, &name, &oref).await?;
-    child_resources::ensure_ingress(client, &ns, &name, instance, &oref).await?;
+    child_resources::ensure_routing(client, &ns, &name, instance, &oref).await?;
     child_resources::ensure_deployment(client, &ns, &name, instance, ctx, &oref).await?;
     child_resources::ensure_cron_deployment(client, &ns, &name, instance, ctx, &oref).await?;
 

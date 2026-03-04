@@ -121,6 +121,7 @@ fn make_instance(uid: Option<&str>, db_name: Option<&str>) -> OdooInstance {
                 hosts: vec!["test.example.com".to_string()],
                 issuer: None,
                 class: None,
+                gateway_ref: None,
             },
             resources: None,
             filestore: None,

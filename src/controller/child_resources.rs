@@ -27,7 +27,12 @@ use kube::api::{Api, ObjectMeta, Patch, PatchParams, PostParams, ResourceExt};
 use kube::Client;
 use serde_json::json;
 
-use crate::crd::odoo_instance::{DeploymentStrategyType, OdooInstance};
+use gateway_api::apis::standard::httproutes::{
+    HTTPRoute, HTTPRouteParentRefs, HTTPRouteRules, HTTPRouteRulesBackendRefs,
+    HTTPRouteRulesMatches, HTTPRouteRulesMatchesPath, HTTPRouteRulesMatchesPathType, HTTPRouteSpec,
+};
+
+use crate::crd::odoo_instance::{DeploymentStrategyType, GatewayRef, OdooInstance};
 use crate::error::Result;
 use crate::helpers::{build_odoo_conf, db_name, generate_password, odoo_username, sha256_hex};
 use crate::postgres::PostgresClusterConfig;
@@ -88,6 +93,18 @@ pub async fn apply_defaults(
     }
     if instance.spec.ingress.class.is_none() && !ctx.defaults.ingress_class.is_empty() {
         ing_patch.insert("class".into(), json!(ctx.defaults.ingress_class));
+    }
+    if instance.spec.ingress.gateway_ref.is_none()
+        && !ctx.defaults.gateway_ref_name.is_empty()
+        && !ctx.defaults.gateway_ref_namespace.is_empty()
+    {
+        ing_patch.insert(
+            "gatewayRef".into(),
+            json!({
+                "name": ctx.defaults.gateway_ref_name,
+                "namespace": ctx.defaults.gateway_ref_namespace,
+            }),
+        );
     }
     if !ing_patch.is_empty() {
         patch.insert("ingress".into(), json!(ing_patch));
@@ -656,6 +673,124 @@ pub async fn ensure_deployment(
             &Patch::Apply(&dep),
         )
         .await?;
+    Ok(())
+}
+
+/// Create or update an HTTPRoute for Gateway API mode.
+pub async fn ensure_http_route(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    instance: &OdooInstance,
+    gateway_ref: &GatewayRef,
+    oref: &OwnerReference,
+) -> Result<()> {
+    let routes: Api<HTTPRoute> = Api::namespaced(client.clone(), ns);
+
+    let route = HTTPRoute {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(ns.to_string()),
+            owner_references: Some(vec![oref.clone()]),
+            ..Default::default()
+        },
+        spec: HTTPRouteSpec {
+            parent_refs: Some(vec![HTTPRouteParentRefs {
+                group: Some("gateway.networking.k8s.io".to_string()),
+                kind: Some("Gateway".to_string()),
+                namespace: Some(gateway_ref.namespace.clone()),
+                name: gateway_ref.name.clone(),
+                section_name: None,
+                port: None,
+            }]),
+            hostnames: Some(instance.spec.ingress.hosts.clone()),
+            rules: Some(vec![
+                HTTPRouteRules {
+                    matches: Some(vec![HTTPRouteRulesMatches {
+                        path: Some(HTTPRouteRulesMatchesPath {
+                            r#type: Some(HTTPRouteRulesMatchesPathType::PathPrefix),
+                            value: Some("/websocket".to_string()),
+                        }),
+                        headers: None,
+                        query_params: None,
+                        method: None,
+                    }]),
+                    filters: None,
+                    backend_refs: Some(vec![HTTPRouteRulesBackendRefs {
+                        name: name.to_string(),
+                        port: Some(8072),
+                        filters: None,
+                        group: None,
+                        kind: Some("Service".to_string()),
+                        namespace: None,
+                        weight: None,
+                    }]),
+                    timeouts: None,
+                },
+                HTTPRouteRules {
+                    matches: Some(vec![HTTPRouteRulesMatches {
+                        path: Some(HTTPRouteRulesMatchesPath {
+                            r#type: Some(HTTPRouteRulesMatchesPathType::PathPrefix),
+                            value: Some("/".to_string()),
+                        }),
+                        headers: None,
+                        query_params: None,
+                        method: None,
+                    }]),
+                    filters: None,
+                    backend_refs: Some(vec![HTTPRouteRulesBackendRefs {
+                        name: name.to_string(),
+                        port: Some(8069),
+                        filters: None,
+                        group: None,
+                        kind: Some("Service".to_string()),
+                        namespace: None,
+                        weight: None,
+                    }]),
+                    timeouts: None,
+                },
+            ]),
+        },
+        status: None,
+    };
+
+    routes
+        .patch(
+            name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(&route),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Ensure the correct routing resource (Ingress or HTTPRoute) exists and
+/// clean up the stale one when switching modes.
+pub async fn ensure_routing(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    instance: &OdooInstance,
+    oref: &OwnerReference,
+) -> Result<()> {
+    if let Some(ref gw) = instance.spec.ingress.gateway_ref {
+        // Gateway API mode — create HTTPRoute and delete stale Ingress.
+        ensure_http_route(client, ns, name, instance, gw, oref).await?;
+        let ingresses: Api<Ingress> = Api::namespaced(client.clone(), ns);
+        if ingresses.get(name).await.is_ok() {
+            ingresses
+                .delete(name, &Default::default())
+                .await
+                .map(|_| ())?;
+        }
+    } else {
+        // Ingress mode — create Ingress and delete stale HTTPRoute.
+        ensure_ingress(client, ns, name, instance, oref).await?;
+        let routes: Api<HTTPRoute> = Api::namespaced(client.clone(), ns);
+        if routes.get(name).await.is_ok() {
+            routes.delete(name, &Default::default()).await.map(|_| ())?;
+        }
+    }
     Ok(())
 }
 

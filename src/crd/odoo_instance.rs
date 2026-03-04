@@ -5,14 +5,25 @@ use serde::{Deserialize, Serialize};
 
 // ── Spec sub-types ────────────────────────────────────────────────────────────
 
+/// GatewayRef identifies a Gateway API Gateway resource for HTTPRoute creation.
+/// When set on IngressSpec, the operator creates an HTTPRoute instead of an Ingress.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GatewayRef {
+    pub name: String,
+    pub namespace: String,
+}
+
 /// IngressSpec defines how the OdooInstance should be exposed via an Ingress resource.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct IngressSpec {
     pub hosts: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issuer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_ref: Option<GatewayRef>,
 }
 
 /// FilestoreSpec defines persistent storage for the Odoo filestore.

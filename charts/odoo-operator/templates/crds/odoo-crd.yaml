@@ -630,6 +630,18 @@ spec:
                   class:
                     nullable: true
                     type: string
+                  gatewayRef:
+                    description: GatewayRef identifies a Gateway API Gateway resource for HTTPRoute creation. When set on IngressSpec, the operator creates an HTTPRoute instead of an Ingress.
+                    nullable: true
+                    properties:
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                    required:
+                    - name
+                    - namespace
+                    type: object
                   hosts:
                     items:
                       type: string

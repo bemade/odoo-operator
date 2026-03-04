@@ -44,6 +44,12 @@ spec:
             {{- if .Values.defaults.ingressIssuer }}
             - --default-ingress-issuer={{ .Values.defaults.ingressIssuer }}
             {{- end }}
+            {{- if .Values.defaults.gatewayRefName }}
+            - --default-gateway-ref-name={{ .Values.defaults.gatewayRefName }}
+            {{- end }}
+            {{- if .Values.defaults.gatewayRefNamespace }}
+            - --default-gateway-ref-namespace={{ .Values.defaults.gatewayRefNamespace }}
+            {{- end }}
           resources:
             {{- toYaml .Values.operator.resources | nindent 12 }}
           env:

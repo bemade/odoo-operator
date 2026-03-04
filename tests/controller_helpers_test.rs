@@ -29,6 +29,7 @@ fn test_instance(name: &str, pull_secret: Option<&str>) -> OdooInstance {
                 hosts: vec!["test.example.com".to_string()],
                 issuer: None,
                 class: None,
+                gateway_ref: None,
             },
             resources: None,
             filestore: None,

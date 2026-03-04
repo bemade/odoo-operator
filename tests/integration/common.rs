@@ -23,6 +23,8 @@ use serde_json::json;
 use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
+use gateway_api::apis::standard::httproutes::HTTPRoute;
+
 use odoo_operator::controller::helpers::FIELD_MANAGER;
 use odoo_operator::controller::odoo_instance::Context;
 use odoo_operator::crd::odoo_backup_job::OdooBackupJob;
@@ -74,13 +76,28 @@ fn init_shared() -> SharedEnv {
     let (client, server) = rt.block_on(async {
         let mut env = Environment::default();
         let env = env
-            .with_crds(vec![
-                OdooInstance::crd(),
-                OdooInitJob::crd(),
-                OdooBackupJob::crd(),
-                OdooRestoreJob::crd(),
-                OdooUpgradeJob::crd(),
-            ])
+            .with_crds({
+                let mut crds = vec![
+                    OdooInstance::crd(),
+                    OdooInitJob::crd(),
+                    OdooBackupJob::crd(),
+                    OdooRestoreJob::crd(),
+                    OdooUpgradeJob::crd(),
+                ];
+                // HTTPRoute belongs to a protected API group and requires the
+                // api-approved annotation for envtest to accept it.
+                let mut httproute_crd = HTTPRoute::crd();
+                let annotations = httproute_crd
+                    .metadata
+                    .annotations
+                    .get_or_insert_with(Default::default);
+                annotations.insert(
+                    "api-approved.kubernetes.io".to_string(),
+                    "https://github.com/kubernetes-sigs/gateway-api/pull/1538".to_string(),
+                );
+                crds.push(httproute_crd);
+                crds
+            })
             .expect("failed to configure CRDs");
 
         let server = env.create().expect("failed to start envtest server");
@@ -256,6 +273,8 @@ fn test_defaults() -> OperatorDefaults {
         storage_size: "2Gi".into(),
         ingress_issuer: "letsencrypt".into(),
         ingress_class: "nginx".into(),
+        gateway_ref_name: "".into(),
+        gateway_ref_namespace: "".into(),
         resources: None,
         affinity: None,
         tolerations: vec![],

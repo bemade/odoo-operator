@@ -24,6 +24,8 @@ pub struct OperatorDefaults {
     pub storage_size: String,
     pub ingress_class: String,
     pub ingress_issuer: String,
+    pub gateway_ref_name: String,
+    pub gateway_ref_namespace: String,
     pub resources: Option<ResourceRequirements>,
     pub affinity: Option<Affinity>,
     pub tolerations: Vec<Toleration>,
