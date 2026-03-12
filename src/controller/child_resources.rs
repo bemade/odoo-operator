@@ -918,6 +918,7 @@ pub async fn ensure_cron_deployment(
                                 ..Default::default()
                             }),
                             liveness_probe: Some(Probe {
+                                initial_delay_seconds: Some(300),
                                 period_seconds: Some(30),
                                 timeout_seconds: Some(5),
                                 failure_threshold: Some(3),

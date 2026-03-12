@@ -6,6 +6,8 @@ fails when ALL of the following are true:
   1. Active cron jobs are overdue (nextcall >10 min in the past).
   2. No cron job has completed recently (lastcall within 10 min).
   3. The Odoo DB user has no active queries (rules out long-running jobs).
+  4. The pod has been running for at least 5 minutes (grace period for
+     catching up after a restart when many jobs are overdue).
 
 This catches the common failure mode where a transient DB disconnect
 kills the cron thread but the main Odoo process stays alive.
@@ -13,6 +15,16 @@ kills the cron thread but the main Odoo process stays alive.
 import sys
 
 try:
+    # Grace period: skip the check for the first 5 minutes after the Odoo
+    # process started.  This prevents a kill-loop when many jobs are overdue
+    # after a restart — the cron needs time to work through the backlog.
+    import os
+    import time
+
+    proc_start = os.stat("/proc/1").st_mtime
+    if time.time() - proc_start < 300:
+        sys.exit(0)
+
     import psycopg2
 
     conf = {}
