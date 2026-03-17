@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0](https://github.com/bemade/odoo-operator/compare/v1.1.0...v1.2.0) (2026-03-17)
+
+
+### Features
+
+* ensure report.url system parameter points to in-cluster web service ([#40](https://github.com/bemade/odoo-operator/issues/40)) ([4e9f176](https://github.com/bemade/odoo-operator/commit/4e9f176082ac10af7b88fde706a3f6051f39cbee))
+
+
+### Bug Fixes
+
+* add grace period to cron liveness probe to prevent crash loop ([#38](https://github.com/bemade/odoo-operator/issues/38)) ([17489a4](https://github.com/bemade/odoo-operator/commit/17489a4f3c5f2cc07adfc5681498eab6e658ea88))
+
 ## [1.1.0](https://github.com/bemade/odoo-operator/compare/v1.0.0...v1.1.0) (2026-03-04)
 
 
