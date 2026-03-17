@@ -313,6 +313,22 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
     let snapshot =
         super::state_machine::ReconcileSnapshot::gather(client, &ns, &name, instance).await?;
 
+    // Ensure report.url points to the in-cluster web service so cron workers
+    // can reach the report rendering endpoint (wkhtmltopdf via HTTP).
+    if snapshot.db_initialized {
+        let report_url = format!("http://{name}:8069");
+        let (odoo_user, odoo_pass) =
+            child_resources::read_odoo_credentials(client, &ns, &name).await?;
+        let db = crate::helpers::db_name(instance);
+        if let Err(e) = ctx
+            .postgres
+            .ensure_report_url(&pg_cluster, &odoo_user, &odoo_pass, &db, &report_url)
+            .await
+        {
+            warn!(%name, %e, "failed to set report.url — will retry next reconcile");
+        }
+    }
+
     // Patch non-phase status fields (readyReplicas, url, conditions, etc.)
     // only if something actually changed — avoids spurious etcd writes and
     // watch-event hot loops from Merge patches.

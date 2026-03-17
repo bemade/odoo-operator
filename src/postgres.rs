@@ -27,6 +27,18 @@ pub trait PostgresManager: Send + Sync {
     ) -> Result<()>;
 
     async fn delete_role(&self, pg: &PostgresClusterConfig, username: &str) -> Result<()>;
+
+    /// Ensure the `report.url` system parameter in the Odoo database points to
+    /// the in-cluster web service so that cron-triggered report generation can
+    /// reach the wkhtmltopdf endpoint.
+    async fn ensure_report_url(
+        &self,
+        pg: &PostgresClusterConfig,
+        username: &str,
+        password: &str,
+        db_name: &str,
+        report_url: &str,
+    ) -> Result<()>;
 }
 
 /// Production implementation backed by tokio-postgres.
@@ -69,6 +81,43 @@ impl PostgresManager for PgPostgresManager {
         let stmt = format!("CREATE ROLE {safe_user} WITH PASSWORD '{password}' CREATEDB LOGIN");
         client.execute(&stmt, &[]).await?;
         info!(%username, "created postgres role");
+        Ok(())
+    }
+
+    async fn ensure_report_url(
+        &self,
+        pg: &PostgresClusterConfig,
+        username: &str,
+        password: &str,
+        db_name: &str,
+        report_url: &str,
+    ) -> Result<()> {
+        let connstr = format!(
+            "host={} port={} user={} password={} dbname={}",
+            pg.host, pg.port, username, password, db_name
+        );
+        let (client, connection) = tokio_postgres::connect(&connstr, NoTls).await?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                warn!("postgres connection error: {e}");
+            }
+        });
+
+        // Upsert report.url — only writes if the value actually differs.
+        let rows_affected = client
+            .execute(
+                "INSERT INTO ir_config_parameter (key, value, create_uid, create_date, write_uid, write_date) \
+                 VALUES ('report.url', $1, 1, now() AT TIME ZONE 'UTC', 1, now() AT TIME ZONE 'UTC') \
+                 ON CONFLICT (key) DO UPDATE SET value = $1, write_uid = 1, write_date = now() AT TIME ZONE 'UTC' \
+                 WHERE ir_config_parameter.value IS DISTINCT FROM $1",
+                &[&report_url],
+            )
+            .await?;
+
+        if rows_affected > 0 {
+            info!(%db_name, %report_url, "set report.url system parameter");
+        }
+
         Ok(())
     }
 
@@ -136,6 +185,16 @@ impl PostgresManager for NoopPostgresManager {
         Ok(())
     }
     async fn delete_role(&self, _: &PostgresClusterConfig, _: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn ensure_report_url(
+        &self,
+        _: &PostgresClusterConfig,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<()> {
         Ok(())
     }
 }

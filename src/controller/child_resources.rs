@@ -223,14 +223,14 @@ pub async fn ensure_odoo_user_secret(
     }
 }
 
-pub async fn ensure_postgres_role(
-    ctx: &Context,
-    instance: &OdooInstance,
-    pg: &PostgresClusterConfig,
-) -> Result<()> {
-    let ns = instance.namespace().unwrap_or_default();
-    let name = instance.name_any();
-    let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
+/// Read the Odoo user credentials (username + password) from the instance's
+/// `-odoo-user` Secret.
+pub async fn read_odoo_credentials(
+    client: &Client,
+    ns: &str,
+    name: &str,
+) -> Result<(String, String)> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
     let secret = secrets.get(&format!("{name}-odoo-user")).await?;
 
     let data = secret.data.unwrap_or_default();
@@ -247,6 +247,17 @@ pub async fn ensure_postgres_role(
     )
     .to_string();
 
+    Ok((username, password))
+}
+
+pub async fn ensure_postgres_role(
+    ctx: &Context,
+    instance: &OdooInstance,
+    pg: &PostgresClusterConfig,
+) -> Result<()> {
+    let ns = instance.namespace().unwrap_or_default();
+    let name = instance.name_any();
+    let (username, password) = read_odoo_credentials(&ctx.client, &ns, &name).await?;
     ctx.postgres.ensure_role(pg, &username, &password).await
 }
 
