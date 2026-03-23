@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/bemade/odoo-operator/compare/v1.2.0...v1.3.0) (2026-03-23)
+
+
+### Features
+
+* respect scheduledTime on OdooUpgradeJob before transitioning ([#41](https://github.com/bemade/odoo-operator/issues/41)) ([20b67cb](https://github.com/bemade/odoo-operator/commit/20b67cbd20cd9e421c88ab28164329f99df0584a))
+
 ## [1.2.0](https://github.com/bemade/odoo-operator/compare/v1.1.0...v1.2.0) (2026-03-17)
 
 
