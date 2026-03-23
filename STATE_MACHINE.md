@@ -21,20 +21,20 @@ stateDiagram-v2
 
     Starting --> Stopped : [replicas == 0]
     Starting --> Restoring : [restore_job present]
-    Starting --> Upgrading : [upgrade_job present]
+    Starting --> Upgrading : [upgrade_job ready]
     Starting --> BackingUp : [backup_job present]
     Starting --> Running : [ready >= desired]
 
     Running --> Stopped : [replicas == 0]
     Running --> Restoring : [restore_job present]
-    Running --> Upgrading : [upgrade_job present]
+    Running --> Upgrading : [upgrade_job ready]
     Running --> BackingUp : [backup_job present]
     Running --> Degraded : [ready < desired && ready > 0]
     Running --> Starting : [ready == 0]
 
     Degraded --> Stopped : [replicas == 0]
     Degraded --> Restoring : [restore_job present]
-    Degraded --> Upgrading : [upgrade_job present]
+    Degraded --> Upgrading : [upgrade_job ready]
     Degraded --> BackingUp : [backup_job present]
     Degraded --> Running : [ready >= desired]
     Degraded --> Starting : [ready == 0]
@@ -61,7 +61,7 @@ stateDiagram-v2
     Restoring --> Starting : [restore_job absent]
 
     Stopped --> Restoring : [restore_job present]
-    Stopped --> Upgrading : [upgrade_job present]
+    Stopped --> Upgrading : [upgrade_job ready]
     Stopped --> Starting : [replicas > 0]
 
     Error --> Starting : [db_initialized]

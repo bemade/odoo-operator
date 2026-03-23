@@ -51,6 +51,16 @@ impl JobStatus {
     }
 }
 
+/// Returns true if `scheduled_time` is `None` (run immediately) or in the past.
+fn scheduled_time_reached(scheduled: Option<&str>) -> bool {
+    match scheduled {
+        None => true,
+        Some(s) => chrono::DateTime::parse_from_rfc3339(s)
+            .map(|t| t <= chrono::Utc::now())
+            .unwrap_or(true), // unparseable → run immediately rather than block forever
+    }
+}
+
 // ── ReconcileSnapshot ───────────────────────────────────────────────────────
 
 /// A point-in-time snapshot of the observed world, gathered once per reconcile.
@@ -78,6 +88,17 @@ pub struct ReconcileSnapshot {
 }
 
 impl ReconcileSnapshot {
+    /// True when an upgrade job CR is present AND its `scheduledTime` has been
+    /// reached (or was omitted, meaning "run immediately").
+    pub fn upgrade_job_ready(&self) -> bool {
+        self.upgrade_job.is_present()
+            && scheduled_time_reached(
+                self.active_upgrade_job
+                    .as_ref()
+                    .and_then(|j| j.spec.scheduled_time.as_deref()),
+            )
+    }
+
     /// Gather the snapshot from the cluster.  All List/Get calls happen here,
     /// so the rest of the reconcile loop is synchronous guard evaluation.
     pub async fn gather(
@@ -601,8 +622,8 @@ pub static TRANSITIONS: &[Transition] = &[
     Transition {
         from: Starting,
         to: Upgrading,
-        guard: |_, s| s.upgrade_job.is_present(),
-        guard_name: "upgrade_job present",
+        guard: |_, s| s.upgrade_job_ready(),
+        guard_name: "upgrade_job ready",
         actions: &[],
     },
     Transition {
@@ -637,8 +658,8 @@ pub static TRANSITIONS: &[Transition] = &[
     Transition {
         from: Running,
         to: Upgrading,
-        guard: |_, s| s.upgrade_job.is_present(),
-        guard_name: "upgrade_job present",
+        guard: |_, s| s.upgrade_job_ready(),
+        guard_name: "upgrade_job ready",
         actions: &[],
     },
     Transition {
@@ -680,8 +701,8 @@ pub static TRANSITIONS: &[Transition] = &[
     Transition {
         from: Degraded,
         to: Upgrading,
-        guard: |_, s| s.upgrade_job.is_present(),
-        guard_name: "upgrade_job present",
+        guard: |_, s| s.upgrade_job_ready(),
+        guard_name: "upgrade_job ready",
         actions: &[],
     },
     Transition {
@@ -859,8 +880,8 @@ pub static TRANSITIONS: &[Transition] = &[
     Transition {
         from: Stopped,
         to: Upgrading,
-        guard: |_, s| s.upgrade_job.is_present(),
-        guard_name: "upgrade_job present",
+        guard: |_, s| s.upgrade_job_ready(),
+        guard_name: "upgrade_job ready",
         actions: &[],
     },
     Transition {
@@ -939,17 +960,45 @@ pub async fn run_state_machine(
     }
 
     // 3. No transition — stay in current state, poll periodically.
-    Ok(requeue_for(&phase))
+    Ok(requeue_for(&phase, snapshot))
 }
 
 /// Decide requeue strategy for phases that need periodic polling.
-fn requeue_for(phase: &OdooInstancePhase) -> Action {
+fn requeue_for(phase: &OdooInstancePhase, snapshot: &ReconcileSnapshot) -> Action {
+    // If an upgrade job exists but its scheduled time hasn't arrived yet,
+    // requeue so we wake up when it's due.
+    if let Some(requeue) = scheduled_requeue(snapshot) {
+        return requeue;
+    }
+
     match phase {
         Starting | Initializing | Restoring | Upgrading | BackingUp | Degraded => {
             Action::requeue(Duration::from_secs(10))
         }
         _ => Action::await_change(),
     }
+}
+
+/// If an upgrade job CR is present but its `scheduledTime` is in the future,
+/// return a requeue action that fires when the time arrives.
+fn scheduled_requeue(snapshot: &ReconcileSnapshot) -> Option<Action> {
+    if !snapshot.upgrade_job.is_present() {
+        return None;
+    }
+    let scheduled = snapshot
+        .active_upgrade_job
+        .as_ref()
+        .and_then(|j| j.spec.scheduled_time.as_deref())?;
+
+    let target = chrono::DateTime::parse_from_rfc3339(scheduled).ok()?;
+    let now = chrono::Utc::now();
+    if target <= now {
+        return None; // already due
+    }
+    let delay = (target.with_timezone(&chrono::Utc) - now)
+        .to_std()
+        .unwrap_or(Duration::from_secs(10));
+    Some(Action::requeue(delay))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
