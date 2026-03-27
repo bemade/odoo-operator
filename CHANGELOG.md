@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/bemade/odoo-operator/compare/v1.3.0...v1.3.1) (2026-03-27)
+
+
+### Bug Fixes
+
+* drop database via SQL before restore to handle invalid DBs ([#43](https://github.com/bemade/odoo-operator/issues/43)) ([5794c80](https://github.com/bemade/odoo-operator/commit/5794c8059ca019f4a3400092795e5b1e9b663648))
+
 ## [1.3.0](https://github.com/bemade/odoo-operator/compare/v1.2.0...v1.3.0) (2026-03-23)
 
 
