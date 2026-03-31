@@ -134,6 +134,11 @@ pub struct InitSpec {
     #[serde(default = "default_init_modules")]
     pub modules: Vec<String>,
 
+    /// Install demo data during database initialization.
+    /// Defaults to false (Odoo's default `without_demo=all` applies).
+    #[serde(default)]
+    pub demo: bool,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webhook: Option<super::shared::WebhookConfig>,
 }
@@ -143,6 +148,7 @@ impl Default for InitSpec {
         InitSpec {
             enabled: true,
             modules: default_init_modules(),
+            demo: false,
             webhook: None,
         }
     }
