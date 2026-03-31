@@ -654,6 +654,7 @@ spec:
                 type: object
               init:
                 default:
+                  demo: false
                   enabled: true
                   modules:
                   - base
@@ -662,6 +663,10 @@ spec:
 
                   Defaults to initializing with `["base"]` modules. Set `enabled: false` to skip auto-init (e.g. when restoring from backup or using an external tool).
                 properties:
+                  demo:
+                    default: false
+                    description: Install demo data during database initialization. Defaults to false (Odoo's default `without_demo=all` applies).
+                    type: boolean
                   enabled:
                     default: true
                     type: boolean

@@ -61,6 +61,7 @@ fn test_init_job(name: &str) -> OdooInitJob {
                 namespace: None,
             },
             modules: vec!["base".to_string()],
+            demo: false,
             webhook: None,
         },
         status: None,

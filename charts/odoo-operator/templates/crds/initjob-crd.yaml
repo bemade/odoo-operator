@@ -35,6 +35,10 @@ spec:
           spec:
             description: OdooInitJob runs a one-shot database initialisation job against an OdooInstance.
             properties:
+              demo:
+                default: false
+                description: Install demo data during database initialization.
+                type: boolean
               modules:
                 default:
                 - base

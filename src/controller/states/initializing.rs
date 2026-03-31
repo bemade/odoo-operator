@@ -90,14 +90,20 @@ pub fn build_init_job(
             name: "init".to_string(),
             image: Some(image.to_string()),
             command: Some(vec!["/entrypoint.sh".into(), "odoo".into()]),
-            args: Some(vec![
-                "-i".into(),
-                modules.join(","),
-                "-d".into(),
-                db_name.to_string(),
-                "--no-http".into(),
-                "--stop-after-init".into(),
-            ]),
+            args: Some({
+                let mut args = vec![
+                    "-i".into(),
+                    modules.join(","),
+                    "-d".into(),
+                    db_name.to_string(),
+                    "--no-http".into(),
+                    "--stop-after-init".into(),
+                ];
+                if !init_job.spec.demo {
+                    args.push("--without-demo=all".into());
+                }
+                args
+            }),
             volume_mounts: Some(odoo_volume_mounts()),
             ..Default::default()
         }])

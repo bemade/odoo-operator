@@ -46,6 +46,7 @@ impl State for Uninitialized {
                 "spec": {
                     "odooInstanceRef": { "name": &name },
                     "modules": init_spec.modules,
+                    "demo": init_spec.demo,
                     "webhook": init_spec.webhook,
                 }
             }))?;
