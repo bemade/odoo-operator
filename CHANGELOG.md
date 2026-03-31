@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/bemade/odoo-operator/compare/v1.3.1...v1.4.0) (2026-03-31)
+
+
+### Features
+
+* add demo data flag to InitSpec and OdooInitJob CRDs ([#46](https://github.com/bemade/odoo-operator/issues/46)) ([d92eba3](https://github.com/bemade/odoo-operator/commit/d92eba34040a2142a612504bbe4047cddac0b82a))
+
 ## [1.3.1](https://github.com/bemade/odoo-operator/compare/v1.3.0...v1.3.1) (2026-03-27)
 
 
