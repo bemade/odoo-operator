@@ -38,8 +38,8 @@ use crate::helpers::{build_odoo_conf, db_name, generate_password, odoo_username,
 use crate::postgres::PostgresClusterConfig;
 
 use super::helpers::{
-    cron_depl_name, image_pull_secrets, odoo_security_context, odoo_volume_mounts, odoo_volumes,
-    FIELD_MANAGER,
+    cron_depl_name, env, image_pull_secrets, odoo_security_context, odoo_volume_mounts,
+    odoo_volumes, FIELD_MANAGER,
 };
 use super::odoo_instance::Context;
 
@@ -576,6 +576,11 @@ pub async fn ensure_deployment(
         .unwrap_or("");
     let conf_hash = sha256_hex(conf_content);
 
+    // Override PGDATABASE so the Odoo config layer (which reads env vars
+    // with higher priority than the config file) uses the correct database.
+    let db = db_name(instance);
+    let pg_env = vec![env("PGDATABASE", &db)];
+
     let make_http_probe = |path: &str| -> Probe {
         Probe {
             http_get: Some(HTTPGetAction {
@@ -646,6 +651,7 @@ pub async fn ensure_deployment(
                                 ..Default::default()
                             },
                         ]),
+                        env: Some(pg_env),
                         volume_mounts: Some(odoo_volume_mounts()),
                         resources: instance.spec.resources.clone(),
                         startup_probe: Some(Probe {
@@ -841,6 +847,10 @@ pub async fn ensure_cron_deployment(
         DeploymentStrategyType::RollingUpdate => "RollingUpdate",
     };
 
+    // Override PGDATABASE (see ensure_deployment for rationale).
+    let db = db_name(instance);
+    let pg_env = vec![env("PGDATABASE", &db)];
+
     // Hash odoo.conf for rollout trigger.
     let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
     let cm = cms.get(&format!("{name}-odoo-conf")).await?;
@@ -916,6 +926,7 @@ pub async fn ensure_cron_deployment(
                                 "0".to_string(),
                                 "--no-http".to_string(),
                             ]),
+                            env: Some(pg_env),
                             volume_mounts: Some(odoo_volume_mounts()),
                             resources: instance.spec.cron.resources.clone(),
                             startup_probe: Some(Probe {
