@@ -99,7 +99,9 @@ pub fn build_init_job(
                     "--no-http".into(),
                     "--stop-after-init".into(),
                 ];
-                if !init_job.spec.demo {
+                if init_job.spec.demo {
+                    args.push("--with-demo".into());
+                } else {
                     args.push("--without-demo=all".into());
                 }
                 args
