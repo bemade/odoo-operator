@@ -2,6 +2,28 @@ apiVersion: v1
 entries:
   odoo-operator:
   - apiVersion: v2
+    appVersion: 1.4.1
+    created: "2026-04-08T14:42:28.855708258Z"
+    description: A Kubernetes operator for managing Odoo instances
+    digest: 1a4e4de7031bd4ab841492c5a0aa2186da403d094e424c3a4bdf6cd6d75c6541
+    home: https://github.com/bemade/odoo-operator
+    keywords:
+    - odoo
+    - operator
+    - kubernetes
+    - bemade
+    maintainers:
+    - email: marc@bemade.org
+      name: Bemade Inc.
+      url: https://bemade.org
+    name: odoo-operator
+    sources:
+    - https://github.com/bemade/odoo-operator
+    type: application
+    urls:
+    - https://github.com/bemade/odoo-operator/releases/download/odoo-operator-1.4.1/odoo-operator-1.4.1.tgz
+    version: 1.4.1
+  - apiVersion: v2
     appVersion: 1.4.0
     created: "2026-03-31T17:32:49.330402621Z"
     description: A Kubernetes operator for managing Odoo instances
@@ -397,4 +419,4 @@ entries:
     urls:
     - https://github.com/bemade/odoo-operator/releases/download/odoo-operator-0.13.0/odoo-operator-0.13.0.tgz
     version: 0.13.0
-generated: "2026-03-31T17:32:49.330543273Z"
+generated: "2026-04-08T14:42:28.85584904Z"
