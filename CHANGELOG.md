@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/bemade/odoo-operator/compare/v1.4.0...v1.4.1) (2026-04-08)
+
+
+### Bug Fixes
+
+* override PGDATABASE env var on deployments ([#48](https://github.com/bemade/odoo-operator/issues/48)) ([2b22651](https://github.com/bemade/odoo-operator/commit/2b226511c3f56fc2b1836d7f8d9adf82ab19bd98))
+
 ## [1.4.0](https://github.com/bemade/odoo-operator/compare/v1.3.1...v1.4.0) (2026-03-31)
 
 
