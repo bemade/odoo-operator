@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2](https://github.com/bemade/odoo-operator/compare/v1.4.1...v1.4.2) (2026-04-08)
+
+
+### Bug Fixes
+
+* pass --with-demo flag when init.demo is true ([#50](https://github.com/bemade/odoo-operator/issues/50)) ([edbac81](https://github.com/bemade/odoo-operator/commit/edbac81a5f489a098d1995fec2e9be0632e7a4b6))
+
 ## [1.4.1](https://github.com/bemade/odoo-operator/compare/v1.4.0...v1.4.1) (2026-04-08)
 
 
