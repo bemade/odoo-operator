@@ -302,8 +302,13 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
         .await?;
     child_resources::ensure_odoo_user_secret(client, &ns, &name, &oref).await?;
     child_resources::ensure_postgres_role(ctx, instance, &pg_cluster).await?;
-    let is_migrating = instance.status.as_ref().and_then(|s| s.phase.as_ref())
-        == Some(&OdooInstancePhase::MigratingFilestore);
+    let is_migrating = matches!(
+        instance.status.as_ref().and_then(|s| s.phase.as_ref()),
+        Some(
+            &OdooInstancePhase::MigratingFilestore
+                | &OdooInstancePhase::FinalizingFilestoreMigration
+        )
+    );
     if !is_migrating {
         child_resources::ensure_filestore_pvc(client, &ns, &name, instance, ctx, &oref).await?;
     }
@@ -491,6 +496,7 @@ pub fn phase_to_conditions(phase: &OdooInstancePhase, generation: i64) -> Vec<Co
         Restoring => ("False", "Database restore in progress"),
         BackingUp => ("False", "Backup in progress"),
         MigratingFilestore => ("False", "Filestore storage class migration in progress"),
+        FinalizingFilestoreMigration => ("False", "Finalizing filestore migration (PVC rebind)"),
         Error => ("False", "Reconciliation error"),
     };
 
@@ -503,6 +509,7 @@ pub fn phase_to_conditions(phase: &OdooInstancePhase, generation: i64) -> Vec<Co
             | Restoring
             | BackingUp
             | MigratingFilestore
+            | FinalizingFilestoreMigration
     );
 
     let now = Time(chrono::Utc::now());

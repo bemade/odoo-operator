@@ -416,6 +416,7 @@ pub enum TransitionAction {
     FailBackupJob,
     BeginFilestoreMigration,
     CompleteFilestoreMigration,
+    ClearFilestoreMigrationStatus,
     RollbackFilestoreMigration,
 }
 
@@ -580,6 +581,24 @@ pub async fn execute_action(
         }
         CompleteFilestoreMigration => {
             complete_filestore_migration(instance, ctx).await?;
+        }
+        ClearFilestoreMigrationStatus => {
+            let name = instance.name_any();
+            let api: Api<OdooInstance> = Api::namespaced(client.clone(), &ns);
+            let patch = json!({
+                "status": {
+                    "migrationJobName": null,
+                    "migrationPvName": null,
+                    "migrationPreviousStorageClass": null,
+                    "message": null,
+                }
+            });
+            api.patch_status(
+                &name,
+                &PatchParams::apply(FIELD_MANAGER),
+                &Patch::Merge(&patch),
+            )
+            .await?;
         }
         RollbackFilestoreMigration => {
             rollback_filestore_migration(instance, ctx).await?;
@@ -991,22 +1010,15 @@ pub static TRANSITIONS: &[Transition] = &[
         actions: &[],
     },
     // ── MigratingFilestore ───────────────────────────────────
-    // Success: rsync job completed — rebind PVC and start up.
+    // Rsync succeeded — delete old PVC, rebind PV, create final PVC.
     Transition {
         from: MigratingFilestore,
-        to: Starting,
-        guard: |i, s| s.migration_job == Succeeded && i.spec.replicas > 0,
-        guard_name: "migration_job succeeded && replicas > 0",
+        to: FinalizingFilestoreMigration,
+        guard: |_, s| s.migration_job == Succeeded,
+        guard_name: "migration_job succeeded",
         actions: &[TransitionAction::CompleteFilestoreMigration],
     },
-    Transition {
-        from: MigratingFilestore,
-        to: Stopped,
-        guard: |i, s| s.migration_job == Succeeded && i.spec.replicas == 0,
-        guard_name: "migration_job succeeded && replicas == 0",
-        actions: &[TransitionAction::CompleteFilestoreMigration],
-    },
-    // Failure or lost job: rollback to previous StorageClass.
+    // Rsync failed or job lost — rollback to previous StorageClass.
     Transition {
         from: MigratingFilestore,
         to: Starting,
@@ -1024,6 +1036,22 @@ pub static TRANSITIONS: &[Transition] = &[
         },
         guard_name: "migration_job failed/absent && replicas == 0",
         actions: &[TransitionAction::RollbackFilestoreMigration],
+    },
+    // ── FinalizingFilestoreMigration ───────────────────────
+    // PVC rebind complete (no mismatch) — clear status and start up.
+    Transition {
+        from: FinalizingFilestoreMigration,
+        to: Starting,
+        guard: |i, s| !s.storage_class_mismatch && i.spec.replicas > 0,
+        guard_name: "pvc rebound && replicas > 0",
+        actions: &[TransitionAction::ClearFilestoreMigrationStatus],
+    },
+    Transition {
+        from: FinalizingFilestoreMigration,
+        to: Stopped,
+        guard: |i, s| !s.storage_class_mismatch && i.spec.replicas == 0,
+        guard_name: "pvc rebound && replicas == 0",
+        actions: &[TransitionAction::ClearFilestoreMigrationStatus],
     },
     // ── Error ───────────────────────────────────────────────
     Transition {
@@ -1106,8 +1134,14 @@ fn requeue_for(phase: &OdooInstancePhase, snapshot: &ReconcileSnapshot) -> Actio
     }
 
     match phase {
-        Starting | Initializing | Restoring | Upgrading | BackingUp | Degraded
-        | MigratingFilestore => Action::requeue(Duration::from_secs(10)),
+        Starting
+        | Initializing
+        | Restoring
+        | Upgrading
+        | BackingUp
+        | Degraded
+        | MigratingFilestore
+        | FinalizingFilestoreMigration => Action::requeue(Duration::from_secs(10)),
         _ => Action::await_change(),
     }
 }
@@ -1246,89 +1280,114 @@ async fn begin_filestore_migration(
     Ok(())
 }
 
-/// Delete old PVC, rebind PV to new PVC with original name, clean up.
-///
-/// Idempotent: stores PV name in `status.migrationPvName` on first call
-/// so retries don't depend on the temp PVC still existing.  Each step
-/// checks current state before acting.
+/// Transition action: store PV name and delete the rsync Job.
+/// The PVC rebind is handled by `finalize_filestore_pvc_rebind()` in the
+/// FinalizingFilestoreMigration ensure().
 async fn complete_filestore_migration(instance: &OdooInstance, ctx: &Context) -> Result<()> {
     let ns = instance.namespace().unwrap_or_default();
     let inst_name = instance.name_any();
     let client = &ctx.client;
+
+    // 1. Read PV name from temp PVC and persist in status.
+    if instance
+        .status
+        .as_ref()
+        .and_then(|s| s.migration_pv_name.as_ref())
+        .is_none()
+    {
+        let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), &ns);
+        let temp_pvc_name = format!("{inst_name}-filestore-pvc-temp");
+        let pv_name = pvcs
+            .get(&temp_pvc_name)
+            .await?
+            .spec
+            .as_ref()
+            .and_then(|s| s.volume_name.clone())
+            .ok_or_else(|| {
+                crate::error::Error::Reconcile("temp PVC has no volumeName — not bound yet".into())
+            })?;
+        let api: Api<OdooInstance> = Api::namespaced(client.clone(), &ns);
+        let patch = json!({"status": {"migrationPvName": &pv_name}});
+        api.patch_status(
+            &inst_name,
+            &PatchParams::apply(FIELD_MANAGER),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+        info!(%inst_name, %pv_name, "stored migration PV name");
+    }
+
+    // 2. Delete the rsync Job — its completed pod holds pvc-protection on the
+    //    old PVC.  Foreground deletion cascades to the pod.
+    let jobs: Api<Job> = Api::namespaced(client.clone(), &ns);
+    if let Some(ref job_name) = instance
+        .status
+        .as_ref()
+        .and_then(|s| s.migration_job_name.clone())
+    {
+        match jobs.delete(job_name, &DeleteParams::foreground()).await {
+            Ok(_) => info!(%inst_name, %job_name, "deleted migration job"),
+            Err(kube::Error::Api(ref e)) if e.code == 404 => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Ok(())
+}
+
+/// Idempotent PVC rebind — called by `FinalizingFilestoreMigration::ensure()`.
+/// Deletes old PVC, patches PV, deletes temp PVC, creates final PVC.
+pub async fn finalize_filestore_pvc_rebind(instance: &OdooInstance, ctx: &Context) -> Result<()> {
+    let ns = instance.namespace().unwrap_or_default();
+    let inst_name = instance.name_any();
+    let client = &ctx.client;
     let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), &ns);
-    let api: Api<OdooInstance> = Api::namespaced(client.clone(), &ns);
 
     let orig_pvc_name = format!("{inst_name}-filestore-pvc");
     let temp_pvc_name = format!("{inst_name}-filestore-pvc-temp");
 
-    // 1. Resolve PV name — from status (retry) or from temp PVC (first run).
-    let pv_name = match instance
+    let pv_name = instance
         .status
         .as_ref()
         .and_then(|s| s.migration_pv_name.clone())
-    {
-        Some(name) => name,
-        None => {
-            // First run: read from temp PVC and persist in status.
-            let name = pvcs
-                .get(&temp_pvc_name)
-                .await?
-                .spec
-                .as_ref()
-                .and_then(|s| s.volume_name.clone())
-                .ok_or_else(|| {
-                    crate::error::Error::Reconcile(
-                        "temp PVC has no volumeName — not bound yet".into(),
-                    )
-                })?;
-            let patch = json!({"status": {"migrationPvName": &name}});
-            api.patch_status(
-                &inst_name,
-                &PatchParams::apply(FIELD_MANAGER),
-                &Patch::Merge(&patch),
-            )
-            .await?;
-            name
-        }
-    };
+        .ok_or_else(|| {
+            crate::error::Error::Reconcile("migrationPvName not set in status".into())
+        })?;
 
-    // 2. Delete old PVC (idempotent — ignores 404).
+    // 1. Delete old PVC (idempotent).
     match pvcs.delete(&orig_pvc_name, &DeleteParams::default()).await {
         Ok(_) => info!(%inst_name, "deleted old filestore PVC"),
         Err(kube::Error::Api(ref e)) if e.code == 404 => {}
         Err(e) => return Err(e.into()),
     }
 
-    // 3. Wait for old PVC to be fully gone (not just Terminating).
+    // 2. If old PVC still terminating, return Ok — next reconcile will retry.
     if pvcs.get(&orig_pvc_name).await.is_ok() {
-        return Err(crate::error::Error::Reconcile(
-            "old PVC still terminating — will retry".into(),
-        ));
+        return Ok(());
     }
 
-    // 4. Patch PV: set Retain + clear claimRef so we can rebind.
+    // 3. Patch PV: set Retain + clear claimRef.
     let pvs: Api<k8s_openapi::api::core::v1::PersistentVolume> = Api::all(client.clone());
-    let pv_patch = json!({
-        "spec": {
-            "persistentVolumeReclaimPolicy": "Retain",
-            "claimRef": null,
-        }
-    });
     pvs.patch(
         &pv_name,
         &PatchParams::apply(FIELD_MANAGER),
-        &Patch::Merge(&pv_patch),
+        &Patch::Merge(&json!({
+            "spec": {
+                "persistentVolumeReclaimPolicy": "Retain",
+                "claimRef": null,
+            }
+        })),
     )
     .await?;
 
-    // 5. Delete temp PVC (idempotent — ignores 404).
+    // 4. Delete temp PVC (idempotent).
     match pvcs.delete(&temp_pvc_name, &DeleteParams::default()).await {
         Ok(_) => {}
         Err(kube::Error::Api(ref e)) if e.code == 404 => {}
         Err(e) => return Err(e.into()),
     }
 
-    // 6. Create final PVC with original name (idempotent — skip if exists).
+    // 5. Create final PVC (idempotent — skip if exists).
     if pvcs.get(&orig_pvc_name).await.is_err() {
         let desired_class = instance
             .spec
@@ -1371,31 +1430,6 @@ async fn complete_filestore_migration(instance: &OdooInstance, ctx: &Context) ->
         info!(%inst_name, %pv_name, "created final PVC bound to migrated PV");
     }
 
-    // 7. Clean up rsync job (idempotent).
-    let jobs: Api<Job> = Api::namespaced(client.clone(), &ns);
-    if let Some(ref job_name) = instance
-        .status
-        .as_ref()
-        .and_then(|s| s.migration_job_name.clone())
-    {
-        let _ = jobs.delete(job_name, &DeleteParams::background()).await;
-    }
-
-    // 8. Clear migration status.
-    let patch = json!({
-        "status": {
-            "migrationJobName": null,
-            "migrationPvName": null,
-            "migrationPreviousStorageClass": null,
-            "message": null,
-        }
-    });
-    api.patch_status(
-        &inst_name,
-        &PatchParams::apply(FIELD_MANAGER),
-        &Patch::Merge(&patch),
-    )
-    .await?;
     Ok(())
 }
 

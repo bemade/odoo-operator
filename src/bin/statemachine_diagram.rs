@@ -38,6 +38,7 @@ fn action_name(a: &TransitionAction) -> &'static str {
         TransitionAction::FailBackupJob => "FailBackupJob",
         TransitionAction::BeginFilestoreMigration => "BeginFilestoreMigration",
         TransitionAction::CompleteFilestoreMigration => "CompleteFilestoreMigration",
+        TransitionAction::ClearFilestoreMigrationStatus => "ClearFilestoreMigrationStatus",
         TransitionAction::RollbackFilestoreMigration => "RollbackFilestoreMigration",
     }
 }

@@ -92,6 +92,7 @@ fn validate(req: AdmissionRequest<OdooInstance>) -> AdmissionResponse {
     }
 
     // 3. Reject storageClass changes when the instance is in an unsafe phase.
+    //    Allow rollback: changing back to the previous SC stored in status.
     let old_class = old
         .spec
         .filestore
@@ -107,10 +108,23 @@ fn validate(req: AdmissionRequest<OdooInstance>) -> AdmissionResponse {
     if !old_class.is_empty() && !new_class.is_empty() && old_class != new_class {
         use crate::crd::odoo_instance::OdooInstancePhase::*;
         let phase = old.status.as_ref().and_then(|s| s.phase.as_ref());
-        let blocked = matches!(
-            phase,
-            Some(Restoring | Upgrading | BackingUp | MigratingFilestore | Uninitialized)
-        );
+        let prev_sc = old
+            .status
+            .as_ref()
+            .and_then(|s| s.migration_previous_storage_class.as_deref());
+        let is_rollback = prev_sc.is_some_and(|sc| sc == new_class);
+        let blocked = !is_rollback
+            && matches!(
+                phase,
+                Some(
+                    Restoring
+                        | Upgrading
+                        | BackingUp
+                        | MigratingFilestore
+                        | FinalizingFilestoreMigration
+                        | Uninitialized,
+                )
+            );
         if blocked {
             return AdmissionResponse::from(&req).deny(format!(
                 "spec.filestore.storageClass: cannot change storage class while instance is in {} phase",
@@ -243,9 +257,22 @@ mod tests {
         new_class: &str,
         old_phase: Option<&str>,
     ) -> AdmissionRequest<OdooInstance> {
+        make_sc_change_request_with_prev(old_class, new_class, old_phase, None)
+    }
+
+    fn make_sc_change_request_with_prev(
+        old_class: &str,
+        new_class: &str,
+        old_phase: Option<&str>,
+        prev_sc: Option<&str>,
+    ) -> AdmissionRequest<OdooInstance> {
         let mut old_obj = make_instance_json_full(None, None, Some(old_class));
         if let Some(phase) = old_phase {
-            old_obj["status"] = serde_json::json!({"phase": phase});
+            let mut status = serde_json::json!({"phase": phase});
+            if let Some(sc) = prev_sc {
+                status["migrationPreviousStorageClass"] = serde_json::json!(sc);
+            }
+            old_obj["status"] = status;
         }
         let review: serde_json::Value = serde_json::json!({
             "apiVersion": "admission.k8s.io/v1",
@@ -370,6 +397,40 @@ mod tests {
         assert!(
             !resp.allowed,
             "storageClass change should be rejected when Uninitialized"
+        );
+    }
+
+    #[test]
+    fn test_validate_allows_rollback_during_migration() {
+        // Reverting to the previous SC (stored in status) should be allowed
+        // even during MigratingFilestore.
+        let req = make_sc_change_request_with_prev(
+            "juicefs",
+            "cephfs",
+            Some("MigratingFilestore"),
+            Some("cephfs"),
+        );
+        let resp = validate(req);
+        assert!(
+            resp.allowed,
+            "rollback to previous storageClass should be allowed during migration"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_non_rollback_during_migration() {
+        // Changing to a DIFFERENT SC (not the previous one) during migration
+        // should still be rejected.
+        let req = make_sc_change_request_with_prev(
+            "juicefs",
+            "longhorn",
+            Some("MigratingFilestore"),
+            Some("cephfs"),
+        );
+        let resp = validate(req);
+        assert!(
+            !resp.allowed,
+            "changing to a third storageClass during migration should be rejected"
         );
     }
 }

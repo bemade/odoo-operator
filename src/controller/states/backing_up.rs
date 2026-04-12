@@ -143,7 +143,7 @@ impl State for BackingUp {
         };
 
         let job = OdooJobBuilder::new(&format!("{crd_name}-"), &ns, backup_job, instance)
-            .active_deadline(1800)
+            .active_deadline(5400)
             .extra_volumes(vec![backup_vol])
             .affinity(pod_affinity)
             .init_containers(vec![Container {
