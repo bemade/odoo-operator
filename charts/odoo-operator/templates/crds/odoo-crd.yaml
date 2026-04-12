@@ -868,9 +868,6 @@ spec:
               migrationPvName:
                 nullable: true
                 type: string
-              migrationStep:
-                nullable: true
-                type: string
               phase:
                 description: OdooInstancePhase represents the lifecycle state of an OdooInstance.
                 enum:
@@ -886,6 +883,7 @@ spec:
                 - Restoring
                 - BackingUp
                 - MigratingFilestore
+                - FinalizingFilestoreMigration
                 - Error
                 nullable: true
                 type: string

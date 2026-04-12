@@ -250,6 +250,7 @@ pub enum OdooInstancePhase {
     Restoring,
     BackingUp,
     MigratingFilestore,
+    FinalizingFilestoreMigration,
     Error,
 }
 
@@ -268,6 +269,7 @@ impl std::fmt::Display for OdooInstancePhase {
             Self::Restoring => "Restoring",
             Self::BackingUp => "BackingUp",
             Self::MigratingFilestore => "MigratingFilestore",
+            Self::FinalizingFilestoreMigration => "FinalizingFilestoreMigration",
             Self::Error => "Error",
         };
         write!(f, "{s}")
