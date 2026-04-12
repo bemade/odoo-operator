@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/bemade/odoo-operator/compare/v1.5.0...v1.5.1) (2026-04-12)
+
+
+### Bug Fixes
+
+* regenerate CRDs with MigratingFilestore phase ([#54](https://github.com/bemade/odoo-operator/issues/54)) ([cf9167d](https://github.com/bemade/odoo-operator/commit/cf9167d9db711e9bb0cd1b85f7768c3d3327df36))
+
 ## [1.5.0](https://github.com/bemade/odoo-operator/compare/v1.4.2...v1.5.0) (2026-04-12)
 
 
