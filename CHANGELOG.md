@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.6.0](https://github.com/bemade/odoo-operator/compare/v1.5.1...v1.6.0) (2026-04-12)
+
+
+### Features
+
+* add demo data flag to InitSpec and OdooInitJob CRDs ([#57](https://github.com/bemade/odoo-operator/issues/57)) ([478e032](https://github.com/bemade/odoo-operator/commit/478e032a5dc144a44e4d3e8f1c2ffe8de867e7c7))
+
+
+### Bug Fixes
+
+* exclude JuiceFS virtual files from migration rsync ([#59](https://github.com/bemade/odoo-operator/issues/59)) ([0b67e4d](https://github.com/bemade/odoo-operator/commit/0b67e4d15e5230ec783ca71d06e9f06bd88f3e58))
+
 ## [1.5.1](https://github.com/bemade/odoo-operator/compare/v1.5.0...v1.5.1) (2026-04-12)
 
 
