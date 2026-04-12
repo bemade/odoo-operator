@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.4](https://github.com/bemade/odoo-operator/compare/v1.6.3...v1.6.4) (2026-04-12)
+
+
+### Bug Fixes
+
+* split migration finalization into separate phase, fix PVC rebind race ([#67](https://github.com/bemade/odoo-operator/issues/67)) ([ddb2cc5](https://github.com/bemade/odoo-operator/commit/ddb2cc55eabcfad58ac815ceaa5e23ef8216a4bf))
+
 ## [1.6.3](https://github.com/bemade/odoo-operator/compare/v1.6.2...v1.6.3) (2026-04-12)
 
 
