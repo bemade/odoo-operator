@@ -16,6 +16,7 @@ mod degraded;
 mod error;
 mod init_failed;
 mod initializing;
+mod migrating_filestore;
 mod provisioning;
 mod restoring;
 mod running;
@@ -29,6 +30,7 @@ pub use degraded::Degraded;
 pub use error::Error;
 pub use init_failed::InitFailed;
 pub use initializing::Initializing;
+pub use migrating_filestore::MigratingFilestore;
 pub use provisioning::Provisioning;
 pub use restoring::Restoring;
 pub use running::Running;
@@ -58,6 +60,7 @@ pub fn state_for(phase: &OdooInstancePhase) -> &'static dyn State {
         OdooInstancePhase::Uninitialized => &Uninitialized,
         OdooInstancePhase::Initializing => &Initializing,
         OdooInstancePhase::InitFailed => &InitFailed,
+        OdooInstancePhase::MigratingFilestore => &MigratingFilestore,
         OdooInstancePhase::Starting => &Starting,
         OdooInstancePhase::Running => &Running,
         OdooInstancePhase::Degraded => &Degraded,

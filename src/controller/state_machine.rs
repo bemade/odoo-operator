@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use k8s_openapi::api::{apps::v1::Deployment, batch::v1::Job};
+use k8s_openapi::api::{apps::v1::Deployment, batch::v1::Job, core::v1::PersistentVolumeClaim};
 use kube::api::{Api, ListParams, Patch, PatchParams, ResourceExt};
 use kube::runtime::controller::Action;
 use kube::Client;
@@ -85,6 +85,11 @@ pub struct ReconcileSnapshot {
     pub active_restore_job: Option<OdooRestoreJob>,
     pub active_upgrade_job: Option<OdooUpgradeJob>,
     pub active_backup_job: Option<OdooBackupJob>,
+
+    // ── Filestore migration ─────────────────────────────────────────────
+    pub storage_class_mismatch: bool,
+    pub actual_storage_class: Option<String>,
+    pub migration_job: JobStatus,
 }
 
 impl ReconcileSnapshot {
@@ -274,6 +279,55 @@ impl ReconcileSnapshot {
         )
         .await;
 
+        // ── Filestore PVC storage-class mismatch detection ────────────
+        let (storage_class_mismatch, actual_storage_class) = {
+            let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
+            let pvc_name = format!("{instance_name}-filestore-pvc");
+            match pvcs.get(&pvc_name).await {
+                Ok(pvc) => {
+                    let actual = pvc.spec.as_ref().and_then(|s| s.storage_class_name.clone());
+                    let desired = instance
+                        .spec
+                        .filestore
+                        .as_ref()
+                        .and_then(|f| f.storage_class.clone());
+                    let mismatch = match (&actual, &desired) {
+                        (Some(a), Some(d)) => a != d,
+                        _ => false,
+                    };
+                    (mismatch, actual)
+                }
+                Err(_) => (false, None),
+            }
+        };
+
+        // ── Migration job status ────────────────────────────────────────
+        let migration_job = {
+            let job_name = instance
+                .status
+                .as_ref()
+                .and_then(|s| s.migration_job_name.clone());
+            match job_name {
+                Some(ref name) => match jobs_api.get(name).await {
+                    Ok(job) => {
+                        let succeeded =
+                            job.status.as_ref().and_then(|s| s.succeeded).unwrap_or(0) > 0;
+                        let failed = job.status.as_ref().and_then(|s| s.failed).unwrap_or(0) > 0;
+                        if succeeded {
+                            JobStatus::Succeeded
+                        } else if failed {
+                            JobStatus::Failed
+                        } else {
+                            JobStatus::Active
+                        }
+                    }
+                    Err(kube::Error::Api(ref err)) if err.code == 404 => JobStatus::Absent,
+                    Err(_) => JobStatus::Active,
+                },
+                None => JobStatus::Absent,
+            }
+        };
+
         Ok(Self {
             ready_replicas,
             deployment_replicas,
@@ -288,6 +342,9 @@ impl ReconcileSnapshot {
             active_restore_job,
             active_upgrade_job,
             active_backup_job,
+            storage_class_mismatch,
+            actual_storage_class,
+            migration_job,
         })
     }
 }
@@ -348,6 +405,8 @@ pub enum TransitionAction {
     FailUpgradeJob,
     CompleteBackupJob,
     FailBackupJob,
+    BeginFilestoreMigration,
+    CompleteFilestoreMigration,
 }
 
 pub async fn execute_action(
@@ -506,6 +565,46 @@ pub async fn execute_action(
                 }
             }
         }
+        BeginFilestoreMigration => {
+            let name = instance.name_any();
+            let api: Api<OdooInstance> = Api::namespaced(client.clone(), &ns);
+            let prev_sc = snapshot
+                .actual_storage_class
+                .as_deref()
+                .unwrap_or("unknown");
+            let patch = json!({
+                "status": {
+                    "migrationStep": "ScalingDown",
+                    "migrationPreviousStorageClass": prev_sc,
+                    "message": format!("Migrating filestore from storage class {prev_sc}"),
+                }
+            });
+            api.patch_status(
+                &name,
+                &PatchParams::apply(FIELD_MANAGER),
+                &Patch::Merge(&patch),
+            )
+            .await?;
+        }
+        CompleteFilestoreMigration => {
+            let name = instance.name_any();
+            let api: Api<OdooInstance> = Api::namespaced(client.clone(), &ns);
+            let patch = json!({
+                "status": {
+                    "migrationStep": null,
+                    "migrationPreviousStorageClass": null,
+                    "migrationJobName": null,
+                    "migrationPvName": null,
+                    "message": null,
+                }
+            });
+            api.patch_status(
+                &name,
+                &PatchParams::apply(FIELD_MANAGER),
+                &Patch::Merge(&patch),
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -643,6 +742,13 @@ pub static TRANSITIONS: &[Transition] = &[
     // ── Running ─────────────────────────────────────────────
     Transition {
         from: Running,
+        to: MigratingFilestore,
+        guard: |_, s| s.storage_class_mismatch,
+        guard_name: "storage_class_mismatch",
+        actions: &[TransitionAction::BeginFilestoreMigration],
+    },
+    Transition {
+        from: Running,
         to: Stopped,
         guard: |i, _| i.spec.replicas == 0,
         guard_name: "replicas == 0",
@@ -684,6 +790,13 @@ pub static TRANSITIONS: &[Transition] = &[
         actions: &[],
     },
     // ── Degraded ────────────────────────────────────────────
+    Transition {
+        from: Degraded,
+        to: MigratingFilestore,
+        guard: |_, s| s.storage_class_mismatch,
+        guard_name: "storage_class_mismatch",
+        actions: &[TransitionAction::BeginFilestoreMigration],
+    },
     Transition {
         from: Degraded,
         to: Stopped,
@@ -872,6 +985,13 @@ pub static TRANSITIONS: &[Transition] = &[
     // ── Stopped ─────────────────────────────────────────────
     Transition {
         from: Stopped,
+        to: MigratingFilestore,
+        guard: |_, s| s.storage_class_mismatch,
+        guard_name: "storage_class_mismatch",
+        actions: &[TransitionAction::BeginFilestoreMigration],
+    },
+    Transition {
+        from: Stopped,
         to: Restoring,
         guard: |_, s| s.restore_job.is_present(),
         guard_name: "restore_job present",
@@ -890,6 +1010,35 @@ pub static TRANSITIONS: &[Transition] = &[
         guard: |i, _| i.spec.replicas > 0,
         guard_name: "replicas > 0",
         actions: &[],
+    },
+    // ── MigratingFilestore ───────────────────────────────────
+    Transition {
+        from: MigratingFilestore,
+        to: Starting,
+        guard: |i, _s| {
+            let step = i
+                .status
+                .as_ref()
+                .and_then(|st| st.migration_step.as_deref())
+                .unwrap_or("");
+            step == "Complete" && i.spec.replicas > 0
+        },
+        guard_name: "migration complete && replicas > 0",
+        actions: &[TransitionAction::CompleteFilestoreMigration],
+    },
+    Transition {
+        from: MigratingFilestore,
+        to: Stopped,
+        guard: |i, _s| {
+            let step = i
+                .status
+                .as_ref()
+                .and_then(|st| st.migration_step.as_deref())
+                .unwrap_or("");
+            step == "Complete" && i.spec.replicas == 0
+        },
+        guard_name: "migration complete && replicas == 0",
+        actions: &[TransitionAction::CompleteFilestoreMigration],
     },
     // ── Error ───────────────────────────────────────────────
     Transition {
@@ -972,9 +1121,8 @@ fn requeue_for(phase: &OdooInstancePhase, snapshot: &ReconcileSnapshot) -> Actio
     }
 
     match phase {
-        Starting | Initializing | Restoring | Upgrading | BackingUp | Degraded => {
-            Action::requeue(Duration::from_secs(10))
-        }
+        Starting | Initializing | Restoring | Upgrading | BackingUp | Degraded
+        | MigratingFilestore => Action::requeue(Duration::from_secs(10)),
         _ => Action::await_change(),
     }
 }

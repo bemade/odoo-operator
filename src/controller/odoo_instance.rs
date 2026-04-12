@@ -302,12 +302,18 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
         .await?;
     child_resources::ensure_odoo_user_secret(client, &ns, &name, &oref).await?;
     child_resources::ensure_postgres_role(ctx, instance, &pg_cluster).await?;
-    child_resources::ensure_filestore_pvc(client, &ns, &name, instance, ctx, &oref).await?;
+    let is_migrating = instance.status.as_ref().and_then(|s| s.phase.as_ref())
+        == Some(&OdooInstancePhase::MigratingFilestore);
+    if !is_migrating {
+        child_resources::ensure_filestore_pvc(client, &ns, &name, instance, ctx, &oref).await?;
+    }
     child_resources::ensure_config_map(client, &ns, &name, instance, &pg_cluster, &oref).await?;
     child_resources::ensure_service(client, &ns, &name, &oref).await?;
     child_resources::ensure_routing(client, &ns, &name, instance, &oref).await?;
-    child_resources::ensure_deployment(client, &ns, &name, instance, ctx, &oref).await?;
-    child_resources::ensure_cron_deployment(client, &ns, &name, instance, ctx, &oref).await?;
+    if !is_migrating {
+        child_resources::ensure_deployment(client, &ns, &name, instance, ctx, &oref).await?;
+        child_resources::ensure_cron_deployment(client, &ns, &name, instance, ctx, &oref).await?;
+    }
 
     // Gather the observed world into a snapshot.
     let snapshot =
@@ -484,12 +490,19 @@ pub fn phase_to_conditions(phase: &OdooInstancePhase, generation: i64) -> Vec<Co
         Upgrading => ("False", "Module upgrade in progress"),
         Restoring => ("False", "Database restore in progress"),
         BackingUp => ("False", "Backup in progress"),
+        MigratingFilestore => ("False", "Filestore storage class migration in progress"),
         Error => ("False", "Reconciliation error"),
     };
 
     let progressing = matches!(
         phase,
-        Provisioning | Initializing | Starting | Upgrading | Restoring | BackingUp
+        Provisioning
+            | Initializing
+            | Starting
+            | Upgrading
+            | Restoring
+            | BackingUp
+            | MigratingFilestore
     );
 
     let now = Time(chrono::Utc::now());

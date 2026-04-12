@@ -21,7 +21,8 @@ Transitions are a static table of `(from, to, guard, action)` tuples. Guards
 are pure functions over `ReconcileSnapshot`.
 
 **Phases**: Provisioning, Uninitialized, Initializing, InitFailed, Starting,
-Running, Degraded, Stopped, Upgrading, Restoring, BackingUp, Error.
+Running, Degraded, Stopped, Upgrading, Restoring, BackingUp, MigratingFilestore,
+Error.
 
 Auto-generate the Mermaid diagram: `make state-machine`
 
@@ -120,3 +121,4 @@ subresource patches. Key helpers in `tests/integration/common.rs`:
 | Running | spec.replicas | spec.cron.replicas | Steady state |
 | BackingUp | unchanged | unchanged | Non-disruptive |
 | Degraded | unchanged | unchanged | Partial readiness |
+| MigratingFilestore | 0 | 0 | Both down during storage class migration |

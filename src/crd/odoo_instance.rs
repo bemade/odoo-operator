@@ -249,6 +249,7 @@ pub enum OdooInstancePhase {
     Upgrading,
     Restoring,
     BackingUp,
+    MigratingFilestore,
     Error,
 }
 
@@ -266,6 +267,7 @@ impl std::fmt::Display for OdooInstancePhase {
             Self::Upgrading => "Upgrading",
             Self::Restoring => "Restoring",
             Self::BackingUp => "BackingUp",
+            Self::MigratingFilestore => "MigratingFilestore",
             Self::Error => "Error",
         };
         write!(f, "{s}")
@@ -302,4 +304,17 @@ pub struct OdooInstanceStatus {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition>,
+
+    // ── Filestore migration ──────────────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_step: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_pv_name: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_job_name: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_previous_storage_class: Option<String>,
 }
