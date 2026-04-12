@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.3](https://github.com/bemade/odoo-operator/compare/v1.6.2...v1.6.3) (2026-04-12)
+
+
+### Bug Fixes
+
+* make CompleteFilestoreMigration idempotent across retries ([#65](https://github.com/bemade/odoo-operator/issues/65)) ([2de6a0e](https://github.com/bemade/odoo-operator/commit/2de6a0e254ac5448f49959489ec2fa77b9f84953))
+
 ## [1.6.2](https://github.com/bemade/odoo-operator/compare/v1.6.1...v1.6.2) (2026-04-12)
 
 
