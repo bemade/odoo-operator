@@ -307,12 +307,6 @@ pub struct OdooInstanceStatus {
 
     // ── Filestore migration ──────────────────────────────────────────────
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub migration_step: Option<String>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub migration_pv_name: Option<String>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration_job_name: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
