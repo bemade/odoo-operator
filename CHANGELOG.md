@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/bemade/odoo-operator/compare/v1.4.2...v1.5.0) (2026-04-12)
+
+
+### Features
+
+* automatic filestore StorageClass migration ([#52](https://github.com/bemade/odoo-operator/issues/52)) ([e0f9f01](https://github.com/bemade/odoo-operator/commit/e0f9f013d4cf76ea46f6b971b857c8c34e792a3a))
+
 ## [1.4.2](https://github.com/bemade/odoo-operator/compare/v1.4.1...v1.4.2) (2026-04-08)
 
 
