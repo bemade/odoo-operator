@@ -3,7 +3,11 @@
 //! Rejects updates that would:
 //! - Decrease filestore storage size (PVCs cannot shrink)
 //! - Change the postgres cluster (migration not implemented)
-//! - Change the filestore storageClass (PVC storageClass is immutable)
+//!
+//! StorageClass changes are allowed — the operator handles migration
+//! automatically via the MigratingFilestore phase.  Changes are rejected
+//! during unsafe phases (Restoring, Upgrading, BackingUp, MigratingFilestore,
+//! Uninitialized).
 
 use kube::core::admission::{AdmissionRequest, AdmissionResponse, AdmissionReview};
 use tracing::{info, warn};
@@ -87,7 +91,7 @@ fn validate(req: AdmissionRequest<OdooInstance>) -> AdmissionResponse {
         ));
     }
 
-    // 3. Reject storageClass changes — the filestore PVC storageClass is immutable.
+    // 3. Reject storageClass changes when the instance is in an unsafe phase.
     let old_class = old
         .spec
         .filestore
@@ -100,12 +104,19 @@ fn validate(req: AdmissionRequest<OdooInstance>) -> AdmissionResponse {
         .as_ref()
         .and_then(|f| f.storage_class.as_deref())
         .unwrap_or("");
-    if !old_class.is_empty() && new_class != old_class {
-        return AdmissionResponse::from(&req).deny(format!(
-            "spec.filestore.storageClass: cannot change storage class from {:?} to {:?}; \
-             the filestore PVC is immutable after creation",
-            old_class, new_class
-        ));
+    if !old_class.is_empty() && !new_class.is_empty() && old_class != new_class {
+        use crate::crd::odoo_instance::OdooInstancePhase::*;
+        let phase = old.status.as_ref().and_then(|s| s.phase.as_ref());
+        let blocked = matches!(
+            phase,
+            Some(Restoring | Upgrading | BackingUp | MigratingFilestore | Uninitialized)
+        );
+        if blocked {
+            return AdmissionResponse::from(&req).deny(format!(
+                "spec.filestore.storageClass: cannot change storage class while instance is in {} phase",
+                phase.unwrap()
+            ));
+        }
     }
 
     AdmissionResponse::from(&req)
@@ -166,7 +177,11 @@ mod tests {
     use super::*;
     use kube::core::admission::AdmissionRequest;
 
-    fn make_instance_json(db_name: Option<&str>, cluster: Option<&str>) -> serde_json::Value {
+    fn make_instance_json_full(
+        db_name: Option<&str>,
+        cluster: Option<&str>,
+        storage_class: Option<&str>,
+    ) -> serde_json::Value {
         let mut db = serde_json::Map::new();
         if let Some(n) = db_name {
             db.insert("name".into(), serde_json::json!(n));
@@ -181,12 +196,19 @@ mod tests {
         if !db.is_empty() {
             spec["database"] = serde_json::Value::Object(db);
         }
+        if let Some(sc) = storage_class {
+            spec["filestore"] = serde_json::json!({ "storageClass": sc });
+        }
         serde_json::json!({
             "apiVersion": "bemade.org/v1alpha1",
             "kind": "OdooInstance",
             "metadata": { "name": "test", "namespace": "default", "uid": "test-uid" },
             "spec": spec
         })
+    }
+
+    fn make_instance_json(db_name: Option<&str>, cluster: Option<&str>) -> serde_json::Value {
+        make_instance_json_full(db_name, cluster, None)
     }
 
     fn make_update_request(
@@ -208,6 +230,36 @@ mod tests {
                 "userInfo": { "username": "test" },
                 "object": make_instance_json(new_db_name, new_cluster),
                 "oldObject": make_instance_json(old_db_name, old_cluster),
+                "dryRun": false,
+            }
+        });
+        let ar: kube::core::admission::AdmissionReview<OdooInstance> =
+            serde_json::from_value(review).expect("valid AdmissionReview");
+        ar.try_into().expect("valid AdmissionRequest")
+    }
+
+    fn make_sc_change_request(
+        old_class: &str,
+        new_class: &str,
+        old_phase: Option<&str>,
+    ) -> AdmissionRequest<OdooInstance> {
+        let mut old_obj = make_instance_json_full(None, None, Some(old_class));
+        if let Some(phase) = old_phase {
+            old_obj["status"] = serde_json::json!({"phase": phase});
+        }
+        let review: serde_json::Value = serde_json::json!({
+            "apiVersion": "admission.k8s.io/v1",
+            "kind": "AdmissionReview",
+            "request": {
+                "uid": "req-sc",
+                "kind": { "group": "bemade.org", "version": "v1alpha1", "kind": "OdooInstance" },
+                "resource": { "group": "bemade.org", "version": "v1alpha1", "resource": "odooinstances" },
+                "name": "test",
+                "namespace": "default",
+                "operation": "UPDATE",
+                "userInfo": { "username": "test" },
+                "object": make_instance_json_full(None, None, Some(new_class)),
+                "oldObject": old_obj,
                 "dryRun": false,
             }
         });
@@ -249,5 +301,75 @@ mod tests {
         let req = make_update_request(None, Some("pg-cluster-a"), None, Some("pg-cluster-b"));
         let resp = validate(req);
         assert!(!resp.allowed);
+    }
+
+    #[test]
+    fn test_validate_allows_storage_class_change_when_running() {
+        let req = make_sc_change_request("cephfs", "juicefs", Some("Running"));
+        let resp = validate(req);
+        assert!(
+            resp.allowed,
+            "storageClass change should be allowed when Running"
+        );
+    }
+
+    #[test]
+    fn test_validate_allows_storage_class_change_when_stopped() {
+        let req = make_sc_change_request("cephfs", "juicefs", Some("Stopped"));
+        let resp = validate(req);
+        assert!(
+            resp.allowed,
+            "storageClass change should be allowed when Stopped"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_storage_class_change_when_restoring() {
+        let req = make_sc_change_request("cephfs", "juicefs", Some("Restoring"));
+        let resp = validate(req);
+        assert!(
+            !resp.allowed,
+            "storageClass change should be rejected when Restoring"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_storage_class_change_when_upgrading() {
+        let req = make_sc_change_request("cephfs", "juicefs", Some("Upgrading"));
+        let resp = validate(req);
+        assert!(
+            !resp.allowed,
+            "storageClass change should be rejected when Upgrading"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_storage_class_change_when_backing_up() {
+        let req = make_sc_change_request("cephfs", "juicefs", Some("BackingUp"));
+        let resp = validate(req);
+        assert!(
+            !resp.allowed,
+            "storageClass change should be rejected when BackingUp"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_storage_class_change_when_migrating() {
+        let req = make_sc_change_request("cephfs", "juicefs", Some("MigratingFilestore"));
+        let resp = validate(req);
+        assert!(
+            !resp.allowed,
+            "storageClass change should be rejected when already migrating"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_storage_class_change_when_uninitialized() {
+        let req = make_sc_change_request("cephfs", "juicefs", Some("Uninitialized"));
+        let resp = validate(req);
+        assert!(
+            !resp.allowed,
+            "storageClass change should be rejected when Uninitialized"
+        );
     }
 }
