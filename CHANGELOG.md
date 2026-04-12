@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1](https://github.com/bemade/odoo-operator/compare/v1.6.0...v1.6.1) (2026-04-12)
+
+
+### Bug Fixes
+
+* handle FUSE filesystem restrictions in migration rsync ([#60](https://github.com/bemade/odoo-operator/issues/60)) ([779786f](https://github.com/bemade/odoo-operator/commit/779786f477e61e38aa9b2e63d561fe71148fb2b1))
+
 ## [1.6.0](https://github.com/bemade/odoo-operator/compare/v1.5.1...v1.6.0) (2026-04-12)
 
 
