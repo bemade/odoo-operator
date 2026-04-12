@@ -310,5 +310,8 @@ pub struct OdooInstanceStatus {
     pub migration_job_name: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_pv_name: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration_previous_storage_class: Option<String>,
 }
