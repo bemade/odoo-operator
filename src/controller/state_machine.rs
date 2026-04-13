@@ -1180,11 +1180,3 @@ pub async fn scale_deployment(client: &Client, name: &str, ns: &str, replicas: i
 
 use super::states::finalizing_filestore_migration::complete_filestore_migration;
 use super::states::migrating_filestore::{begin_filestore_migration, rollback_filestore_migration};
-
-// The following migration functions are defined in their respective state modules:
-// - begin_filestore_migration      → states/migrating_filestore.rs
-// - rollback_filestore_migration   → states/migrating_filestore.rs
-// - complete_filestore_migration   → states/finalizing_filestore_migration.rs
-// - finalize_filestore_pvc_rebind  → states/finalizing_filestore_migration.rs
-
-// (removed — see state modules above)
