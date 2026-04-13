@@ -294,7 +294,7 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
     }
 
     // Load postgres cluster config.
-    let (_cluster_name, pg_cluster) = load_postgres_cluster(ctx, instance).await?;
+    let (cluster_name, pg_cluster) = load_postgres_cluster(ctx, instance).await?;
 
     // Ensure all child resources (phase-independent infrastructure).
     let oref = controller_owner_ref(instance);
@@ -302,27 +302,38 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
         .await?;
     child_resources::ensure_odoo_user_secret(client, &ns, &name, &oref).await?;
     child_resources::ensure_postgres_role(ctx, instance, &pg_cluster).await?;
-    let is_migrating = matches!(
-        instance.status.as_ref().and_then(|s| s.phase.as_ref()),
+    let current_phase_ref = instance.status.as_ref().and_then(|s| s.phase.as_ref());
+    let is_migrating_filestore = matches!(
+        current_phase_ref,
         Some(
             &OdooInstancePhase::MigratingFilestore
                 | &OdooInstancePhase::FinalizingFilestoreMigration
         )
     );
-    if !is_migrating {
+    // Database migration doesn't need to skip child resource creation —
+    // the state's ensure() handles scaling deployments to 0, and
+    // ensure_deployment/ensure_config_map preserve current replicas and
+    // update connection details (which is desirable for the switchover).
+    if !is_migrating_filestore {
         child_resources::ensure_filestore_pvc(client, &ns, &name, instance, ctx, &oref).await?;
     }
     child_resources::ensure_config_map(client, &ns, &name, instance, &pg_cluster, &oref).await?;
     child_resources::ensure_service(client, &ns, &name, &oref).await?;
     child_resources::ensure_routing(client, &ns, &name, instance, &oref).await?;
-    if !is_migrating {
+    if !is_migrating_filestore {
         child_resources::ensure_deployment(client, &ns, &name, instance, ctx, &oref).await?;
         child_resources::ensure_cron_deployment(client, &ns, &name, instance, ctx, &oref).await?;
     }
 
     // Gather the observed world into a snapshot.
-    let snapshot =
-        super::state_machine::ReconcileSnapshot::gather(client, &ns, &name, instance).await?;
+    let snapshot = super::state_machine::ReconcileSnapshot::gather(
+        client,
+        &ns,
+        &name,
+        instance,
+        &cluster_name,
+    )
+    .await?;
 
     // Ensure report.url points to the in-cluster web service so cron workers
     // can reach the report rendering endpoint (wkhtmltopdf via HTTP).
@@ -356,29 +367,46 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
         .and_then(|s| s.phase.clone())
         .unwrap_or(OdooInstancePhase::Provisioning);
 
+    // Track active cluster — only update when not in a database migration phase.
+    let is_db_migrating = matches!(
+        current_phase_ref,
+        Some(
+            &OdooInstancePhase::MigratingDatabase | &OdooInstancePhase::FinalizingDatabaseMigration
+        )
+    );
+    let active_cluster_changed = !is_db_migrating
+        && instance
+            .status
+            .as_ref()
+            .and_then(|s| s.active_cluster.as_deref())
+            != Some(&cluster_name);
+
     let cur = instance.status.as_ref();
-    let status_changed = !cur.is_some_and(|s| {
-        s.ready_replicas == snapshot.ready_replicas
-            && s.ready == ready
-            && s.url == url
-            && s.target_replicas == Some(instance.spec.replicas)
-            && s.db_initialized == snapshot.db_initialized
-    });
+    let status_changed = active_cluster_changed
+        || !cur.is_some_and(|s| {
+            s.ready_replicas == snapshot.ready_replicas
+                && s.ready == ready
+                && s.url == url
+                && s.target_replicas == Some(instance.spec.replicas)
+                && s.db_initialized == snapshot.db_initialized
+        });
 
     let api: Api<OdooInstance> = Api::namespaced(client.clone(), &ns);
     if status_changed {
         let conditions =
             phase_to_conditions(&current_phase, instance.metadata.generation.unwrap_or(0));
-        let status_patch = json!({
-            "status": {
-                "readyReplicas": snapshot.ready_replicas,
-                "ready": current_phase == OdooInstancePhase::Running,
-                "url": url,
-                "targetReplicas": instance.spec.replicas,
-                "dbInitialized": snapshot.db_initialized,
-                "conditions": conditions,
-            }
+        let mut status_obj = json!({
+            "readyReplicas": snapshot.ready_replicas,
+            "ready": current_phase == OdooInstancePhase::Running,
+            "url": url,
+            "targetReplicas": instance.spec.replicas,
+            "dbInitialized": snapshot.db_initialized,
+            "conditions": conditions,
         });
+        if active_cluster_changed {
+            status_obj["activeCluster"] = json!(cluster_name);
+        }
+        let status_patch = json!({ "status": status_obj });
         api.patch_status(
             &name,
             &PatchParams::apply(FIELD_MANAGER),
@@ -459,8 +487,8 @@ async fn cleanup_instance(instance: &OdooInstance, ctx: &Context) -> Result<Acti
     )
     .await;
 
-    if let Ok((_cluster_name, pg_cluster)) = load_postgres_cluster(ctx, instance).await {
-        let username = odoo_username(&ns, &name);
+    let username = odoo_username(&ns, &name);
+    if let Ok((cluster_name, pg_cluster)) = load_postgres_cluster(ctx, instance).await {
         if let Err(e) = ctx.postgres.delete_role(&pg_cluster, &username).await {
             warn!(%name, %e, "failed to delete postgres role — removing finalizer anyway");
             publish_event(
@@ -472,6 +500,24 @@ async fn cleanup_instance(instance: &OdooInstance, ctx: &Context) -> Result<Acti
                 Some(format!("Failed to delete postgres role: {e}")),
             )
             .await;
+        }
+
+        // If deleted mid-migration, also clean up the old cluster.
+        if let Some(ref old_cluster) = instance
+            .status
+            .as_ref()
+            .and_then(|s| s.migration_previous_cluster.clone())
+        {
+            if old_cluster != &cluster_name {
+                if let Ok(old_pg) = load_postgres_cluster_by_name(ctx, old_cluster).await {
+                    if let Err(e) = ctx.postgres.delete_role(&old_pg, &username).await {
+                        warn!(
+                            %name, %old_cluster, %e,
+                            "failed to delete role on old cluster during cleanup"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -497,6 +543,8 @@ pub fn phase_to_conditions(phase: &OdooInstancePhase, generation: i64) -> Vec<Co
         BackingUp => ("False", "Backup in progress"),
         MigratingFilestore => ("False", "Filestore storage class migration in progress"),
         FinalizingFilestoreMigration => ("False", "Finalizing filestore migration (PVC rebind)"),
+        MigratingDatabase => ("False", "Database cluster migration in progress"),
+        FinalizingDatabaseMigration => ("False", "Finalizing database cluster migration"),
         Error => ("False", "Reconciliation error"),
     };
 
@@ -510,6 +558,8 @@ pub fn phase_to_conditions(phase: &OdooInstancePhase, generation: i64) -> Vec<Co
             | BackingUp
             | MigratingFilestore
             | FinalizingFilestoreMigration
+            | MigratingDatabase
+            | FinalizingDatabaseMigration
     );
 
     let now = Time(chrono::Utc::now());
@@ -538,10 +588,10 @@ pub fn phase_to_conditions(phase: &OdooInstancePhase, generation: i64) -> Vec<Co
 
 // ── Postgres cluster config loading ───────────────────────────────────────────
 
-async fn load_postgres_cluster(
+/// Load all cluster configs from the postgres-clusters Secret.
+async fn load_all_postgres_clusters(
     ctx: &Context,
-    instance: &OdooInstance,
-) -> Result<(String, PostgresClusterConfig)> {
+) -> Result<BTreeMap<String, PostgresClusterConfig>> {
     let secret_name = if ctx.postgres_clusters_secret.is_empty() {
         "postgres-clusters"
     } else {
@@ -559,7 +609,15 @@ async fn load_postgres_cluster(
         .get("clusters.yaml")
         .ok_or_else(|| Error::config("postgres-clusters secret missing clusters.yaml key"))?;
     let yaml_str = String::from_utf8_lossy(&raw.0);
-    let clusters: BTreeMap<String, PostgresClusterConfig> = serde_yaml::from_str(&yaml_str)?;
+    Ok(serde_yaml::from_str(&yaml_str)?)
+}
+
+/// Resolve the postgres cluster for the given instance (spec.database.cluster or default).
+pub async fn load_postgres_cluster(
+    ctx: &Context,
+    instance: &OdooInstance,
+) -> Result<(String, PostgresClusterConfig)> {
+    let clusters = load_all_postgres_clusters(ctx).await?;
 
     // If spec.database.cluster is set, use it directly.
     if let Some(ref db) = instance.spec.database {
@@ -580,7 +638,25 @@ async fn load_postgres_cluster(
         }
     }
 
+    let secret_name = if ctx.postgres_clusters_secret.is_empty() {
+        "postgres-clusters"
+    } else {
+        &ctx.postgres_clusters_secret
+    };
     Err(Error::config(format!(
         "no default postgres cluster configured in {secret_name} secret"
     )))
+}
+
+/// Load a specific postgres cluster by name (for migration actions that need
+/// the old cluster config).
+pub async fn load_postgres_cluster_by_name(
+    ctx: &Context,
+    cluster_name: &str,
+) -> Result<PostgresClusterConfig> {
+    let clusters = load_all_postgres_clusters(ctx).await?;
+    clusters
+        .get(cluster_name)
+        .cloned()
+        .ok_or_else(|| Error::config(format!("postgres cluster {cluster_name:?} not found")))
 }

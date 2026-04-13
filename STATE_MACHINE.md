@@ -25,6 +25,8 @@ stateDiagram-v2
     Starting --> BackingUp : [backup_job present]
     Starting --> Running : [ready >= desired]
 
+    Running --> MigratingFilestore : [storage_class_mismatch] / BeginFilestoreMigration
+    Running --> MigratingDatabase : [cluster_mismatch] / BeginDatabaseMigration
     Running --> Stopped : [replicas == 0]
     Running --> Restoring : [restore_job present]
     Running --> Upgrading : [upgrade_job ready]
@@ -32,6 +34,8 @@ stateDiagram-v2
     Running --> Degraded : [ready < desired && ready > 0]
     Running --> Starting : [ready == 0]
 
+    Degraded --> MigratingFilestore : [storage_class_mismatch] / BeginFilestoreMigration
+    Degraded --> MigratingDatabase : [cluster_mismatch] / BeginDatabaseMigration
     Degraded --> Stopped : [replicas == 0]
     Degraded --> Restoring : [restore_job present]
     Degraded --> Upgrading : [upgrade_job ready]
@@ -60,9 +64,25 @@ stateDiagram-v2
     Restoring --> Starting : [restore_job failed] / FailRestoreJob
     Restoring --> Starting : [restore_job absent]
 
+    Stopped --> MigratingFilestore : [storage_class_mismatch] / BeginFilestoreMigration
+    Stopped --> MigratingDatabase : [cluster_mismatch] / BeginDatabaseMigration
     Stopped --> Restoring : [restore_job present]
     Stopped --> Upgrading : [upgrade_job ready]
     Stopped --> Starting : [replicas > 0]
+
+    MigratingFilestore --> FinalizingFilestoreMigration : [migration_job succeeded] / CompleteFilestoreMigration
+    MigratingFilestore --> Starting : [migration_job failed/absent && replicas > 0] / RollbackFilestoreMigration
+    MigratingFilestore --> Stopped : [migration_job failed/absent && replicas == 0] / RollbackFilestoreMigration
+
+    FinalizingFilestoreMigration --> Starting : [pvc rebound && replicas > 0] / ClearFilestoreMigrationStatus
+    FinalizingFilestoreMigration --> Stopped : [pvc rebound && replicas == 0] / ClearFilestoreMigrationStatus
+
+    MigratingDatabase --> FinalizingDatabaseMigration : [db_migration_job succeeded] / CompleteDatabaseMigration
+    MigratingDatabase --> Starting : [db_migration_job failed/absent && replicas > 0] / RollbackDatabaseMigration
+    MigratingDatabase --> Stopped : [db_migration_job failed/absent && replicas == 0] / RollbackDatabaseMigration
+
+    FinalizingDatabaseMigration --> Starting : [cluster switched && replicas > 0] / ClearDatabaseMigrationStatus
+    FinalizingDatabaseMigration --> Stopped : [cluster switched && replicas == 0] / ClearDatabaseMigrationStatus
 
     Error --> Starting : [db_initialized]
     Error --> Uninitialized : [!db_initialized]

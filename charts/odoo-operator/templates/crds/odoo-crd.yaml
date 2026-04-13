@@ -818,6 +818,9 @@ spec:
             description: OdooInstanceStatus defines the observed state of OdooInstance.
             nullable: true
             properties:
+              activeCluster:
+                nullable: true
+                type: string
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
@@ -853,6 +856,9 @@ spec:
               dbInitialized:
                 default: false
                 type: boolean
+              dbMigrationJobName:
+                nullable: true
+                type: string
               lastBackup:
                 nullable: true
                 type: string
@@ -860,6 +866,9 @@ spec:
                 nullable: true
                 type: string
               migrationJobName:
+                nullable: true
+                type: string
+              migrationPreviousCluster:
                 nullable: true
                 type: string
               migrationPreviousStorageClass:
@@ -884,6 +893,8 @@ spec:
                 - BackingUp
                 - MigratingFilestore
                 - FinalizingFilestoreMigration
+                - MigratingDatabase
+                - FinalizingDatabaseMigration
                 - Error
                 nullable: true
                 type: string

@@ -103,15 +103,19 @@ release-patch release-minor release-major:
 	git push origin HEAD "v$(VERSION)"
 	@echo "Done — CI will build and publish v$(VERSION)."
 
+KUBE_CONTEXT ?= minikube
+KUBECTL := kubectl --context=$(KUBE_CONTEXT)
+
 install: docker-build helm-crds
-	kubectl scale deployment/odoo-operator -n odoo-operator --replicas=0
-	kubectl rollout status deployment/odoo-operator -n odoo-operator --timeout=60s || true
+	$(KUBECTL) scale deployment/odoo-operator -n odoo-operator --replicas=0
+	$(KUBECTL) rollout status deployment/odoo-operator -n odoo-operator --timeout=60s || true
 
 	docker build --no-cache -t registry.bemade.org/bemade/odoo-operator:local-dev .
 	minikube image load --overwrite=true registry.bemade.org/bemade/odoo-operator:local-dev
 
 	helm upgrade odoo-operator "charts/odoo-operator" \
 	--namespace odoo-operator \
+	--kube-context=$(KUBE_CONTEXT) \
 	-f "testing/helm/values.yaml"
 
-	kubectl rollout status deployment/odoo-operator -n odoo-operator --timeout=120s
+	$(KUBECTL) rollout status deployment/odoo-operator -n odoo-operator --timeout=120s

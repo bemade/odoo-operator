@@ -2,12 +2,10 @@
 //!
 //! Rejects updates that would:
 //! - Decrease filestore storage size (PVCs cannot shrink)
-//! - Change the postgres cluster (migration not implemented)
 //!
-//! StorageClass changes are allowed — the operator handles migration
-//! automatically via the MigratingFilestore phase.  Changes are rejected
-//! during unsafe phases (Restoring, Upgrading, BackingUp, MigratingFilestore,
-//! Uninitialized).
+//! StorageClass and database cluster changes are allowed — the operator
+//! handles migration automatically.  Changes are rejected during unsafe
+//! phases (Restoring, Upgrading, BackingUp, migrating phases, Uninitialized).
 
 use kube::core::admission::{AdmissionRequest, AdmissionResponse, AdmissionReview};
 use tracing::{info, warn};
@@ -71,7 +69,8 @@ fn validate(req: AdmissionRequest<OdooInstance>) -> AdmissionResponse {
         }
     }
 
-    // 2. Reject database cluster changes — cluster migration is not yet implemented.
+    // 2. Reject database cluster changes during unsafe phases.
+    //    Allow rollback: changing back to the previous cluster stored in status.
     let old_cluster = old
         .spec
         .database
@@ -84,11 +83,34 @@ fn validate(req: AdmissionRequest<OdooInstance>) -> AdmissionResponse {
         .as_ref()
         .and_then(|d| d.cluster.as_deref())
         .unwrap_or("");
-    if !old_cluster.is_empty() && new_cluster != old_cluster {
-        return AdmissionResponse::from(&req).deny(format!(
-            "spec.database.cluster: changing the postgres cluster from {:?} to {:?} is not supported",
-            old_cluster, new_cluster
-        ));
+    if !old_cluster.is_empty() && !new_cluster.is_empty() && new_cluster != old_cluster {
+        use crate::crd::odoo_instance::OdooInstancePhase::*;
+        let phase = old.status.as_ref().and_then(|s| s.phase.as_ref());
+        let prev_cluster = old
+            .status
+            .as_ref()
+            .and_then(|s| s.migration_previous_cluster.as_deref());
+        let is_rollback = prev_cluster.is_some_and(|c| c == new_cluster);
+        let blocked = !is_rollback
+            && matches!(
+                phase,
+                Some(
+                    Restoring
+                        | Upgrading
+                        | BackingUp
+                        | MigratingFilestore
+                        | FinalizingFilestoreMigration
+                        | MigratingDatabase
+                        | FinalizingDatabaseMigration
+                        | Uninitialized,
+                )
+            );
+        if blocked {
+            return AdmissionResponse::from(&req).deny(format!(
+                "spec.database.cluster: cannot change cluster while instance is in {} phase",
+                phase.unwrap()
+            ));
+        }
     }
 
     // 3. Reject storageClass changes when the instance is in an unsafe phase.
@@ -295,6 +317,36 @@ mod tests {
         ar.try_into().expect("valid AdmissionRequest")
     }
 
+    fn make_cluster_change_request(
+        old_cluster: &str,
+        new_cluster: &str,
+        old_phase: Option<&str>,
+    ) -> AdmissionRequest<OdooInstance> {
+        let mut old_obj = make_instance_json(None, Some(old_cluster));
+        if let Some(phase) = old_phase {
+            old_obj["status"] = serde_json::json!({"phase": phase});
+        }
+        let review: serde_json::Value = serde_json::json!({
+            "apiVersion": "admission.k8s.io/v1",
+            "kind": "AdmissionReview",
+            "request": {
+                "uid": "req-cluster",
+                "kind": { "group": "bemade.org", "version": "v1alpha1", "kind": "OdooInstance" },
+                "resource": { "group": "bemade.org", "version": "v1alpha1", "resource": "odooinstances" },
+                "name": "test",
+                "namespace": "default",
+                "operation": "UPDATE",
+                "userInfo": { "username": "test" },
+                "object": make_instance_json(None, Some(new_cluster)),
+                "oldObject": old_obj,
+                "dryRun": false,
+            }
+        });
+        let ar: kube::core::admission::AdmissionReview<OdooInstance> =
+            serde_json::from_value(review).expect("valid AdmissionReview");
+        ar.try_into().expect("valid AdmissionRequest")
+    }
+
     #[test]
     fn test_parse_quantity() {
         assert_eq!(parse_quantity("2Gi").unwrap(), 2 * 1024 * 1024 * 1024);
@@ -324,10 +376,33 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rejects_cluster_change() {
+    fn test_validate_allows_cluster_change_when_running() {
         let req = make_update_request(None, Some("pg-cluster-a"), None, Some("pg-cluster-b"));
         let resp = validate(req);
-        assert!(!resp.allowed);
+        assert!(
+            resp.allowed,
+            "cluster change should be allowed (no phase = safe state)"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_cluster_change_when_restoring() {
+        let req = make_cluster_change_request("pg-a", "pg-b", Some("Restoring"));
+        let resp = validate(req);
+        assert!(
+            !resp.allowed,
+            "cluster change should be rejected when Restoring"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_cluster_change_when_migrating_db() {
+        let req = make_cluster_change_request("pg-a", "pg-b", Some("MigratingDatabase"));
+        let resp = validate(req);
+        assert!(
+            !resp.allowed,
+            "cluster change should be rejected when already migrating"
+        );
     }
 
     #[test]
