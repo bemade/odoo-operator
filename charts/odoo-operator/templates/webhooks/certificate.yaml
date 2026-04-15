@@ -9,5 +9,5 @@ spec:
     - {{ .Release.Name }}-webhook.{{ .Release.Namespace }}.svc.cluster.local
   issuerRef:
     kind: Issuer
-    name: {{ .Release.Name }}-selfsigned-issuer
+    name: {{ .Release.Name }}-ca-issuer
   secretName: {{ .Release.Name }}-webhook-cert

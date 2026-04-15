@@ -3,7 +3,7 @@ kind: ValidatingWebhookConfiguration
 metadata:
   name: {{ .Release.Name }}-validating-webhook
   annotations:
-    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ .Release.Name }}-webhook-cert
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ .Release.Name }}-webhook-ca
 webhooks:
   - name: vodooinstance.kb.io
     admissionReviewVersions: ["v1"]
