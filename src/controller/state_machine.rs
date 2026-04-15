@@ -90,6 +90,10 @@ pub struct ReconcileSnapshot {
     pub storage_class_mismatch: bool,
     pub actual_storage_class: Option<String>,
     pub migration_job: JobStatus,
+
+    // ── Database migration ────────────────────────────────────────────
+    pub cluster_mismatch: bool,
+    pub db_migration_job: JobStatus,
 }
 
 impl ReconcileSnapshot {
@@ -111,6 +115,7 @@ impl ReconcileSnapshot {
         ns: &str,
         instance_name: &str,
         instance: &OdooInstance,
+        desired_cluster: &str,
     ) -> Result<Self> {
         let db_initialized = instance
             .status
@@ -328,6 +333,42 @@ impl ReconcileSnapshot {
             }
         };
 
+        // ── Database cluster mismatch detection ──────────────────────
+        let cluster_mismatch = instance
+            .status
+            .as_ref()
+            .and_then(|s| s.active_cluster.as_deref())
+            .map(|active| active != desired_cluster)
+            .unwrap_or(false);
+
+        // ── Database migration job status ───────────────────────────
+        let db_migration_job = {
+            let job_name = instance
+                .status
+                .as_ref()
+                .and_then(|s| s.db_migration_job_name.clone());
+            let status = match job_name {
+                Some(ref name) => match jobs_api.get(name).await {
+                    Ok(job) => {
+                        let succeeded =
+                            job.status.as_ref().and_then(|s| s.succeeded).unwrap_or(0) > 0;
+                        let failed = job.status.as_ref().and_then(|s| s.failed).unwrap_or(0) > 0;
+                        if succeeded {
+                            JobStatus::Succeeded
+                        } else if failed {
+                            JobStatus::Failed
+                        } else {
+                            JobStatus::Active
+                        }
+                    }
+                    Err(kube::Error::Api(ref err)) if err.code == 404 => JobStatus::Absent,
+                    Err(_) => JobStatus::Active,
+                },
+                None => JobStatus::Absent,
+            };
+            status
+        };
+
         Ok(Self {
             ready_replicas,
             deployment_replicas,
@@ -345,6 +386,8 @@ impl ReconcileSnapshot {
             storage_class_mismatch,
             actual_storage_class,
             migration_job,
+            cluster_mismatch,
+            db_migration_job,
         })
     }
 }
@@ -409,6 +452,10 @@ pub enum TransitionAction {
     CompleteFilestoreMigration,
     ClearFilestoreMigrationStatus,
     RollbackFilestoreMigration,
+    BeginDatabaseMigration,
+    CompleteDatabaseMigration,
+    ClearDatabaseMigrationStatus,
+    RollbackDatabaseMigration,
 }
 
 pub async fn execute_action(
@@ -594,6 +641,18 @@ pub async fn execute_action(
         RollbackFilestoreMigration => {
             rollback_filestore_migration(instance, ctx).await?;
         }
+        BeginDatabaseMigration => {
+            begin_database_migration(instance, ctx).await?;
+        }
+        CompleteDatabaseMigration => {
+            complete_database_migration(instance, ctx).await?;
+        }
+        ClearDatabaseMigrationStatus => {
+            clear_database_migration_status(instance, ctx).await?;
+        }
+        RollbackDatabaseMigration => {
+            rollback_database_migration(instance, ctx).await?;
+        }
     }
     Ok(())
 }
@@ -738,6 +797,13 @@ pub static TRANSITIONS: &[Transition] = &[
     },
     Transition {
         from: Running,
+        to: MigratingDatabase,
+        guard: |_, s| s.cluster_mismatch,
+        guard_name: "cluster_mismatch",
+        actions: &[TransitionAction::BeginDatabaseMigration],
+    },
+    Transition {
+        from: Running,
         to: Stopped,
         guard: |i, _| i.spec.replicas == 0,
         guard_name: "replicas == 0",
@@ -785,6 +851,13 @@ pub static TRANSITIONS: &[Transition] = &[
         guard: |_, s| s.storage_class_mismatch,
         guard_name: "storage_class_mismatch",
         actions: &[TransitionAction::BeginFilestoreMigration],
+    },
+    Transition {
+        from: Degraded,
+        to: MigratingDatabase,
+        guard: |_, s| s.cluster_mismatch,
+        guard_name: "cluster_mismatch",
+        actions: &[TransitionAction::BeginDatabaseMigration],
     },
     Transition {
         from: Degraded,
@@ -981,6 +1054,13 @@ pub static TRANSITIONS: &[Transition] = &[
     },
     Transition {
         from: Stopped,
+        to: MigratingDatabase,
+        guard: |_, s| s.cluster_mismatch,
+        guard_name: "cluster_mismatch",
+        actions: &[TransitionAction::BeginDatabaseMigration],
+    },
+    Transition {
+        from: Stopped,
         to: Restoring,
         guard: |_, s| s.restore_job.is_present(),
         guard_name: "restore_job present",
@@ -1043,6 +1123,50 @@ pub static TRANSITIONS: &[Transition] = &[
         guard: |i, s| !s.storage_class_mismatch && i.spec.replicas == 0,
         guard_name: "pvc rebound && replicas == 0",
         actions: &[TransitionAction::ClearFilestoreMigrationStatus],
+    },
+    // ── MigratingDatabase ──────────────────────────────────
+    // pg_dump|pg_restore succeeded — switch over to new cluster.
+    Transition {
+        from: MigratingDatabase,
+        to: FinalizingDatabaseMigration,
+        guard: |_, s| s.db_migration_job == Succeeded,
+        guard_name: "db_migration_job succeeded",
+        actions: &[TransitionAction::CompleteDatabaseMigration],
+    },
+    // Job failed or lost — rollback to previous cluster.
+    Transition {
+        from: MigratingDatabase,
+        to: Starting,
+        guard: |i, s| {
+            (s.db_migration_job == Failed || s.db_migration_job == Absent) && i.spec.replicas > 0
+        },
+        guard_name: "db_migration_job failed/absent && replicas > 0",
+        actions: &[TransitionAction::RollbackDatabaseMigration],
+    },
+    Transition {
+        from: MigratingDatabase,
+        to: Stopped,
+        guard: |i, s| {
+            (s.db_migration_job == Failed || s.db_migration_job == Absent) && i.spec.replicas == 0
+        },
+        guard_name: "db_migration_job failed/absent && replicas == 0",
+        actions: &[TransitionAction::RollbackDatabaseMigration],
+    },
+    // ── FinalizingDatabaseMigration ────────────────────────
+    // activeCluster updated (no mismatch) — clear status and start up.
+    Transition {
+        from: FinalizingDatabaseMigration,
+        to: Starting,
+        guard: |i, s| !s.cluster_mismatch && i.spec.replicas > 0,
+        guard_name: "cluster switched && replicas > 0",
+        actions: &[TransitionAction::ClearDatabaseMigrationStatus],
+    },
+    Transition {
+        from: FinalizingDatabaseMigration,
+        to: Stopped,
+        guard: |i, s| !s.cluster_mismatch && i.spec.replicas == 0,
+        guard_name: "cluster switched && replicas == 0",
+        actions: &[TransitionAction::ClearDatabaseMigrationStatus],
     },
     // ── Error ───────────────────────────────────────────────
     Transition {
@@ -1132,7 +1256,9 @@ fn requeue_for(phase: &OdooInstancePhase, snapshot: &ReconcileSnapshot) -> Actio
         | BackingUp
         | Degraded
         | MigratingFilestore
-        | FinalizingFilestoreMigration => Action::requeue(Duration::from_secs(10)),
+        | FinalizingFilestoreMigration
+        | MigratingDatabase
+        | FinalizingDatabaseMigration => Action::requeue(Duration::from_secs(10)),
         _ => Action::await_change(),
     }
 }
@@ -1180,3 +1306,10 @@ pub async fn scale_deployment(client: &Client, name: &str, ns: &str, replicas: i
 
 use super::states::finalizing_filestore_migration::complete_filestore_migration;
 use super::states::migrating_filestore::{begin_filestore_migration, rollback_filestore_migration};
+
+// ── Database migration actions ───────────────────────────────────────────
+
+use super::states::finalizing_database_migration::{
+    clear_database_migration_status, complete_database_migration,
+};
+use super::states::migrating_database::{begin_database_migration, rollback_database_migration};

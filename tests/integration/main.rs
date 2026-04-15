@@ -15,6 +15,7 @@ mod child_resources;
 mod degraded;
 mod finalizer;
 mod init_job;
+mod migrate_database;
 mod migrate_filestore;
 mod orphaned_jobs;
 mod restore_job;

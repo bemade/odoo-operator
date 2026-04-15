@@ -75,6 +75,12 @@ jobs:
           git config user.name "$GITHUB_ACTOR"
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
 
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Regenerate CRDs
+        run: make helm-crds
+
       - name: Install Helm
         uses: azure/setup-helm@v4
 

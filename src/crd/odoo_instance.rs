@@ -251,6 +251,8 @@ pub enum OdooInstancePhase {
     BackingUp,
     MigratingFilestore,
     FinalizingFilestoreMigration,
+    MigratingDatabase,
+    FinalizingDatabaseMigration,
     Error,
 }
 
@@ -270,6 +272,8 @@ impl std::fmt::Display for OdooInstancePhase {
             Self::BackingUp => "BackingUp",
             Self::MigratingFilestore => "MigratingFilestore",
             Self::FinalizingFilestoreMigration => "FinalizingFilestoreMigration",
+            Self::MigratingDatabase => "MigratingDatabase",
+            Self::FinalizingDatabaseMigration => "FinalizingDatabaseMigration",
             Self::Error => "Error",
         };
         write!(f, "{s}")
@@ -316,4 +320,14 @@ pub struct OdooInstanceStatus {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration_previous_storage_class: Option<String>,
+
+    // ── Database migration ──────────────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_cluster: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_migration_job_name: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_previous_cluster: Option<String>,
 }

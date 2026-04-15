@@ -14,9 +14,11 @@ use super::state_machine::ReconcileSnapshot;
 mod backing_up;
 mod degraded;
 mod error;
+pub(crate) mod finalizing_database_migration;
 pub(crate) mod finalizing_filestore_migration;
 mod init_failed;
 mod initializing;
+pub(crate) mod migrating_database;
 pub(crate) mod migrating_filestore;
 mod provisioning;
 mod restoring;
@@ -29,9 +31,11 @@ mod upgrading;
 pub use backing_up::BackingUp;
 pub use degraded::Degraded;
 pub use error::Error;
+pub use finalizing_database_migration::FinalizingDatabaseMigration;
 pub use finalizing_filestore_migration::FinalizingFilestoreMigration;
 pub use init_failed::InitFailed;
 pub use initializing::Initializing;
+pub use migrating_database::MigratingDatabase;
 pub use migrating_filestore::MigratingFilestore;
 pub use provisioning::Provisioning;
 pub use restoring::Restoring;
@@ -64,6 +68,8 @@ pub fn state_for(phase: &OdooInstancePhase) -> &'static dyn State {
         OdooInstancePhase::InitFailed => &InitFailed,
         OdooInstancePhase::MigratingFilestore => &MigratingFilestore,
         OdooInstancePhase::FinalizingFilestoreMigration => &FinalizingFilestoreMigration,
+        OdooInstancePhase::MigratingDatabase => &MigratingDatabase,
+        OdooInstancePhase::FinalizingDatabaseMigration => &FinalizingDatabaseMigration,
         OdooInstancePhase::Starting => &Starting,
         OdooInstancePhase::Running => &Running,
         OdooInstancePhase::Degraded => &Degraded,
