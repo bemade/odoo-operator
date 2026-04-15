@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.7.0](https://github.com/bemade/odoo-operator/compare/v1.6.5...v1.7.0) (2026-04-15)
+
+
+### Features
+
+* add database cluster migration (MigratingDatabase / FinalizingDatabaseMigration) ([3fc5a59](https://github.com/bemade/odoo-operator/commit/3fc5a59b28b3e858f687c1b63828580ef8abd5a0))
+* database cluster migration ([de9d00b](https://github.com/bemade/odoo-operator/commit/de9d00be4786d1f3e05c3b1c35f27393aef8c267))
+
+
+### Bug Fixes
+
+* regenerate CRDs during release chart job ([74e5b54](https://github.com/bemade/odoo-operator/commit/74e5b5432c3385c35fb2ba0a578b637311d05f97)), closes [#55](https://github.com/bemade/odoo-operator/issues/55)
+* use proper issuer for self-signed cert and CA injection ([9283d90](https://github.com/bemade/odoo-operator/commit/9283d9047dc6653ed25c0ddd191c4b039995890a))
+* use proper issuer for self-signed cert and CA injection ([c9844f8](https://github.com/bemade/odoo-operator/commit/c9844f8177efeb39dca141c1f631347a1dabf017))
+
 ## [1.6.5](https://github.com/bemade/odoo-operator/compare/v1.6.4...v1.6.5) (2026-04-13)
 
 
