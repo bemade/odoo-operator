@@ -1,6 +1,6 @@
 [package]
 name = "odoo-operator"
-version = "1.6.5"
+version = "1.7.0"
 edition = "2021"
 license = "LGPL-3.0-or-later"
 authors = ["Marc Durepos <marc@bemade.org>"]
