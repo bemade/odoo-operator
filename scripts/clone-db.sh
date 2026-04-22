@@ -39,18 +39,25 @@ PGPASSWORD=$TGT_PASSWORD createdb -h "$TGT_HOST" -p "$TGT_PORT" \
 # --no-owner / --no-acl drop ownership & ACL statements (roles from the
 # source cluster rarely exist on the target).
 #
-# Plain-SQL format (-Fp) + sed filter + psql ON_ERROR_STOP, mirroring the
-# restore.sh path.  The alternative (custom format + pg_restore) has two
-# problems:
+# Plain-SQL format (-Fp) + sed filter + psql ON_ERROR_STOP, mirroring
+# the restore.sh path.  The alternative (custom format + pg_restore)
+# has two problems:
 #   1. pg_restore --jobs doesn't accept stdin, so no parallel restore;
-#   2. Custom format carries pg-client-version SET statements (notably
-#      `SET transaction_timeout = 0` from pg_dump 17+) that older
-#      target servers reject as "unrecognized configuration parameter".
-#      We can't sed-filter a binary format.
+#   2. Custom format carries pg-client-version SET statements in its
+#      preamble (notably `SET transaction_timeout = 0` from pg_dump
+#      17+) that are rejected as "unrecognized configuration parameter"
+#      by any Postgres server older than the pg_dump client — whether
+#      that server is the source, the target, or a single cluster
+#      serving as both.  The odoo image ships newer pg_dump tools than
+#      older server builds, so the mismatch triggers against any
+#      pre-PG17 server.  We can't sed-filter a binary format, so we
+#      go through plain SQL.
 #
 # sed filter patterns match complete single-line statements (pg_dump
 # emits these forms on one line, terminated with ;).  The extra
-# `SET transaction_timeout` match strips the PG17 incompatibility.
+# `SET transaction_timeout` match strips the client-vs-server
+# incompatibility without impact on newer servers (which would have
+# executed the SET harmlessly).
 echo "=== Streaming pg_dump | psql ==="
 PGPASSWORD=$SRC_PASSWORD pg_dump \
     -h "$SRC_HOST" -p "$SRC_PORT" -U "$SRC_USER" \
