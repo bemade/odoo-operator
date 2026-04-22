@@ -70,6 +70,15 @@ define helm-crd-inject
 	  $(1) > $(2)
 endef
 
+# helm-crd-inject-new is used for CRDs that never existed in the Kopf
+# operator — no legacy v1 shim, just the keep annotation.
+# $(1) = source, $(2) = destination
+define helm-crd-inject-new
+	sed \
+	  -e '/^metadata:$$/a\  annotations:\n    helm.sh/resource-policy: keep' \
+	  $(1) > $(2)
+endef
+
 ## Generate CRDs from Rust types and sync into the Helm chart with legacy v1 shim.
 helm-crds: crds
 	@mkdir -p "$(HELM_CHART_DIR)"
@@ -78,6 +87,7 @@ helm-crds: crds
 	$(call helm-crd-inject,$(CRD_OUT_DIR)/backupjob-crd.yaml,$(HELM_CHART_DIR)/backupjob-crd.yaml,odoo-operator.v1LegacyVersion)
 	$(call helm-crd-inject,$(CRD_OUT_DIR)/restorejob-crd.yaml,$(HELM_CHART_DIR)/restorejob-crd.yaml,odoo-operator.v1LegacyVersion)
 	$(call helm-crd-inject,$(CRD_OUT_DIR)/upgradejob-crd.yaml,$(HELM_CHART_DIR)/upgradejob-crd.yaml,odoo-operator.v1LegacyVersion)
+	$(call helm-crd-inject-new,$(CRD_OUT_DIR)/stagingrefreshjob-crd.yaml,$(HELM_CHART_DIR)/stagingrefreshjob-crd.yaml)
 	@echo "CRDs synced to $(HELM_CHART_DIR)"
 
 ## Regenerate STATE_MACHINE.md from the TRANSITIONS table in code.

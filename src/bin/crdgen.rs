@@ -7,7 +7,8 @@
 use kube::CustomResourceExt;
 use odoo_operator::crd::{
     odoo_backup_job::OdooBackupJob, odoo_init_job::OdooInitJob, odoo_instance::OdooInstance,
-    odoo_restore_job::OdooRestoreJob, odoo_upgrade_job::OdooUpgradeJob,
+    odoo_restore_job::OdooRestoreJob, odoo_staging_refresh_job::OdooStagingRefreshJob,
+    odoo_upgrade_job::OdooUpgradeJob,
 };
 use std::path::PathBuf;
 
@@ -37,6 +38,10 @@ fn main() {
         (
             "upgradejob-crd.yaml",
             serde_yaml::to_string(&OdooUpgradeJob::crd()).unwrap(),
+        ),
+        (
+            "stagingrefreshjob-crd.yaml",
+            serde_yaml::to_string(&OdooStagingRefreshJob::crd()).unwrap(),
         ),
     ];
 

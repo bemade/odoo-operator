@@ -33,6 +33,8 @@ fn action_name(a: &TransitionAction) -> &'static str {
         TransitionAction::FailInitJob => "FailInitJob",
         TransitionAction::CompleteRestoreJob => "CompleteRestoreJob",
         TransitionAction::FailRestoreJob => "FailRestoreJob",
+        TransitionAction::CompleteRefreshJob => "CompleteRefreshJob",
+        TransitionAction::FailRefreshJob => "FailRefreshJob",
         TransitionAction::CompleteUpgradeJob => "CompleteUpgradeJob",
         TransitionAction::FailUpgradeJob => "FailUpgradeJob",
         TransitionAction::CompleteBackupJob => "CompleteBackupJob",

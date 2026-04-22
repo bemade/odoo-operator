@@ -12,6 +12,7 @@ use super::odoo_instance::Context;
 use super::state_machine::ReconcileSnapshot;
 
 mod backing_up;
+mod cloning_from_source;
 mod degraded;
 mod error;
 pub(crate) mod finalizing_database_migration;
@@ -29,6 +30,7 @@ mod uninitialized;
 mod upgrading;
 
 pub use backing_up::BackingUp;
+pub use cloning_from_source::CloningFromSource;
 pub use degraded::Degraded;
 pub use error::Error;
 pub use finalizing_database_migration::FinalizingDatabaseMigration;
@@ -77,6 +79,7 @@ pub fn state_for(phase: &OdooInstancePhase) -> &'static dyn State {
         OdooInstancePhase::Upgrading => &Upgrading,
         OdooInstancePhase::Restoring => &Restoring,
         OdooInstancePhase::BackingUp => &BackingUp,
+        OdooInstancePhase::CloningFromSource => &CloningFromSource,
         OdooInstancePhase::Error => &Error,
     }
 }

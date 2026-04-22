@@ -11,6 +11,7 @@ stateDiagram-v2
 
     Uninitialized --> Initializing : [init_job present]
     Uninitialized --> Restoring : [restore_job present]
+    Uninitialized --> CloningFromSource : [refresh_job present]
 
     Initializing --> Starting : [init_job succeeded] / CompleteInitJob, MarkDbInitialized
     Initializing --> InitFailed : [init_job failed] / FailInitJob
@@ -18,9 +19,11 @@ stateDiagram-v2
 
     InitFailed --> Initializing : [init_job present]
     InitFailed --> Restoring : [restore_job present]
+    InitFailed --> CloningFromSource : [refresh_job present]
 
     Starting --> Stopped : [replicas == 0]
     Starting --> Restoring : [restore_job present]
+    Starting --> CloningFromSource : [refresh_job present]
     Starting --> Upgrading : [upgrade_job ready]
     Starting --> BackingUp : [backup_job present]
     Starting --> Running : [ready >= desired]
@@ -29,6 +32,7 @@ stateDiagram-v2
     Running --> MigratingDatabase : [cluster_mismatch] / BeginDatabaseMigration
     Running --> Stopped : [replicas == 0]
     Running --> Restoring : [restore_job present]
+    Running --> CloningFromSource : [refresh_job present]
     Running --> Upgrading : [upgrade_job ready]
     Running --> BackingUp : [backup_job present]
     Running --> Degraded : [ready < desired && ready > 0]
@@ -38,6 +42,7 @@ stateDiagram-v2
     Degraded --> MigratingDatabase : [cluster_mismatch] / BeginDatabaseMigration
     Degraded --> Stopped : [replicas == 0]
     Degraded --> Restoring : [restore_job present]
+    Degraded --> CloningFromSource : [refresh_job present]
     Degraded --> Upgrading : [upgrade_job ready]
     Degraded --> BackingUp : [backup_job present]
     Degraded --> Running : [ready >= desired]
@@ -58,6 +63,10 @@ stateDiagram-v2
     BackingUp --> Starting : [backup absent && ready == 0]
     BackingUp --> Stopped : [backup absent && replicas == 0]
 
+    CloningFromSource --> Starting : [refresh_job succeeded] / CompleteRefreshJob, MarkDbInitialized
+    CloningFromSource --> InitFailed : [refresh_job failed] / FailRefreshJob
+    CloningFromSource --> Uninitialized : [refresh_job absent]
+
     Upgrading --> Starting : [upgrade_job succeeded] / CompleteUpgradeJob
     Upgrading --> Starting : [upgrade_job failed] / FailUpgradeJob
     Upgrading --> Starting : [upgrade_job absent]
@@ -69,6 +78,7 @@ stateDiagram-v2
     Stopped --> MigratingFilestore : [storage_class_mismatch] / BeginFilestoreMigration
     Stopped --> MigratingDatabase : [cluster_mismatch] / BeginDatabaseMigration
     Stopped --> Restoring : [restore_job present]
+    Stopped --> CloningFromSource : [refresh_job present]
     Stopped --> Upgrading : [upgrade_job ready]
     Stopped --> Starting : [replicas > 0]
 
