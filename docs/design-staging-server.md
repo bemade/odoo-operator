@@ -80,6 +80,15 @@ Postgres reachability domain.
 Then runs the standard neutralize + mail-server verification from
 `restore.sh`.
 
+*Known tradeoff for a future revisit:* the pure pipe keeps `pg_dump`
+single-threaded (parallel dump requires `--format=directory`, which
+needs a staging dir instead of stdout).  For Odoo's typical 500–1500
+tables this can make the dump side the bottleneck.  If we measure
+that this actually hurts, the upgrade path is to add an `emptyDir`
+(tmpfs-backed) on the Job pod and run parallel dump → parallel
+restore through it.  Not doing that preemptively — start with the
+pipe, readjust if the data says so.
+
 **Alternatives considered and rejected:**
 
 - **CNPG `Backup` / `Recovery`** — filesystem-level physical copy
