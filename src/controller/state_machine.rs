@@ -22,6 +22,7 @@ use crate::crd::odoo_backup_job::OdooBackupJob;
 use crate::crd::odoo_init_job::OdooInitJob;
 use crate::crd::odoo_instance::{OdooInstance, OdooInstancePhase};
 use crate::crd::odoo_restore_job::OdooRestoreJob;
+use crate::crd::odoo_staging_refresh_job::OdooStagingRefreshJob;
 use crate::crd::odoo_upgrade_job::OdooUpgradeJob;
 use crate::crd::shared::Phase;
 use crate::error::Result;
@@ -79,12 +80,22 @@ pub struct ReconcileSnapshot {
     pub restore_job: JobStatus,
     pub upgrade_job: JobStatus,
     pub backup_job: JobStatus,
+    /// Aggregate status for an in-flight `OdooStagingRefreshJob`.
+    ///
+    /// Unlike the other *_job fields (which each map to a single underlying
+    /// batch/v1 Job), a staging refresh drives up to three sub-Jobs (DB
+    /// clone, filestore clone, neutralize) sequentially.  The CR's own
+    /// `status.phase` is the source of truth for sub-state; this aggregate
+    /// rolls that up into `Active / Succeeded / Failed / Absent` for the
+    /// high-level transitions in the outer state machine.
+    pub refresh_job: JobStatus,
 
     // ── Active job CR objects (for ensure() to read specs) ────────────────
     pub active_init_job: Option<OdooInitJob>,
     pub active_restore_job: Option<OdooRestoreJob>,
     pub active_upgrade_job: Option<OdooUpgradeJob>,
     pub active_backup_job: Option<OdooBackupJob>,
+    pub active_refresh_job: Option<OdooStagingRefreshJob>,
 
     // Count of non-terminal OdooBackupJob CRs for the instance.  Used to
     // detect the "queued-behind" scenario where one backup completes while
@@ -224,6 +235,62 @@ impl ReconcileSnapshot {
                         if active_upgrade_job.is_none() {
                             upgrade_job_active = true;
                             active_upgrade_job = Some(job);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Staging refresh jobs ────────────────────────────────────────
+        // A staging refresh drives three sub-Jobs (DB clone, filestore
+        // copy, neutralize).  The aggregate `refresh_job` is Succeeded
+        // only when all three are Succeeded (skipFilestore=true drops the
+        // filestore job from the set), Failed as soon as any one is
+        // Failed, and Active otherwise.  The CloningFromSource state
+        // owns the actual sub-Job creation and progress tracking.
+        let mut active_refresh_job: Option<OdooStagingRefreshJob> = None;
+        let mut refresh_job = JobStatus::Absent;
+        {
+            let refreshes: Api<OdooStagingRefreshJob> = Api::namespaced(client.clone(), ns);
+            for job in refreshes.list(&ListParams::default()).await?.items {
+                if job.spec.odoo_instance_ref.name != instance_name {
+                    continue;
+                }
+                let phase = job.status.as_ref().and_then(|s| s.phase.as_ref());
+                match phase {
+                    Some(Phase::Completed) | Some(Phase::Failed) => {}
+                    _ => {
+                        if active_refresh_job.is_none() {
+                            let sub_statuses = [
+                                resolve_k8s_job_status(
+                                    &jobs_api,
+                                    job.status.as_ref().and_then(|s| s.db_job_name.as_deref()),
+                                )
+                                .await,
+                                // Filestore sub-job is skipped when
+                                // skipFilestore is set; treat Absent as
+                                // "not applicable" = Succeeded for rollup.
+                                if job.spec.skip_filestore {
+                                    JobStatus::Succeeded
+                                } else {
+                                    resolve_k8s_job_status(
+                                        &jobs_api,
+                                        job.status
+                                            .as_ref()
+                                            .and_then(|s| s.filestore_job_name.as_deref()),
+                                    )
+                                    .await
+                                },
+                                resolve_k8s_job_status(
+                                    &jobs_api,
+                                    job.status
+                                        .as_ref()
+                                        .and_then(|s| s.neutralize_job_name.as_deref()),
+                                )
+                                .await,
+                            ];
+                            refresh_job = aggregate_refresh_sub_statuses(&sub_statuses);
+                            active_refresh_job = Some(job);
                         }
                     }
                 }
@@ -388,10 +455,12 @@ impl ReconcileSnapshot {
             restore_job,
             upgrade_job,
             backup_job,
+            refresh_job,
             active_init_job,
             active_restore_job,
             active_upgrade_job,
             active_backup_job,
+            active_refresh_job,
             pending_backup_jobs,
             storage_class_mismatch,
             actual_storage_class,
@@ -400,6 +469,48 @@ impl ReconcileSnapshot {
             db_migration_job,
         })
     }
+}
+
+/// Resolve a single K8s Job's observed status by name.  Used by the
+/// staging-refresh aggregator which needs per-sub-job state, rather than
+/// the CR-centric view `resolve_job_status` gives.
+///
+/// Returns `Absent` when the job name is not yet populated (so the
+/// CloningFromSource state knows to create it), `Succeeded` / `Failed` /
+/// `Active` based on the K8s Job status.
+async fn resolve_k8s_job_status(jobs_api: &Api<Job>, job_name: Option<&str>) -> JobStatus {
+    let Some(name) = job_name else {
+        return JobStatus::Absent;
+    };
+    match jobs_api.get(name).await {
+        Ok(job) => {
+            let succeeded = job.status.as_ref().and_then(|s| s.succeeded).unwrap_or(0) > 0;
+            let failed = job.status.as_ref().and_then(|s| s.failed).unwrap_or(0) > 0;
+            if succeeded {
+                JobStatus::Succeeded
+            } else if failed || job.metadata.deletion_timestamp.is_some() {
+                JobStatus::Failed
+            } else {
+                JobStatus::Active
+            }
+        }
+        Err(kube::Error::Api(ref err)) if err.code == 404 => JobStatus::Failed,
+        Err(_) => JobStatus::Active,
+    }
+}
+
+/// Roll up the staging-refresh sub-Job statuses into a single JobStatus.
+/// Any Failed → Failed.  All Succeeded → Succeeded.  Anything else → Active.
+/// `Absent` entries mean the sub-Job hasn't been created yet, which still
+/// counts as "in progress" for aggregation purposes.
+fn aggregate_refresh_sub_statuses(statuses: &[JobStatus]) -> JobStatus {
+    if statuses.contains(&JobStatus::Failed) {
+        return JobStatus::Failed;
+    }
+    if statuses.iter().all(|s| *s == JobStatus::Succeeded) {
+        return JobStatus::Succeeded;
+    }
+    JobStatus::Active
 }
 
 /// Combine CR presence with the K8s batch/v1 Job outcome.
@@ -455,6 +566,8 @@ pub enum TransitionAction {
     FailInitJob,
     CompleteRestoreJob,
     FailRestoreJob,
+    CompleteRefreshJob,
+    FailRefreshJob,
     CompleteUpgradeJob,
     FailUpgradeJob,
     CompleteBackupJob,
@@ -552,6 +665,50 @@ pub async fn execute_action(
                         wh,
                         &phase_enum,
                         job.status.as_ref().and_then(|s| s.job_name.as_deref()),
+                        msg,
+                        Some(&now),
+                    )
+                    .await;
+                }
+            }
+        }
+        CompleteRefreshJob | FailRefreshJob => {
+            if let Some(ref job) = snapshot.active_refresh_job {
+                let crd_name = job.name_any();
+                let now = crate::helpers::utc_now_odoo();
+                let (phase_str, phase_enum, msg) = if matches!(action, CompleteRefreshJob) {
+                    ("Completed", Phase::Completed, None)
+                } else {
+                    ("Failed", Phase::Failed, Some("staging refresh failed"))
+                };
+                let mut patch_val = json!({"status": {"phase": phase_str, "completionTime": &now}});
+                if let Some(m) = msg {
+                    patch_val["status"]["message"] = json!(m);
+                }
+                let api: Api<OdooStagingRefreshJob> = Api::namespaced(client.clone(), &ns);
+                api.patch_status(
+                    &crd_name,
+                    &PatchParams::apply(FIELD_MANAGER),
+                    &Patch::Merge(&patch_val),
+                )
+                .await?;
+                if let Some(ref wh) = job.spec.webhook {
+                    // All three sub-jobs share the same webhook payload
+                    // shape as the other job CRDs.  We report whichever of
+                    // the underlying K8s Jobs is most informative — prefer
+                    // the neutralize one (final step), fall back to DB.
+                    let reported_job = job
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.neutralize_job_name.as_deref())
+                        .or_else(|| job.status.as_ref().and_then(|s| s.db_job_name.as_deref()));
+                    crate::notify::notify_job_webhook(
+                        client,
+                        &ctx.http_client,
+                        &ns,
+                        wh,
+                        &phase_enum,
+                        reported_job,
                         msg,
                         Some(&now),
                     )
@@ -730,6 +887,14 @@ pub static TRANSITIONS: &[Transition] = &[
         guard_name: "restore_job present",
         actions: &[],
     },
+    // A staging refresh (clone from a live source) also brings us out.
+    Transition {
+        from: Uninitialized,
+        to: CloningFromSource,
+        guard: |_, s| s.refresh_job.is_present(),
+        guard_name: "refresh_job present",
+        actions: &[],
+    },
     // ── Initializing ────────────────────────────────────────
     Transition {
         from: Initializing,
@@ -773,6 +938,14 @@ pub static TRANSITIONS: &[Transition] = &[
         guard_name: "restore_job present",
         actions: &[],
     },
+    // A staging refresh can recover from InitFailed.
+    Transition {
+        from: InitFailed,
+        to: CloningFromSource,
+        guard: |_, s| s.refresh_job.is_present(),
+        guard_name: "refresh_job present",
+        actions: &[],
+    },
     // ── Starting ────────────────────────────────────────────
     Transition {
         from: Starting,
@@ -786,6 +959,13 @@ pub static TRANSITIONS: &[Transition] = &[
         to: Restoring,
         guard: |_, s| s.restore_job.is_present(),
         guard_name: "restore_job present",
+        actions: &[],
+    },
+    Transition {
+        from: Starting,
+        to: CloningFromSource,
+        guard: |_, s| s.refresh_job.is_present(),
+        guard_name: "refresh_job present",
         actions: &[],
     },
     Transition {
@@ -836,6 +1016,13 @@ pub static TRANSITIONS: &[Transition] = &[
         to: Restoring,
         guard: |_, s| s.restore_job.is_present(),
         guard_name: "restore_job present",
+        actions: &[],
+    },
+    Transition {
+        from: Running,
+        to: CloningFromSource,
+        guard: |_, s| s.refresh_job.is_present(),
+        guard_name: "refresh_job present",
         actions: &[],
     },
     Transition {
@@ -893,6 +1080,13 @@ pub static TRANSITIONS: &[Transition] = &[
         to: Restoring,
         guard: |_, s| s.restore_job.is_present(),
         guard_name: "restore_job present",
+        actions: &[],
+    },
+    Transition {
+        from: Degraded,
+        to: CloningFromSource,
+        guard: |_, s| s.refresh_job.is_present(),
+        guard_name: "refresh_job present",
         actions: &[],
     },
     Transition {
@@ -1039,6 +1233,37 @@ pub static TRANSITIONS: &[Transition] = &[
         guard_name: "backup absent && replicas == 0",
         actions: &[],
     },
+    // ── CloningFromSource ───────────────────────────────────
+    // Aggregate of the three sub-Jobs (DB clone, filestore copy,
+    // neutralize).  Succeeded → transition to Starting and mark
+    // the target DB as initialized.  Failed → InitFailed (same
+    // terminal semantics as init failures: operator stays scaled
+    // to 0 until the user creates a new refresh or init job).
+    Transition {
+        from: CloningFromSource,
+        to: Starting,
+        guard: |_, s| s.refresh_job == Succeeded,
+        guard_name: "refresh_job succeeded",
+        actions: &[
+            TransitionAction::CompleteRefreshJob,
+            TransitionAction::MarkDbInitialized,
+        ],
+    },
+    Transition {
+        from: CloningFromSource,
+        to: InitFailed,
+        guard: |_, s| s.refresh_job == Failed,
+        guard_name: "refresh_job failed",
+        actions: &[TransitionAction::FailRefreshJob],
+    },
+    // Orphaned: refresh CR deleted while in CloningFromSource.
+    Transition {
+        from: CloningFromSource,
+        to: Uninitialized,
+        guard: |_, s| s.refresh_job == Absent,
+        guard_name: "refresh_job absent",
+        actions: &[],
+    },
     // ── Upgrading ───────────────────────────────────────────
     Transition {
         from: Upgrading,
@@ -1115,6 +1340,13 @@ pub static TRANSITIONS: &[Transition] = &[
         to: Restoring,
         guard: |_, s| s.restore_job.is_present(),
         guard_name: "restore_job present",
+        actions: &[],
+    },
+    Transition {
+        from: Stopped,
+        to: CloningFromSource,
+        guard: |_, s| s.refresh_job.is_present(),
+        guard_name: "refresh_job present",
         actions: &[],
     },
     Transition {
@@ -1303,6 +1535,7 @@ fn requeue_for(phase: &OdooInstancePhase, snapshot: &ReconcileSnapshot) -> Actio
         Starting
         | Initializing
         | Restoring
+        | CloningFromSource
         | Upgrading
         | BackingUp
         | Degraded

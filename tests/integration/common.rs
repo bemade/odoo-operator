@@ -31,6 +31,7 @@ use odoo_operator::crd::odoo_backup_job::OdooBackupJob;
 use odoo_operator::crd::odoo_init_job::OdooInitJob;
 use odoo_operator::crd::odoo_instance::{OdooInstance, OdooInstancePhase};
 use odoo_operator::crd::odoo_restore_job::OdooRestoreJob;
+use odoo_operator::crd::odoo_staging_refresh_job::OdooStagingRefreshJob;
 use odoo_operator::crd::odoo_upgrade_job::OdooUpgradeJob;
 use odoo_operator::helpers::OperatorDefaults;
 use odoo_operator::postgres::NoopPostgresManager;
@@ -82,6 +83,7 @@ fn init_shared() -> SharedEnv {
                     OdooInitJob::crd(),
                     OdooBackupJob::crd(),
                     OdooRestoreJob::crd(),
+                    OdooStagingRefreshJob::crd(),
                     OdooUpgradeJob::crd(),
                 ];
                 // HTTPRoute belongs to a protected API group and requires the

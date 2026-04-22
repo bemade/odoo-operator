@@ -20,4 +20,5 @@ mod migrate_filestore;
 mod orphaned_jobs;
 mod restore_job;
 mod scaling;
+mod staging_refresh;
 mod upgrade_job;

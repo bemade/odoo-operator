@@ -11,6 +11,7 @@ rules:
       - odooinstances
       - odoobackupjobs
       - odoorestorejobs
+      - odoostagingrefreshjobs
       - odooupgradejobs
       - odooinitjobs
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -21,6 +22,7 @@ rules:
       - odooinstances/status
       - odoobackupjobs/status
       - odoorestorejobs/status
+      - odoostagingrefreshjobs/status
       - odooupgradejobs/status
       - odooinitjobs/status
     verbs: ["get", "update", "patch"]
@@ -31,6 +33,7 @@ rules:
       - odooinstances/finalizers
       - odoobackupjobs/finalizers
       - odoorestorejobs/finalizers
+      - odoostagingrefreshjobs/finalizers
       - odooupgradejobs/finalizers
       - odooinitjobs/finalizers
     verbs: ["update"]

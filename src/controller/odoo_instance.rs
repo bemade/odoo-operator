@@ -33,6 +33,7 @@ use crate::crd::odoo_backup_job::OdooBackupJob;
 use crate::crd::odoo_init_job::OdooInitJob;
 use crate::crd::odoo_instance::{OdooInstance, OdooInstancePhase};
 use crate::crd::odoo_restore_job::OdooRestoreJob;
+use crate::crd::odoo_staging_refresh_job::OdooStagingRefreshJob;
 use crate::crd::odoo_upgrade_job::OdooUpgradeJob;
 use crate::error::{Error, Result};
 use crate::helpers::{odoo_username, OperatorDefaults};
@@ -113,6 +114,7 @@ pub async fn run(ctx: Arc<Context>) {
     let init_jobs: Api<OdooInitJob> = Api::all(client.clone());
     let upgrade_jobs: Api<OdooUpgradeJob> = Api::all(client.clone());
     let restore_jobs: Api<OdooRestoreJob> = Api::all(client.clone());
+    let refresh_jobs: Api<OdooStagingRefreshJob> = Api::all(client.clone());
     let backup_jobs: Api<OdooBackupJob> = Api::all(client.clone());
 
     Controller::new(instances, WatcherConfig::default())
@@ -137,6 +139,11 @@ pub async fn run(ctx: Arc<Context>) {
             restore_jobs,
             WatcherConfig::default(),
             map_restore_job_to_instance,
+        )
+        .watches(
+            refresh_jobs,
+            WatcherConfig::default(),
+            map_refresh_job_to_instance,
         )
         .watches(
             backup_jobs,
@@ -188,6 +195,18 @@ fn map_upgrade_job_to_instance(
 
 fn map_restore_job_to_instance(
     job: OdooRestoreJob,
+) -> Option<kube::runtime::reflector::ObjectRef<OdooInstance>> {
+    let ns = job
+        .spec
+        .odoo_instance_ref
+        .namespace
+        .clone()
+        .or_else(|| job.metadata.namespace.clone())?;
+    Some(kube::runtime::reflector::ObjectRef::new(&job.spec.odoo_instance_ref.name).within(&ns))
+}
+
+fn map_refresh_job_to_instance(
+    job: OdooStagingRefreshJob,
 ) -> Option<kube::runtime::reflector::ObjectRef<OdooInstance>> {
     let ns = job
         .spec
@@ -540,6 +559,7 @@ pub fn phase_to_conditions(phase: &OdooInstancePhase, generation: i64) -> Vec<Co
         Starting => ("False", "Waiting for pods to become ready"),
         Upgrading => ("False", "Module upgrade in progress"),
         Restoring => ("False", "Database restore in progress"),
+        CloningFromSource => ("False", "Cloning from source instance in progress"),
         BackingUp => ("False", "Backup in progress"),
         MigratingFilestore => ("False", "Filestore storage class migration in progress"),
         FinalizingFilestoreMigration => ("False", "Finalizing filestore migration (PVC rebind)"),
@@ -555,6 +575,7 @@ pub fn phase_to_conditions(phase: &OdooInstancePhase, generation: i64) -> Vec<Co
             | Starting
             | Upgrading
             | Restoring
+            | CloningFromSource
             | BackingUp
             | MigratingFilestore
             | FinalizingFilestoreMigration
