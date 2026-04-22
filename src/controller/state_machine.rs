@@ -150,9 +150,16 @@ impl ReconcileSnapshot {
         let jobs_api: Api<Job> = Api::namespaced(client.clone(), ns);
 
         // ── Init jobs ───────────────────────────────────────────────────
+        // db_initialized is authoritative from status — it's written by the
+        // MarkDbInitialized / MarkDbUninitialized transition actions.  Old
+        // Completed init/restore CRs must NOT override it back to true: a
+        // failed restore drops the DB and explicitly flips the status to
+        // false, even though an older Completed init CR still exists in
+        // history.  Respecting that flip is what keeps pods down after a
+        // failed restore.
         let mut active_init_job: Option<OdooInitJob> = None;
         let mut init_job_active = false;
-        let mut db_init_from_jobs = db_initialized;
+        let db_init_from_jobs = db_initialized;
         {
             let inits: Api<OdooInitJob> = Api::namespaced(client.clone(), ns);
             for job in inits.list(&ListParams::default()).await?.items {
@@ -161,10 +168,7 @@ impl ReconcileSnapshot {
                 }
                 let phase = job.status.as_ref().and_then(|s| s.phase.as_ref());
                 match phase {
-                    Some(Phase::Completed) => {
-                        db_init_from_jobs = true;
-                    }
-                    Some(Phase::Failed) => {}
+                    Some(Phase::Completed) | Some(Phase::Failed) => {}
                     _ => {
                         // Running, Pending, or no status — this is the active one.
                         if active_init_job.is_none() {
@@ -187,10 +191,7 @@ impl ReconcileSnapshot {
                 }
                 let phase = job.status.as_ref().and_then(|s| s.phase.as_ref());
                 match phase {
-                    Some(Phase::Completed) => {
-                        db_init_from_jobs = true;
-                    }
-                    Some(Phase::Failed) => {}
+                    Some(Phase::Completed) | Some(Phase::Failed) => {}
                     _ => {
                         if active_restore_job.is_none() {
                             restore_job_active = true;
@@ -440,6 +441,7 @@ async fn resolve_job_status(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransitionAction {
     MarkDbInitialized,
+    MarkDbUninitialized,
     CompleteInitJob,
     FailInitJob,
     CompleteRestoreJob,
@@ -473,6 +475,17 @@ pub async fn execute_action(
             let name = instance.name_any();
             let api: Api<OdooInstance> = Api::namespaced(client.clone(), &ns);
             let patch = json!({"status": {"dbInitialized": true}});
+            api.patch_status(
+                &name,
+                &PatchParams::apply(FIELD_MANAGER),
+                &Patch::Merge(&patch),
+            )
+            .await?;
+        }
+        MarkDbUninitialized => {
+            let name = instance.name_any();
+            let api: Api<OdooInstance> = Api::namespaced(client.clone(), &ns);
+            let patch = json!({"status": {"dbInitialized": false}});
             api.patch_status(
                 &name,
                 &PatchParams::apply(FIELD_MANAGER),
@@ -1029,12 +1042,19 @@ pub static TRANSITIONS: &[Transition] = &[
             TransitionAction::MarkDbInitialized,
         ],
     },
+    // Failed restore: leave pods down and treat the instance as uninitialized.
+    // The restore script drops the target DB on any failure, so db_initialized
+    // accurately reflects reality. Bringing pods back up after a failed restore
+    // risks serving traffic against a half-restored or un-neutralized DB.
     Transition {
         from: Restoring,
-        to: Starting,
+        to: Uninitialized,
         guard: |_, s| s.restore_job == Failed,
         guard_name: "restore_job failed",
-        actions: &[TransitionAction::FailRestoreJob],
+        actions: &[
+            TransitionAction::FailRestoreJob,
+            TransitionAction::MarkDbUninitialized,
+        ],
     },
     // Orphaned: restore job CR deleted while in Restoring.
     Transition {

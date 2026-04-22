@@ -28,6 +28,7 @@ fn main() {
 fn action_name(a: &TransitionAction) -> &'static str {
     match a {
         TransitionAction::MarkDbInitialized => "MarkDbInitialized",
+        TransitionAction::MarkDbUninitialized => "MarkDbUninitialized",
         TransitionAction::CompleteInitJob => "CompleteInitJob",
         TransitionAction::FailInitJob => "FailInitJob",
         TransitionAction::CompleteRestoreJob => "CompleteRestoreJob",
