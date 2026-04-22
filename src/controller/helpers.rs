@@ -42,6 +42,33 @@ pub fn instance_labels(instance: &OdooInstance) -> std::collections::BTreeMap<St
     m
 }
 
+/// Env vars injected into post-neutralize Job pods for staging instances
+/// when the operator was configured with a staging SMTP sink (Mailpit).
+///
+/// Returns empty when either:
+/// - the instance is `Production` (leave real SMTP config alone), or
+/// - the operator has no `staging_smtp_host` configured (keep the
+///   neutralize sentinel, i.e. `smtp_host=invalid` — no outbound mail).
+///
+/// Consumed by `restore.sh` and `neutralize.sh` via `MAIL_*` env vars.
+pub fn staging_mail_env_vars(
+    instance: &OdooInstance,
+    defaults: &crate::helpers::OperatorDefaults,
+) -> Vec<k8s_openapi::api::core::v1::EnvVar> {
+    use crate::crd::odoo_instance::Environment;
+    if instance.spec.environment != Environment::Staging || defaults.staging_smtp_host.is_empty() {
+        return vec![];
+    }
+    vec![
+        env("MAIL_SMTP_HOST", defaults.staging_smtp_host.clone()),
+        env("MAIL_SMTP_PORT", defaults.staging_smtp_port.to_string()),
+        env(
+            "MAIL_SMTP_ENCRYPTION",
+            defaults.staging_smtp_encryption.clone(),
+        ),
+    ]
+}
+
 /// Build a controller OwnerReference for any kube-rs `Resource`.
 ///
 /// This is generic over `K` — the compiler fills in `api_version()` and

@@ -13,7 +13,8 @@ use crate::error::{Error, Result};
 
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{
-    cm_env, cron_depl_name, env, odoo_volume_mounts, OdooJobBuilder, FIELD_MANAGER,
+    cm_env, cron_depl_name, env, odoo_volume_mounts, staging_mail_env_vars, OdooJobBuilder,
+    FIELD_MANAGER,
 };
 use crate::controller::state_machine::scale_deployment;
 
@@ -230,6 +231,7 @@ impl State for CloningFromSource {
                 refresh,
                 &target_conf,
                 &target_db,
+                &ctx.defaults,
             );
             let created = jobs_api.create(&PostParams::default(), &job).await?;
             let k8s_job_name = created.name_any();
@@ -405,6 +407,7 @@ fn build_filestore_clone_job(
         .build()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_neutralize_job(
     crd_name: &str,
     ns: &str,
@@ -413,14 +416,16 @@ fn build_neutralize_job(
     refresh: &OdooStagingRefreshJob,
     target_conf: &str,
     target_db: &str,
+    defaults: &crate::helpers::OperatorDefaults,
 ) -> Job {
-    let envs = vec![
+    let mut envs = vec![
         env("DB_NAME", target_db),
         cm_env("HOST", target_conf, "db_host"),
         cm_env("PORT", target_conf, "db_port"),
         cm_env("USER", target_conf, "db_user"),
         cm_env("PASSWORD", target_conf, "db_password"),
     ];
+    envs.extend(staging_mail_env_vars(instance, defaults));
     OdooJobBuilder::new(&format!("{crd_name}-neut-"), ns, refresh, instance)
         .active_deadline(1800)
         .containers(vec![Container {

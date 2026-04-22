@@ -16,7 +16,8 @@ use crate::notify;
 
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{
-    cm_env, cron_depl_name, env, odoo_volume_mounts, OdooJobBuilder, FIELD_MANAGER,
+    cm_env, cron_depl_name, env, odoo_volume_mounts, staging_mail_env_vars, OdooJobBuilder,
+    FIELD_MANAGER,
 };
 use crate::controller::state_machine::scale_deployment;
 
@@ -83,7 +84,7 @@ impl State for Restoring {
             ..Default::default()
         };
 
-        let db_env = vec![
+        let mut db_env = vec![
             env("DB_NAME", db.clone()),
             env("NEUTRALIZE", neutralize),
             cm_env("HOST", &odoo_conf_name, "db_host"),
@@ -91,6 +92,7 @@ impl State for Restoring {
             cm_env("USER", &odoo_conf_name, "db_user"),
             cm_env("PASSWORD", &odoo_conf_name, "db_password"),
         ];
+        db_env.extend(staging_mail_env_vars(instance, &ctx.defaults));
 
         let mut init_containers = vec![];
         let src = &restore_job.spec.source;

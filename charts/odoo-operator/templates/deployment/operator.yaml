@@ -50,6 +50,11 @@ spec:
             {{- if .Values.defaults.gatewayRefNamespace }}
             - --default-gateway-ref-namespace={{ .Values.defaults.gatewayRefNamespace }}
             {{- end }}
+            {{- if .Values.defaults.mail.stagingSmtpHost }}
+            - --default-staging-smtp-host={{ .Values.defaults.mail.stagingSmtpHost }}
+            - --default-staging-smtp-port={{ .Values.defaults.mail.stagingSmtpPort | default 1025 }}
+            - --default-staging-smtp-encryption={{ .Values.defaults.mail.stagingSmtpEncryption | default "none" }}
+            {{- end }}
           resources:
             {{- toYaml .Values.operator.resources | nindent 12 }}
           env:

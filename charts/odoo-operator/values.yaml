@@ -25,6 +25,18 @@ imagePullSecrets:
     password: password
 
 
+# ── Pre-flight migration gate (1.9.0) ─────────────────────────────────────────
+# Starting with 1.9.0 the operator consumes `spec.environment` on OdooInstances
+# and rewrites `ir_mail_server` on staging refreshes / restores.  Every
+# pre-1.9 OdooInstance has no environment field and will be treated as
+# Staging by default — which means their ir_mail_server gets rewritten to
+# Mailpit (or disabled) on the next refresh/restore.
+#
+# Set this to `true` after you've explicitly tagged every production
+# OdooInstance with `spec.environment: Production`.  See
+# charts/odoo-operator/templates/_preflight.tpl for a migration script.
+productionInstancesIdentified: false
+
 # Default configuration applied by the operator when an OdooInstance does not
 # specify these fields. These are cluster-specific values that vary per installation.
 defaults:
