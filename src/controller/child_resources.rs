@@ -592,16 +592,22 @@ pub async fn ensure_deployment(
         }
     };
 
+    let mut depl_labels = BTreeMap::from([("app".to_string(), name.to_string())]);
+    depl_labels.extend(super::helpers::instance_labels(instance));
     let dep = Deployment {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
             namespace: Some(ns.to_string()),
-            labels: Some(BTreeMap::from([("app".to_string(), name.to_string())])),
+            labels: Some(depl_labels.clone()),
             owner_references: Some(vec![oref.clone()]),
             ..Default::default()
         },
         spec: Some(DeploymentSpec {
             replicas: Some(replicas),
+            // NOTE: selector.matchLabels stays on `app` only — selectors are
+            // immutable on existing Deployments, so we can't add env labels
+            // here without breaking in-place upgrades.  The env labels are
+            // added to pod template labels below instead (which Calico keys on).
             selector: LabelSelector {
                 match_labels: Some(BTreeMap::from([("app".to_string(), name.to_string())])),
                 ..Default::default()
@@ -612,7 +618,7 @@ pub async fn ensure_deployment(
             }),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
-                    labels: Some(BTreeMap::from([("app".to_string(), name.to_string())])),
+                    labels: Some(depl_labels.clone()),
                     annotations: Some(BTreeMap::from([(
                         "bemade.org/odoo-conf-hash".to_string(),
                         conf_hash,
@@ -862,11 +868,15 @@ pub async fn ensure_cron_deployment(
         .unwrap_or("");
     let conf_hash = sha256_hex(conf_content);
 
+    let mut depl_labels = BTreeMap::from([("app".to_string(), depl_name.to_string())]);
+    depl_labels.extend(super::helpers::instance_labels(instance));
+    // Cron pods carry the same `app=<cron-depl>` for service/selector matching,
+    // plus the env labels for Calico (identical to web).
     let dep = Deployment {
         metadata: ObjectMeta {
             name: Some(depl_name.clone()),
             namespace: Some(ns.to_string()),
-            labels: Some(BTreeMap::from([("app".to_string(), name.to_string())])),
+            labels: Some(depl_labels.clone()),
             owner_references: Some(vec![oref.clone()]),
             ..Default::default()
         },
@@ -882,7 +892,7 @@ pub async fn ensure_cron_deployment(
             }),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
-                    labels: Some(BTreeMap::from([("app".to_string(), depl_name.to_string())])),
+                    labels: Some(depl_labels.clone()),
                     annotations: Some(BTreeMap::from([(
                         "bemade.org/odoo-conf-hash".to_string(),
                         conf_hash,

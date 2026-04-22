@@ -58,6 +58,21 @@ defaults:
   # Default tolerations for Odoo pods.
   tolerations: []
 
+  # Mail server defaults injected into staging OdooInstances after neutralize.
+  # Staging instances get the `bemade.org/environment=staging` pod label,
+  # which a cluster NetworkPolicy (typically Calico) uses to deny egress to
+  # real SMTP/IMAP endpoints.  Pointing them at an in-cluster Mailpit gives
+  # developers a harmless place for mail to land.  Leave stagingSmtpHost
+  # empty to skip the auto-configuration — staging instances will then run
+  # with the neutralize sentinel (smtp_host=invalid, no outbound mail).
+  mail:
+    # Hostname of the Mailpit (or any SMTP sink) service staging instances
+    # should use for outbound mail.  Example:
+    # `mailpit.mailpit.svc.cluster.local`
+    stagingSmtpHost: ""
+    stagingSmtpPort: 1025
+    stagingSmtpEncryption: "none"   # "none" | "ssl" | "starttls"
+
 # Validating webhook configuration
 webhook: {}
 
