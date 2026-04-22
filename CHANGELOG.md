@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.8.0](https://github.com/bemade/odoo-operator/compare/v1.7.0...v1.8.0) (2026-04-22)
+
+
+### Features
+
+* **instance:** environment label (Staging default) for Calico policies ([1b89d4f](https://github.com/bemade/odoo-operator/commit/1b89d4f9b583db90388a29e19b76fe3b6ef3b7b0))
+* **instance:** environment label (Staging default) for Calico policies ([5bbc226](https://github.com/bemade/odoo-operator/commit/5bbc226d0d7d885621a0c061a1ecb79a76c42144))
+* **staging:** Phase 1 — OdooStagingRefreshJob + cloning pipeline ([dd0eb9d](https://github.com/bemade/odoo-operator/commit/dd0eb9da82134bf12065699683052ca1e3a8132f))
+* **staging:** Phase 1 — OdooStagingRefreshJob CRD + cloning pipeline ([9e902df](https://github.com/bemade/odoo-operator/commit/9e902df51d9abd81be224f96c0ca772e07e5f2b6))
+
+
+### Bug Fixes
+
+* **restore:** harden pipeline against un-neutralized DB incidents ([d112c7e](https://github.com/bemade/odoo-operator/commit/d112c7e5b4388fcfb7285a5299371683f8607df7))
+* **restore:** harden pipeline against un-neutralized DB incidents ([d112c7e](https://github.com/bemade/odoo-operator/commit/d112c7e5b4388fcfb7285a5299371683f8607df7))
+* **restore:** harden pipeline against un-neutralized DB incidents ([c3b04d8](https://github.com/bemade/odoo-operator/commit/c3b04d804a6662a7e820830b30fb8b90715d1d36))
+* **staging:** live-test fixes for the clone pipeline ([9cffed3](https://github.com/bemade/odoo-operator/commit/9cffed33e04d655a497246f9e6af40b6f57cfda3))
+* **starting:** detect and recover from stuck volume mounts ([8a60680](https://github.com/bemade/odoo-operator/commit/8a60680826e6fac16dd525db7770257b44de3670))
+* **starting:** detect and recover from stuck volume mounts ([aca4b7e](https://github.com/bemade/odoo-operator/commit/aca4b7e50803b77a1a0e5e869b63138de535fe3e))
+* **state-machine:** avoid phase flap with queued backup jobs ([c912eaf](https://github.com/bemade/odoo-operator/commit/c912eafc23b82a6caec0ac80915122c4924276d1))
+* **state-machine:** avoid phase flap with queued backup jobs ([c912eaf](https://github.com/bemade/odoo-operator/commit/c912eafc23b82a6caec0ac80915122c4924276d1))
+* **state-machine:** avoid phase flap with queued backup jobs ([38031db](https://github.com/bemade/odoo-operator/commit/38031db2db1f2af17ad5767481db77f18ab22bfd))
+
 ## [1.7.0](https://github.com/bemade/odoo-operator/compare/v1.6.5...v1.7.0) (2026-04-15)
 
 
