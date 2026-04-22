@@ -1,0 +1,27 @@
+{{/*
+Pre-flight migration gate for the 1.9.x environment-aware release.
+
+Starting with this version the operator consumes spec.environment on
+OdooInstance and rewrites the ir_mail_server sentinel to point at the
+configured Mailpit sink during staging-refresh / restore flows.
+
+Every pre-1.9 OdooInstance has no environment field and defaults to
+Staging on read — so a subsequent staging-refresh or restore would
+rewrite outbound mail for any genuinely-production instance that
+hasn't been tagged yet.  This guard forces the admin to acknowledge
+the migration has been done.
+
+To unblock the upgrade:
+
+ 1. Tag every production OdooInstance:
+
+      kubectl patch odooinstance NAME -n NAMESPACE --type=merge \
+        -p (single-quote){"spec":{"environment":"Production"}}(single-quote)
+
+ 2. Re-run helm upgrade with:
+
+      --set productionInstancesIdentified=true
+*/}}
+{{- if not .Values.productionInstancesIdentified }}
+{{- fail "\nUpgrade blocked: productionInstancesIdentified must be set to true.\n\nThis release consumes spec.environment (Staging | Production) on OdooInstances.  Every OdooInstance missing an explicit environment field is treated as Staging — which, after a staging-refresh or restore, rewrites its ir_mail_server to Mailpit (or disables it entirely).\n\nBefore installing this version, tag every production OdooInstance with spec.environment: Production (kubectl patch), then re-run helm with --set productionInstancesIdentified=true to acknowledge.\n" -}}
+{{- end }}

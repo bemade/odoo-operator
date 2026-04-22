@@ -51,6 +51,25 @@ struct Args {
     #[arg(long, default_value = "", env = "DEFAULT_GATEWAY_REF_NAMESPACE")]
     default_gateway_ref_namespace: String,
 
+    /// Hostname of the SMTP sink (e.g. Mailpit) that staging instances
+    /// should use for outbound mail.  When set, the operator rewrites
+    /// the neutralize-sentinel `ir_mail_server` row on every staging
+    /// restore / clone to point at this host.  Leave empty to keep the
+    /// sentinel (`smtp_host=invalid` — no outbound mail at all).
+    /// Only applies when the target OdooInstance has
+    /// `spec.environment: Staging`.
+    #[arg(long, default_value = "", env = "DEFAULT_STAGING_SMTP_HOST")]
+    default_staging_smtp_host: String,
+
+    /// Port for the staging SMTP sink.  Defaults to 1025 (Mailpit default).
+    #[arg(long, default_value = "1025", env = "DEFAULT_STAGING_SMTP_PORT")]
+    default_staging_smtp_port: u16,
+
+    /// Encryption for the staging SMTP sink: `none`, `ssl`, or `starttls`.
+    /// Defaults to `none` (Mailpit doesn't terminate TLS by default).
+    #[arg(long, default_value = "none", env = "DEFAULT_STAGING_SMTP_ENCRYPTION")]
+    default_staging_smtp_encryption: String,
+
     /// Name of the Secret containing postgres cluster configuration.
     #[arg(
         long,
@@ -126,6 +145,9 @@ async fn main() -> anyhow::Result<()> {
             ingress_issuer: args.default_ingress_issuer,
             gateway_ref_name: args.default_gateway_ref_name,
             gateway_ref_namespace: args.default_gateway_ref_namespace,
+            staging_smtp_host: args.default_staging_smtp_host,
+            staging_smtp_port: args.default_staging_smtp_port,
+            staging_smtp_encryption: args.default_staging_smtp_encryption,
             ..Default::default()
         },
         operator_namespace: args.operator_namespace,

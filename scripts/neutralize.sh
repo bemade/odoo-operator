@@ -94,4 +94,29 @@ else
     echo "fetchmail_server table absent (module not installed) — skipping"
 fi
 
+# Staging mail redirect: the operator sets MAIL_SMTP_HOST (and port /
+# encryption) when the instance is tagged `environment: Staging` and a
+# cluster-wide Mailpit (or any SMTP sink) has been configured via
+# --default-staging-smtp-host.  After neutralize there is exactly one
+# active ir_mail_server row with smtp_host='invalid' — we rewrite it in
+# place to point at the sink.  Production instances and operators with
+# no sink configured skip this block entirely (env var empty).
+if [ -n "${MAIL_SMTP_HOST:-}" ]; then
+    echo "=== Rewriting neutralize sentinel → $MAIL_SMTP_HOST:${MAIL_SMTP_PORT:-1025} (${MAIL_SMTP_ENCRYPTION:-none}) ==="
+    # psql's :'var' interpolation only works when reading from stdin,
+    # not with -c, so we use a heredoc.
+    psql -h "$HOST" -p "$PORT" -U "$USER" -d "$DB_NAME" \
+         -v ON_ERROR_STOP=1 \
+         -v mail_host="$MAIL_SMTP_HOST" \
+         -v mail_port="${MAIL_SMTP_PORT:-1025}" \
+         -v mail_enc="${MAIL_SMTP_ENCRYPTION:-none}" <<'EOSQL'
+UPDATE ir_mail_server
+SET smtp_host = :'mail_host',
+    smtp_port = :'mail_port'::integer,
+    smtp_encryption = :'mail_enc',
+    name = 'Mailpit (operator-injected for staging)'
+WHERE active AND smtp_host = 'invalid';
+EOSQL
+fi
+
 echo "=== Neutralize complete ==="

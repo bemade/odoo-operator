@@ -280,6 +280,9 @@ fn test_defaults() -> OperatorDefaults {
         resources: None,
         affinity: None,
         tolerations: vec![],
+        staging_smtp_host: String::new(),
+        staging_smtp_port: 1025,
+        staging_smtp_encryption: "none".into(),
     }
 }
 

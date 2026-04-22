@@ -23,6 +23,9 @@ operator:
 # Image pull secrets for private registries
 imagePullSecrets: []
 
+# Pre-flight migration gate: acknowledged for local dev.
+productionInstancesIdentified: true
+
 defaults:
   odooImage: "odoo:18.0"
   storageClass: "standard"
@@ -38,6 +41,10 @@ defaults:
       memory: 4Gi
   affinity: {}
   tolerations: []
+  mail:
+    stagingSmtpHost: "mailpit.mailpit.svc.cluster.local"
+    stagingSmtpPort: 1025
+    stagingSmtpEncryption: "none"
 
 webhook:
   certIssuer: "selfsigned-cluster-issuer"

@@ -29,6 +29,15 @@ pub struct OperatorDefaults {
     pub resources: Option<ResourceRequirements>,
     pub affinity: Option<Affinity>,
     pub tolerations: Vec<Toleration>,
+
+    /// SMTP sink (typically a Mailpit service) that staging instances
+    /// get their `ir_mail_server` rewritten to point at after every
+    /// restore / staging-refresh.  Empty string = feature disabled
+    /// (staging instances stay on the `smtp_host=invalid` sentinel set
+    /// by `odoo neutralize`, i.e. no outbound mail).
+    pub staging_smtp_host: String,
+    pub staging_smtp_port: u16,
+    pub staging_smtp_encryption: String,
 }
 
 // ── Naming helpers ────────────────────────────────────────────────────────────
