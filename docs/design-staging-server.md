@@ -44,7 +44,10 @@ building on top of the hardened restore pipeline from #76.
 
 The filestore side is one question (block-level snapshot vs file copy) and
 the database side is another (cluster-primitive recovery vs `pg_dump`
-streaming).  They compose independently.
+streaming).  They compose independently — and more importantly, they
+**run in parallel**: the operator spawns a filestore Job and a database
+Job concurrently and waits for both to succeed before the neutralize
+step runs.  Wall-clock time is max(filestore, db) rather than their sum.
 
 ### Filestore options
 
@@ -164,10 +167,20 @@ status:
 
 New phase: `CloningFromSource`.  Lifecycle while in it:
 - Web + cron scaled to 0 (same as `Initializing`)
-- Operator drives the snapshot → clone → recover → neutralize sequence
-- Transition to `Starting` on success, to `InitFailed` on failure
+- Two Jobs run in parallel:
+  - **DB Job:** streams `pg_dump | psql` (D1) or orchestrates CNPG
+    recovery (D2) into the staging DB
+  - **Filestore Job:** creates a CSI clone from a VolumeSnapshot
+    (F1) or runs an in-pod rsync between the two PVCs (F2)
+- Only after **both** Jobs report Succeeded does the operator run a
+  third Job for `odoo neutralize` + mail-server verification (reusing
+  `restore.sh`)
+- Transition to `Starting` on neutralize success, to `InitFailed` on
+  any of the three Jobs failing
 
-Guards/actions follow the existing `Initializing` patterns.
+Guards/actions follow the existing `Initializing` patterns.  The
+parallel-then-barrier shape mirrors how the existing migration phases
+already handle multi-step sequences.
 
 ### Webhook validation additions
 
