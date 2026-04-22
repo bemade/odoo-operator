@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Neutralizes a freshly-cloned Odoo database and verifies that no active
 # mail servers remain.  Used as the post-clone barrier step of
 # OdooStagingRefreshJob, *after* both the DB clone and filestore copy

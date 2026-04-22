@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Copies the source OdooInstance's filestore into the staging instance's
 # filestore PVC.  Both PVCs are mounted on this single pod; copy is
 # entirely local to the pod.  Filestore entries are content-addressable

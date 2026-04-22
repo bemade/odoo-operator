@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Clones a Postgres database from a source Odoo instance to a staging
 # instance by streaming pg_dump | pg_restore end-to-end through a single
 # pod — no intermediate artifact, no S3.  Uses a temp DB name for the
@@ -36,18 +36,34 @@ PGPASSWORD=$TGT_PASSWORD createdb -h "$TGT_HOST" -p "$TGT_PORT" \
     -U "$TGT_USER" "$TEMP_DB"
 
 # pg_dump reads via an MVCC snapshot — source writes keep flowing.
-# pg_restore --jobs parallelises index builds, which is typically the
-# wall-clock dominant factor on the target side.  --no-owner / --no-acl
-# drop ownership & ACL statements (roles from the source cluster rarely
-# exist on the target).  --exit-on-error aborts on real failures.
-JOBS=$(nproc 2>/dev/null || echo 2)
-echo "=== Streaming pg_dump | pg_restore (jobs=$JOBS) ==="
+# --no-owner / --no-acl drop ownership & ACL statements (roles from the
+# source cluster rarely exist on the target).
+#
+# Plain-SQL format (-Fp) + sed filter + psql ON_ERROR_STOP, mirroring the
+# restore.sh path.  The alternative (custom format + pg_restore) has two
+# problems:
+#   1. pg_restore --jobs doesn't accept stdin, so no parallel restore;
+#   2. Custom format carries pg-client-version SET statements (notably
+#      `SET transaction_timeout = 0` from pg_dump 17+) that older
+#      target servers reject as "unrecognized configuration parameter".
+#      We can't sed-filter a binary format.
+#
+# sed filter patterns match complete single-line statements (pg_dump
+# emits these forms on one line, terminated with ;).  The extra
+# `SET transaction_timeout` match strips the PG17 incompatibility.
+echo "=== Streaming pg_dump | psql ==="
 PGPASSWORD=$SRC_PASSWORD pg_dump \
     -h "$SRC_HOST" -p "$SRC_PORT" -U "$SRC_USER" \
-    -Fc --no-owner --no-acl "$SRC_DB" | \
-PGPASSWORD=$TGT_PASSWORD pg_restore \
+    -Fp --no-owner --no-acl "$SRC_DB" | \
+sed -E \
+    -e '/^SET transaction_timeout /d' \
+    -e '/^ALTER [A-Z ]+[^;]*OWNER TO [^;]*;$/d' \
+    -e '/^GRANT [^;]*;$/d' \
+    -e '/^REVOKE [^;]*;$/d' \
+    -e '/^REASSIGN OWNED BY [^;]*;$/d' | \
+PGPASSWORD=$TGT_PASSWORD psql \
     -h "$TGT_HOST" -p "$TGT_PORT" -U "$TGT_USER" \
-    -d "$TEMP_DB" --no-owner --no-acl --exit-on-error --jobs="$JOBS"
+    -d "$TEMP_DB" -v ON_ERROR_STOP=1 --quiet
 
 echo "=== Cutover: drop $TGT_DB, rename $TEMP_DB -> $TGT_DB ==="
 PGPASSWORD=$TGT_PASSWORD psql -h "$TGT_HOST" -p "$TGT_PORT" -U "$TGT_USER" \

@@ -103,10 +103,21 @@ impl State for CloningFromSource {
             .and_then(|s| s.db_job_name.as_deref())
             .is_none()
         {
-            let temp_db = format!(
-                "{target_db}_refresh_{}",
-                chrono::Utc::now().format("%Y%m%d%H%M%S")
-            );
+            // Postgres identifiers are limited to 63 bytes.  The Odoo DB
+            // name is `odoo_<36-char-uuid>` = 41 chars, leaving 22 bytes
+            // for the refresh suffix.  An 8-hex-char sha256 prefix of
+            // the refresh CR's UID gives us uniqueness without exceeding
+            // the limit and is stable across reconciles on the same CR
+            // (important so the trap-drop at the start of clone-db.sh
+            // can clean up a leftover temp DB from a failed prior run).
+            let uid = refresh.metadata.uid.as_deref().unwrap_or("norun");
+            let short = {
+                use sha2::{Digest, Sha256};
+                let h = Sha256::digest(uid.as_bytes());
+                let hex = format!("{h:x}");
+                hex[..8].to_string()
+            };
+            let temp_db = format!("{target_db}_refresh_{short}");
             let job = build_db_clone_job(
                 &refresh.name_any(),
                 &ns,
@@ -328,7 +339,11 @@ fn build_db_clone_job(
         .containers(vec![Container {
             name: "clone-db".into(),
             image: Some(image.into()),
-            command: Some(vec!["/bin/sh".into(), "-c".into(), CLONE_DB_SCRIPT.into()]),
+            command: Some(vec![
+                "/bin/bash".into(),
+                "-c".into(),
+                CLONE_DB_SCRIPT.into(),
+            ]),
             env: Some(envs),
             volume_mounts: Some(odoo_volume_mounts()),
             ..Default::default()
@@ -379,7 +394,7 @@ fn build_filestore_clone_job(
             name: "clone-filestore".into(),
             image: Some(image.into()),
             command: Some(vec![
-                "/bin/sh".into(),
+                "/bin/bash".into(),
                 "-c".into(),
                 CLONE_FILESTORE_SCRIPT.into(),
             ]),
@@ -412,7 +427,7 @@ fn build_neutralize_job(
             name: "neutralize".into(),
             image: Some(image.into()),
             command: Some(vec![
-                "/bin/sh".into(),
+                "/bin/bash".into(),
                 "-c".into(),
                 NEUTRALIZE_SCRIPT.into(),
             ]),
