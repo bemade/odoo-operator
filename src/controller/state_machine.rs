@@ -11,7 +11,11 @@
 
 use std::time::Duration;
 
-use k8s_openapi::api::{apps::v1::Deployment, batch::v1::Job, core::v1::PersistentVolumeClaim};
+use k8s_openapi::api::{
+    apps::v1::Deployment,
+    batch::v1::Job,
+    core::v1::{Event, PersistentVolumeClaim, Pod},
+};
 use kube::api::{Api, ListParams, Patch, PatchParams, ResourceExt};
 use kube::runtime::controller::Action;
 use kube::Client;
@@ -100,6 +104,13 @@ pub struct ReconcileSnapshot {
     // ── Database migration ────────────────────────────────────────────
     pub cluster_mismatch: bool,
     pub db_migration_job: JobStatus,
+
+    // ── Volume mount health ───────────────────────────────────────────
+    // Names of pods owned by the instance's deployments that are stuck with
+    // persistent FailedMount / FailedAttachVolume events.  The Starting
+    // state's ensure() deletes these so the deployment controller recreates
+    // them, which often clears stale CSI VolumeAttachments.
+    pub stuck_mount_pods: Vec<String>,
 }
 
 impl ReconcileSnapshot {
@@ -293,6 +304,18 @@ impl ReconcileSnapshot {
         )
         .await;
 
+        // ── Volume mount health ───────────────────────────────────────
+        // A pod that can't mount its filestore PVC sits indefinitely in
+        // ContainerCreating while kubelet retries.  We surface this by
+        // pairing pod state with FailedMount / FailedAttachVolume /
+        // FailedAttachVolume.Multi-Attach events: a pod is "stuck" only if
+        // its containers are still Waiting *and* a mount-failure event was
+        // emitted against it recently.  The Starting state uses this list
+        // to delete offending pods so the deployment controller recreates
+        // them.
+        let stuck_mount_pods =
+            gather_stuck_mount_pods(client, ns, instance_name, &cron_depl_name(instance)).await;
+
         // ── Filestore PVC storage-class mismatch detection ────────────
         let (storage_class_mismatch, actual_storage_class) = {
             let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
@@ -398,8 +421,104 @@ impl ReconcileSnapshot {
             migration_job,
             cluster_mismatch,
             db_migration_job,
+            stuck_mount_pods,
         })
     }
+}
+
+/// Identify pods owned by either the instance's web or cron Deployment that
+/// are stuck with unresolved volume mount failures.
+///
+/// "Stuck" here means:
+///   - pod.spec.nodeName is set (so kubelet is responsible for it)
+///   - at least one containerStatus is `Waiting` with a reason of
+///     `ContainerCreating` or `PodInitializing` (i.e., not yet Running)
+///   - there is an Event on the pod with reason `FailedMount`,
+///     `FailedAttachVolume`, or `FailedAttach` from the kubelet/attachdetach
+///     controller, aggregated `count >= 2` (kubelet dedups retries into a
+///     single Event and increments `count`, so this means at least one retry
+///     has also failed — filtering out one-shot transient failures)
+///
+/// The combination matters — plain "Pending + ContainerCreating" is normal
+/// during startup.  A pod is only treated as stuck when kubelet has
+/// explicitly told us it can't attach/mount the volume.
+///
+/// Returns on error by logging and yielding an empty list — the operator
+/// should not hard-fail a reconcile just because the events API is
+/// misbehaving; stuck detection will retry next tick.
+async fn gather_stuck_mount_pods(
+    client: &Client,
+    ns: &str,
+    web_name: &str,
+    cron_name: &str,
+) -> Vec<String> {
+    let pods_api: Api<Pod> = Api::namespaced(client.clone(), ns);
+    let events_api: Api<Event> = Api::namespaced(client.clone(), ns);
+
+    let lp = ListParams::default().labels(&format!("app in ({web_name},{cron_name})"));
+    let pods = match pods_api.list(&lp).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list pods for stuck-mount detection");
+            return Vec::new();
+        }
+    };
+
+    let events = match events_api.list(&ListParams::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list events for stuck-mount detection");
+            return Vec::new();
+        }
+    };
+
+    let mut stuck = Vec::new();
+    for pod in pods {
+        let pod_name = pod.name_any();
+
+        if pod
+            .spec
+            .as_ref()
+            .and_then(|s| s.node_name.as_deref())
+            .is_none()
+        {
+            continue;
+        }
+
+        let Some(status) = pod.status.as_ref() else {
+            continue;
+        };
+
+        let still_creating = status
+            .container_statuses
+            .iter()
+            .flatten()
+            .chain(status.init_container_statuses.iter().flatten())
+            .any(|cs| {
+                cs.state
+                    .as_ref()
+                    .and_then(|st| st.waiting.as_ref())
+                    .and_then(|w| w.reason.as_deref())
+                    .is_some_and(|r| r == "ContainerCreating" || r == "PodInitializing")
+            });
+        if !still_creating {
+            continue;
+        }
+
+        let has_mount_event = events.iter().any(|ev| {
+            let obj = &ev.involved_object;
+            obj.kind.as_deref() == Some("Pod")
+                && obj.name.as_deref() == Some(pod_name.as_str())
+                && ev.reason.as_deref().is_some_and(|r| {
+                    matches!(r, "FailedMount" | "FailedAttachVolume" | "FailedAttach")
+                })
+                && ev.count.unwrap_or(1) >= 2
+        });
+        if has_mount_event {
+            stuck.push(pod_name);
+        }
+    }
+    stuck
 }
 
 /// Combine CR presence with the K8s batch/v1 Job outcome.
