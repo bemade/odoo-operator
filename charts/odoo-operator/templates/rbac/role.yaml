@@ -43,6 +43,19 @@ rules:
     resources: ["configmaps", "secrets", "services", "persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
+  # Pods — needed to detect and recover from stuck volume mounts.  The operator
+  # deletes pods with persistent FailedMount/FailedAttachVolume events so the
+  # deployment controller recreates them (often clearing stale CSI state).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+
+  # VolumeAttachments — escalation path for repeatedly-stuck mounts: detach
+  # the PV from a node when deleting the pod alone doesn't unstick it.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "delete"]
+
   # PersistentVolumes (for filestore StorageClass migration rebind)
   - apiGroups: [""]
     resources: ["persistentvolumes"]
@@ -78,10 +91,11 @@ rules:
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
-  # Events (core + events.k8s.io for kube-rs Recorder)
+  # Events (core + events.k8s.io for kube-rs Recorder, plus read access
+  # for FailedMount/FailedAttachVolume detection).
   - apiGroups: ["", "events.k8s.io"]
     resources: ["events"]
-    verbs: ["create", "patch"]
+    verbs: ["get", "list", "watch", "create", "patch"]
 
   # Webhook configuration cleanup (migration from Kopf operator)
   - apiGroups: ["admissionregistration.k8s.io"]
