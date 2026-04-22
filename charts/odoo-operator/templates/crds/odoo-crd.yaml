@@ -607,6 +607,13 @@ spec:
                     nullable: true
                     type: string
                 type: object
+              environment:
+                default: Staging
+                description: Environment tag for this instance (`Staging` or `Production`). Default is `Staging` — the safer posture, since Calico network policies and future mail-server auto-configuration key on this.
+                enum:
+                - Staging
+                - Production
+                type: string
               filestore:
                 description: FilestoreSpec defines persistent storage for the Odoo filestore.
                 nullable: true

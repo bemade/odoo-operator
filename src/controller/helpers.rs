@@ -21,6 +21,27 @@ use crate::crd::odoo_instance::OdooInstance;
 /// Field manager name used for server-side apply patches.
 pub const FIELD_MANAGER: &str = "odoo-operator";
 
+/// Standard pod labels applied to every Deployment, Job, and pod template
+/// owned by an OdooInstance.  Consumed by downstream systems:
+///   - `bemade.org/environment` — Calico network policies key on this to
+///     allow or deny egress to real mail servers and other sensitive
+///     services (production-only).
+///   - `bemade.org/instance` — identifies which OdooInstance this pod
+///     belongs to; useful for observability and ad-hoc kubectl queries.
+///
+/// These are ADDITIVE to the existing `app: <deployment-name>` selector
+/// label and must not be added to `spec.selector.matchLabels` on existing
+/// Deployments — the selector is immutable after creation.
+pub fn instance_labels(instance: &OdooInstance) -> std::collections::BTreeMap<String, String> {
+    let mut m = std::collections::BTreeMap::new();
+    m.insert(
+        "bemade.org/environment".to_string(),
+        instance.spec.environment.as_label().to_string(),
+    );
+    m.insert("bemade.org/instance".to_string(), instance.name_any());
+    m
+}
+
 /// Build a controller OwnerReference for any kube-rs `Resource`.
 ///
 /// This is generic over `K` — the compiler fills in `api_version()` and
@@ -159,6 +180,7 @@ pub struct OdooJobBuilder {
     init_containers: Option<Vec<Container>>,
     active_deadline: Option<i64>,
     affinity: Option<Affinity>,
+    labels: std::collections::BTreeMap<String, String>,
 }
 
 impl OdooJobBuilder {
@@ -185,6 +207,7 @@ impl OdooJobBuilder {
             init_containers: None,
             active_deadline: None,
             affinity: None,
+            labels: instance_labels(instance),
         }
     }
 
@@ -224,11 +247,16 @@ impl OdooJobBuilder {
 
     /// Consume the builder and produce a `batch/v1 Job`.
     pub fn build(self) -> Job {
+        let template_meta = ObjectMeta {
+            labels: Some(self.labels.clone()),
+            ..Default::default()
+        };
         Job {
             metadata: ObjectMeta {
                 generate_name: Some(self.generate_name),
                 namespace: Some(self.namespace),
                 owner_references: Some(vec![self.owner_ref]),
+                labels: Some(self.labels),
                 ..Default::default()
             },
             spec: Some(JobSpec {
@@ -236,6 +264,7 @@ impl OdooJobBuilder {
                 ttl_seconds_after_finished: Some(900),
                 active_deadline_seconds: self.active_deadline,
                 template: PodTemplateSpec {
+                    metadata: Some(template_meta),
                     spec: Some(PodSpec {
                         restart_policy: Some("Never".to_string()),
                         image_pull_secrets: self.pull_secrets,
@@ -246,7 +275,6 @@ impl OdooJobBuilder {
                         containers: self.containers,
                         ..Default::default()
                     }),
-                    ..Default::default()
                 },
                 ..Default::default()
             }),

@@ -13,6 +13,7 @@ mod backup_job;
 mod bootstrap;
 mod child_resources;
 mod degraded;
+mod environment_labels;
 mod finalizer;
 mod init_job;
 mod migrate_database;

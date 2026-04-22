@@ -46,6 +46,34 @@ pub struct DatabaseSpec {
     pub name: Option<String>,
 }
 
+/// Environment tags an OdooInstance as production or staging.  Used by:
+///   - The `bemade.org/environment` pod label, which Calico network
+///     policies key on to allow or deny egress to real mail servers,
+///     ERP integrations, etc.
+///   - Future: mail-server auto-configuration that points staging
+///     instances at Mailpit rather than real SMTP.
+///
+/// Default is `Staging` — the safer posture.  An accidental omission
+/// can't leak production credentials to a real mail server because a
+/// Staging-tagged instance is blocked by Calico and auto-reconfigured
+/// to Mailpit on neutralize.  Production must be set explicitly.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub enum Environment {
+    #[default]
+    Staging,
+    Production,
+}
+
+impl Environment {
+    /// Lowercase label value used in `bemade.org/environment`.
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            Environment::Staging => "staging",
+            Environment::Production => "production",
+        }
+    }
+}
+
 /// DeploymentStrategyType specifies the update strategy for the Odoo Deployment.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub enum DeploymentStrategyType {
@@ -212,6 +240,12 @@ pub struct OdooInstanceSpec {
 
     #[serde(default)]
     pub init: InitSpec,
+
+    /// Environment tag for this instance (`Staging` or `Production`).
+    /// Default is `Staging` — the safer posture, since Calico network
+    /// policies and future mail-server auto-configuration key on this.
+    #[serde(default)]
+    pub environment: Environment,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<StrategySpec>,
