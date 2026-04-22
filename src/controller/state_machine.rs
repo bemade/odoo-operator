@@ -86,6 +86,12 @@ pub struct ReconcileSnapshot {
     pub active_upgrade_job: Option<OdooUpgradeJob>,
     pub active_backup_job: Option<OdooBackupJob>,
 
+    // Count of non-terminal OdooBackupJob CRs for the instance.  Used to
+    // detect the "queued-behind" scenario where one backup completes while
+    // another is still pending; we need to stay in BackingUp until all of
+    // them finish, else the phase flaps BackingUp → Running → BackingUp.
+    pub pending_backup_jobs: usize,
+
     // ── Filestore migration ─────────────────────────────────────────────
     pub storage_class_mismatch: bool,
     pub actual_storage_class: Option<String>,
@@ -227,6 +233,7 @@ impl ReconcileSnapshot {
         // ── Backup jobs ─────────────────────────────────────────────────
         let mut active_backup_job: Option<OdooBackupJob> = None;
         let mut backup_job_active = false;
+        let mut pending_backup_jobs: usize = 0;
         {
             let backups: Api<OdooBackupJob> = Api::namespaced(client.clone(), ns);
             for job in backups.list(&ListParams::default()).await?.items {
@@ -237,6 +244,7 @@ impl ReconcileSnapshot {
                 match phase {
                     Some(Phase::Completed) | Some(Phase::Failed) => {}
                     _ => {
+                        pending_backup_jobs += 1;
                         if active_backup_job.is_none() {
                             backup_job_active = true;
                             active_backup_job = Some(job);
@@ -384,6 +392,7 @@ impl ReconcileSnapshot {
             active_restore_job,
             active_upgrade_job,
             active_backup_job,
+            pending_backup_jobs,
             storage_class_mismatch,
             actual_storage_class,
             migration_job,
@@ -915,6 +924,28 @@ pub static TRANSITIONS: &[Transition] = &[
         actions: &[],
     },
     // ── BackingUp ───────────────────────────────────────────
+    //
+    // Self-loops for queued-behind backup jobs.  When one OdooBackupJob's
+    // K8s Job completes but another non-terminal OdooBackupJob CR still
+    // exists for the same instance, we complete the finished CR (so the
+    // next reconcile picks up the next one) but STAY in BackingUp.  Without
+    // this the phase flaps BackingUp → Running → BackingUp between the two
+    // jobs.  Placed first so the exit transitions below don't steal the
+    // edge when pending_backup_jobs > 1.
+    Transition {
+        from: BackingUp,
+        to: BackingUp,
+        guard: |_, s| s.backup_job == Succeeded && s.pending_backup_jobs > 1,
+        guard_name: "backup succeeded && another pending",
+        actions: &[TransitionAction::CompleteBackupJob],
+    },
+    Transition {
+        from: BackingUp,
+        to: BackingUp,
+        guard: |_, s| s.backup_job == Failed && s.pending_backup_jobs > 1,
+        guard_name: "backup failed && another pending",
+        actions: &[TransitionAction::FailBackupJob],
+    },
     Transition {
         from: BackingUp,
         to: Stopped,

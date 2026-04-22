@@ -43,6 +43,8 @@ stateDiagram-v2
     Degraded --> Running : [ready >= desired]
     Degraded --> Starting : [ready == 0]
 
+    BackingUp --> BackingUp : [backup succeeded && another pending] / CompleteBackupJob
+    BackingUp --> BackingUp : [backup failed && another pending] / FailBackupJob
     BackingUp --> Stopped : [backup succeeded && replicas == 0] / CompleteBackupJob
     BackingUp --> Stopped : [backup failed && replicas == 0] / FailBackupJob
     BackingUp --> Running : [backup succeeded && ready >= desired] / CompleteBackupJob
