@@ -160,13 +160,23 @@ spec:
     url: ...
 status:
   phase: Pending | Snapshotting | Cloning | Restoring | Neutralizing | Completed | Failed
-  snapshotName: ...              # VolumeSnapshot reference
-  sourceBackupName: ...          # CNPG Backup reference
-  jobName: ...                   # underlying batch/v1 Job for neutralize
+  sourceSnapshot: ...            # fresh prod snapshot used for this refresh
+  rollbackSnapshot: ...           # pre-refresh snapshot of staging (24h TTL)
+  tempDbName: ...                # during Restoring/Neutralizing, the
+                                 # `<db>_refresh_<ts>` DB name (for debugging
+                                 # if the job fails between restore and rename)
+  dbJobName: ...                 # underlying batch/v1 Job for pg_dump|restore
+  filestoreJobName: ...          # underlying batch/v1 Job for filestore (F2 only)
+  neutralizeJobName: ...         # underlying batch/v1 Job for neutralize
   startTime: ...
   completionTime: ...
   message: ...
 ```
+
+And a corresponding `OdooInstance.status.lastRefreshRollbackSnapshot`
+field that records the most recent pre-refresh snapshot, so a user
+rolling back staging after a bad test run can find the right snapshot
+without digging through `OdooStagingRefreshJob` history.
 
 ### State-machine additions
 
@@ -207,7 +217,90 @@ This feature rides on top of #76's guarantees for free:
   instance to `Uninitialized` (so staging never comes up with active
   production mail servers)
 
-## Open questions for Marc
+## Refresh semantics
+
+Refresh (re-running a `OdooStagingRefreshJob` against an already-
+populated staging instance) is designed for zero-loss rollback of the
+old staging state, since staging is routinely used for destructive
+testing that the user may want to undo.
+
+### Database
+
+Blue/green cutover inside a single Postgres cluster:
+
+1. Stream `pg_dump | pg_restore` into a **temp DB** named
+   `<db_name>_refresh_<ts>`.  Live staging DB is untouched.
+2. Run neutralize + mail-server verification against the temp DB.
+3. On success: scale staging pods to 0, `DROP DATABASE <db_name>`,
+   `ALTER DATABASE <db_name>_refresh_<ts> RENAME TO <db_name>`, scale
+   pods back up.
+4. On any failure before step 3: drop the temp DB; live staging is
+   undisturbed, refresh job marked Failed.
+
+Cutover in step 3 is a brief outage (seconds) but with zero data loss
+risk — if anything goes wrong before rename, staging continues
+running against its previous DB.
+
+### Filestore (snapshot path, F1)
+
+Before touching anything:
+
+1. Take a `VolumeSnapshot` of the current staging filestore PVC,
+   named `<instance>-filestore-pre-refresh-<ts>`.  Record its name in
+   `OdooStagingRefreshJob.status.rollbackSnapshot` and in
+   `OdooInstance.status.lastRefreshRollbackSnapshot`.
+2. Take a fresh `VolumeSnapshot` of the production filestore PVC.
+3. Delete the staging filestore PVC and recreate it with
+   `dataSource` pointing at the production snapshot.
+
+Both snapshots are TTL-tagged for 24h — see retention below.
+Rollback is then a user-visible operation: delete the staging
+filestore PVC, recreate from the snapshot referenced in
+`lastRefreshRollbackSnapshot`.
+
+### Filestore (rsync path, F2)
+
+Filestore entries are content-addressable (sha1 filenames), so
+`rsync -a` (no `--delete`) is intrinsically additive-safe.  No
+pre-refresh snapshot: the rsync only adds entries or overwrites
+existing ones with identical content.  If a specific file somehow
+needs rollback, that's handled by the DB blue/green (staging DB
+points at the old filestore keys).
+
+### Snapshot retention
+
+Snapshots created by a staging refresh (both the
+pre-refresh rollback snapshot and the production-side fresh
+snapshot) carry a label:
+
+```
+bemade.org/refresh-job: <staging-refresh-job-name>
+bemade.org/expires-at: <rfc3339 timestamp, +24h from creation>
+```
+
+A lightweight reaper in the operator's periodic work queue scans
+`VolumeSnapshot`s with this label and deletes any past the
+`expires-at`.  Users who want to pin a rollback snapshot beyond 24h
+remove the `expires-at` label manually (or we add a "pin" subcommand
+later if this is a common enough ask).
+
+## Decisions confirmed with Marc
+
+1. **Cluster scope.**  Not limited to single-cluster by the DB path
+   (pg_dump streams over the network).  F1 filestore snapshots are
+   intrinsically same-cluster (CSI scope) so cross-cluster staging
+   will need an F3 network-rsync variant — deferred, not blocking
+   for v1.  v1 ships with same-cluster as the supported mode.
+2. **New CRD.**  `OdooStagingRefreshJob` — conceptually distinct
+   from `OdooRestoreJob` (source is a live instance, includes
+   snapshot steps).
+3. **Snapshot retention.**  24h TTL with a reaper, as detailed above.
+4. **Refresh-over-populated staging.**  Blue/green for the DB via
+   temp-name + rename cutover.  Pre-refresh snapshot of staging
+   filestore kept for 24h rollback.  Rsync path is additive so no
+   pre-snapshot needed.  Rollback reference stored in status.
+5. **CNPG decoupling.**  Confirmed — no CNPG dependency anywhere in
+   the design.
 
 1. **Same-cluster only for v1?**  Snapshot-based cloning realistically
    requires both instances in the same cluster because `VolumeSnapshot`
