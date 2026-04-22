@@ -42,12 +42,12 @@ building on top of the hardened restore pipeline from #76.
 
 ## Two possible approaches
 
-The filestore side is one question (block-level snapshot vs file copy) and
-the database side is another (cluster-primitive recovery vs `pg_dump`
-streaming).  They compose independently — and more importantly, they
-**run in parallel**: the operator spawns a filestore Job and a database
-Job concurrently and waits for both to succeed before the neutralize
-step runs.  Wall-clock time is max(filestore, db) rather than their sum.
+The filestore side is one question (block-level snapshot vs file copy)
+and the database side is `pg_dump | pg_restore` streamed through a
+single Job pod.  The two run **in parallel**: the operator spawns a
+filestore Job and a database Job concurrently and waits for both to
+succeed before the neutralize step runs.  Wall-clock time is
+max(filestore, db) rather than their sum.
 
 ### Filestore options
 
@@ -67,38 +67,36 @@ A short-lived Job mounts both PVCs (or streams over a service) and
 copies.  Identical to today's filestore handling inside
 `OdooRestoreJob` + `restore.sh`.  Slower but works anywhere.
 
-### Database options
+### Database: streamed `pg_dump | pg_restore`
 
-**D1 — `pg_dump` streamed straight into the target (default):**
-A Job pod runs `pg_dump -h <source-service>` piped into `psql` /
-`pg_restore` against the staging cluster's service.  MVCC snapshot on
-the source so production writes keep flowing; no S3 round-trip; no
-zip intermediate.  Works against any Postgres (decoupled from the
-underlying cluster manager) and across clusters within the same
+A Job pod runs `pg_dump -h <source-service> -Fc | pg_restore -h
+<staging-service> --jobs=<cpus>` end-to-end in a single process.
+MVCC snapshot on the source so production writes keep flowing; no
+staging artifact; no intermediate storage; `--jobs` parallelizes
+index rebuilds on the target.  Works against any Postgres (decoupled
+from the cluster manager) and across clusters within the same
 Postgres reachability domain.
 
 Then runs the standard neutralize + mail-server verification from
 `restore.sh`.
 
-**D2 — CNPG `Backup` / `Recovery` (opt-in fast path):**
-When both production and staging run on CloudNativePG, the operator
-can reuse a CNPG `Backup` (existing scheduled one if fresh enough,
-otherwise trigger one) and bootstrap the staging CNPG `Cluster` with
-`bootstrap.recovery.backup.name`.  CNPG restores at the filesystem
-level — minutes instead of hours for multi-hundred-GB databases.
+**Alternatives considered and rejected:**
 
-D2 is strictly a speed optimization for large DBs; it carries a CNPG
-dependency we've otherwise kept out of the data path, so it's opt-in
-via `OdooStagingRefreshJob.spec.method: cnpg-backup`.  D1 is the
-default and remains the only supported path for non-CNPG clusters.
+- **CNPG `Backup` / `Recovery`** — filesystem-level physical copy
+  is 2-3× faster for 100 GB+ DBs with heavy indexes.  Rejected
+  because (a) typical Odoo DBs sit in the 1-50 GB range where
+  `pg_restore --jobs` is fast enough, (b) it would pull CNPG into
+  the data path we otherwise keep decoupled, (c) it adds backup
+  artifact lifecycle management and object-storage credentials for
+  bootstrap.  If someone ever hits a DB large enough to care, this
+  can be added later as an opt-in method without reshaping the CRD.
 
-**D-not-proposed — `CREATE DATABASE ... WITH TEMPLATE`:**
-Fastest possible same-cluster DB copy (server-side file copy in one
-SQL statement).  Rejected because Postgres requires *no other
-connections* to the template for the duration — for any live
-production DB this means scaling web + cron to 0.  Viable for
-small demo/fixture scenarios, not for staging-from-prod.  Noted
-here only so future readers don't re-ask.
+- **`CREATE DATABASE ... WITH TEMPLATE`** — fastest possible
+  same-cluster copy (server-side file copy in one SQL statement).
+  Rejected because Postgres requires *no other connections* to the
+  template for the duration — for any live production DB this
+  means scaling web + cron to 0 on prod.  Viable for small
+  demo/fixture scenarios, not for staging-from-prod.
 
 ### Recommendation
 
@@ -127,9 +125,8 @@ spec:
                                  # If false, staging starts empty until
                                  # an OdooStagingRefreshJob is submitted.
     filestoreMethod: auto        # auto | snapshot | copy
-    databaseMethod: auto         # auto | pg-dump | cnpg-backup
-                                 # "auto" picks snapshot+pg-dump, falls
-                                 # back to copy when no VolumeSnapshotClass.
+                                 # "auto" picks snapshot, falls back
+                                 # to copy when no VolumeSnapshotClass.
   # ... other spec fields unchanged ...
 ```
 
@@ -149,7 +146,6 @@ spec:
   odooInstanceRef:
     name: staging-for-prod
   filestoreMethod: auto          # auto | snapshot | copy
-  databaseMethod: auto           # auto | pg-dump | cnpg-backup
   skipFilestore: false           # rare: DB-only refresh
   webhook:                       # reuses the pattern from existing job CRDs
     url: ...
@@ -239,18 +235,16 @@ This feature rides on top of #76's guarantees for free:
 - Detect snapshot-capable storage class via `VolumeSnapshotClass` list
 - Implement `VolumeSnapshot` create + wait-for-ready + clone-into-PVC
 - Falls back to F2 if preconditions not met
-- Covers acceptance criterion 2
+- Covers acceptance criterion 2 — and this is where the real wall-clock
+  win sits for typical deployments (DBs are 1-2 GB; filestores are
+  40-50 GB and dominate the total transfer time)
 
-### Phase 3 — D2 CNPG Backup/Recovery opt-in (2-3 days)
-- Integrate with CNPG `Backup` / bootstrap-recovery as an opt-in
-  method for the DB side
-- Only engaged when `databaseMethod: cnpg-backup` is explicitly set
-- Speed-only optimization; skip if non-CNPG
-
-### Phase 4 — Staging-aware spec field + auto-init (1 day)
+### Phase 3 — Staging-aware spec field + auto-init (1 day)
 - `OdooInstance.spec.cloneFrom` field + webhook validation
 - Auto-create `OdooStagingRefreshJob` on first reconcile when set
 
-Total ~7-10 days.  Phase 1 alone closes the issue's minimum bar with
-a path that works against any Postgres.  Phases 2 and 3 are pure speed
-optimizations that can be deferred without changing the CRD shape.
+Total ~5-7 days.  Phase 1 alone closes the issue's minimum bar with
+a path that works against any Postgres.  Phase 2 is the practical
+speedup — for the current fleet (2 GB DB / 40-50 GB filestores), the
+filestore is the bottleneck and CSI snapshot cloning is where the
+order-of-magnitude time difference lives.
