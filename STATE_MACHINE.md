@@ -61,7 +61,7 @@ stateDiagram-v2
     Upgrading --> Starting : [upgrade_job absent]
 
     Restoring --> Starting : [restore_job succeeded] / CompleteRestoreJob, MarkDbInitialized
-    Restoring --> Starting : [restore_job failed] / FailRestoreJob
+    Restoring --> Uninitialized : [restore_job failed] / FailRestoreJob, MarkDbUninitialized
     Restoring --> Starting : [restore_job absent]
 
     Stopped --> MigratingFilestore : [storage_class_mismatch] / BeginFilestoreMigration

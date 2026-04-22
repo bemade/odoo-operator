@@ -82,3 +82,69 @@ async fn restore_job_lifecycle() -> anyhow::Result<()> {
     ready_handle.abort();
     Ok(())
 }
+
+/// A failed restore must NOT bring pods back up. The instance drops back to
+/// Uninitialized with dbInitialized=false so the next init or restore job is
+/// required before traffic can be served again.
+#[tokio::test]
+async fn failed_restore_transitions_to_uninitialized() -> anyhow::Result<()> {
+    let ctx = TestContext::new("test-restore-fail").await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+
+    // Bring the instance to Running first so dbInitialized=true, web+cron up.
+    let ready_handle = fast_track_to_running(&ctx, "test-restore-fail-init").await;
+
+    let restore_api: Api<OdooRestoreJob> = Api::namespaced(c.clone(), ns);
+    let restore_job: OdooRestoreJob = serde_json::from_value(json!({
+        "apiVersion": "bemade.org/v1alpha1",
+        "kind": "OdooRestoreJob",
+        "metadata": { "name": "test-restore-fail-job", "namespace": ns },
+        "spec": {
+            "odooInstanceRef": { "name": "test-restore-fail" },
+            "source": {
+                "type": "s3",
+                "s3": {
+                    "bucket": "test-bucket",
+                    "objectKey": "test-key",
+                    "endpoint": "http://localhost:9000",
+                },
+            },
+        }
+    }))
+    .unwrap();
+    restore_api
+        .create(&PostParams::default(), &restore_job)
+        .await
+        .expect("failed to create OdooRestoreJob");
+
+    assert!(
+        wait_for_phase(c, ns, "test-restore-fail", OdooInstancePhase::Restoring).await,
+        "expected Restoring after restore job created"
+    );
+
+    let k8s_job = wait_for_k8s_job_name::<OdooRestoreJob>(c, ns, "test-restore-fail-job").await;
+    fake_job_failed(c, ns, &k8s_job).await;
+
+    assert!(
+        wait_for_phase(c, ns, "test-restore-fail", OdooInstancePhase::Uninitialized).await,
+        "expected Uninitialized after restore job failed"
+    );
+
+    // Both deployments must remain at 0 — no pods come back up.
+    check_deployment_scale(c, ns, "test-restore-fail", 0).await?;
+    check_deployment_scale(c, ns, "test-restore-fail-cron", 0).await?;
+
+    // dbInitialized must be flipped back to false so a subsequent restart
+    // cannot transition Provisioning → Starting against a dropped DB.
+    let instances: Api<odoo_operator::crd::odoo_instance::OdooInstance> =
+        Api::namespaced(c.clone(), ns);
+    let inst = instances.get("test-restore-fail").await?;
+    assert_eq!(
+        inst.status.map(|s| s.db_initialized),
+        Some(false),
+        "dbInitialized must be false after failed restore"
+    );
+
+    ready_handle.abort();
+    Ok(())
+}
