@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.0](https://github.com/bemade/odoo-operator/compare/v1.8.0...v1.9.0) (2026-04-22)
+
+
+### Features
+
+* **mail:** staging instances auto-redirect SMTP to Mailpit (BREAKING) ([aedf19c](https://github.com/bemade/odoo-operator/commit/aedf19c1abfc132263e8be634b8d0a58f8ae15d8))
+* **mail:** staging instances auto-redirect SMTP to Mailpit (BREAKING) ([9186467](https://github.com/bemade/odoo-operator/commit/9186467e068c7ead1ba32ede06cce7df32e8236b))
+
 ## [1.8.0](https://github.com/bemade/odoo-operator/compare/v1.7.0...v1.8.0) (2026-04-22)
 
 
