@@ -101,9 +101,11 @@ module. To skip auto-init (e.g. when restoring from a backup), set
 | `ingress.gatewayRef.namespace` | operator default | Gateway namespace for HTTPRoute |
 | `database.cluster` | secret default | Postgres cluster name from the pg-clusters secret |
 | `database.name` | auto-generated | Database name. Defaults to `odoo_<uid>` if unset |
-| `init.enabled` | `true` | Automatically initialize the database when the instance is first created |
+| `init.enabled` | `true` | Automatically initialize the database when the instance is first created (skipped when `productionInstanceRef` is set) |
 | `init.modules` | `["base"]` | Odoo modules to install during auto-initialization |
 | `init.webhook` | — | Webhook to notify on init job status changes |
+| `productionInstanceRef.name` | — | Name of a source production `OdooInstance` to clone from on first init. When set, the operator creates an `OdooStagingRefreshJob` instead of an `OdooInitJob`. Forbidden on `environment: Production`. See [Staging from production](#staging-from-production) |
+| `productionInstanceRef.namespace` | same as target | Reserved for a future cross-namespace phase; must equal (or omit) the target's namespace in v1 |
 | `filestore.storageSize` | `2Gi` | PVC size. Can only be increased, not decreased |
 | `filestore.storageClass` | operator default | StorageClass for the filestore PVC. Immutable after creation |
 | `resources` | operator default | CPU/memory requests and limits for web pods |
@@ -136,6 +138,44 @@ stale connections.
 
 You don't need to set `workers` or `max_cron_threads` in `configOptions` — the
 operator handles this automatically via the command-line flags on each deployment.
+
+### Staging from production
+
+Set `spec.productionInstanceRef` on a staging `OdooInstance` to declaratively
+tie it to a source-of-truth production instance. On first reconcile, the
+operator creates an `OdooStagingRefreshJob` (named `<instance>-auto-refresh`)
+that clones the prod DB + filestore into the new instance and runs
+`odoo neutralize` — in place of the normal `OdooInitJob` path:
+
+```yaml
+apiVersion: bemade.org/v1alpha1
+kind: OdooInstance
+metadata:
+  name: client-staging
+  namespace: client
+spec:
+  adminPassword: admin
+  image: odoo:18.0
+  ingress:
+    hosts: [client-staging.example.com]
+  filestore:
+    storageSize: 50Gi
+  environment: Staging
+  productionInstanceRef:
+    name: client-prod
+```
+
+Requirements and limits:
+
+- Forbidden on `environment: Production` (rejected at `kubectl apply` time
+  by a CRD CEL rule).
+- Same-namespace only in v1. `productionInstanceRef.namespace` is reserved
+  for a future cross-namespace phase.
+- Auto-refresh fires only on first initialization (when
+  `status.dbInitialized` is false). A user-created `OdooStagingRefreshJob`
+  pre-empts the auto-create — useful for tuning `filestoreMethod` or
+  `skipFilestore`, which the auto-create path leaves at CRD defaults
+  (`Auto` / `false`).
 
 ### Gateway API Support
 

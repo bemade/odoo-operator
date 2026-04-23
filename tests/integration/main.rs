@@ -19,6 +19,7 @@ mod init_job;
 mod migrate_database;
 mod migrate_filestore;
 mod orphaned_jobs;
+mod production_instance_ref;
 mod restore_job;
 mod scaling;
 mod staging_refresh;
