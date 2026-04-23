@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.10.1](https://github.com/bemade/odoo-operator/compare/v1.10.0...v1.10.1) (2026-04-23)
+
+
+### Bug Fixes
+
+* **scripts:** strip COMMENT ON EXTENSION from pg_dump stream ([5c21fdb](https://github.com/bemade/odoo-operator/commit/5c21fdb878dae07e6bbb1ecc2eddd567cbddb4c8))
+* **scripts:** strip COMMENT ON EXTENSION from pg_dump stream ([cc194c7](https://github.com/bemade/odoo-operator/commit/cc194c7db4f839d875de2b4f21ef6c4441d98288))
+
 ## [1.10.0](https://github.com/bemade/odoo-operator/compare/v1.9.0...v1.10.0) (2026-04-23)
 
 
