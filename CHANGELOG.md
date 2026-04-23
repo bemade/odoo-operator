@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.10.0](https://github.com/bemade/odoo-operator/compare/v1.9.0...v1.10.0) (2026-04-23)
+
+
+### Features
+
+* **instance:** productionInstanceRef auto-clones staging from prod ([760ef55](https://github.com/bemade/odoo-operator/commit/760ef554e0b3dfa0f7ec24e23e773277e60ca0d6))
+* **instance:** productionInstanceRef auto-clones staging from prod ([9b6687b](https://github.com/bemade/odoo-operator/commit/9b6687b0b414f02973b44d23a9968a03e08351c2))
+
 ## [1.9.0](https://github.com/bemade/odoo-operator/compare/v1.8.0...v1.9.0) (2026-04-22)
 
 
