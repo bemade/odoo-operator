@@ -722,6 +722,20 @@ spec:
                     default: /web/health
                     type: string
                 type: object
+              productionInstanceRef:
+                description: 'When set on a staging instance, the operator clones the named source production `OdooInstance` into this one on first initialization (via an auto-created `OdooStagingRefreshJob`) instead of running the normal `OdooInitJob` path. Ignored once `status.dbInitialized == true`. Forbidden on `environment: Production`.'
+                nullable: true
+                properties:
+                  name:
+                    description: Name of the source `OdooInstance`.
+                    type: string
+                  namespace:
+                    description: Reserved for a future cross-namespace phase; must equal the target namespace (or be unset) in v1.
+                    nullable: true
+                    type: string
+                required:
+                - name
+                type: object
               replicas:
                 default: 1
                 format: int32
@@ -821,6 +835,9 @@ spec:
             - adminPassword
             - ingress
             type: object
+            x-kubernetes-validations:
+            - messageExpression: '''spec.productionInstanceRef is forbidden on production instances'''
+              rule: self.environment != 'Production' || !has(self.productionInstanceRef)
           status:
             description: OdooInstanceStatus defines the observed state of OdooInstance.
             nullable: true

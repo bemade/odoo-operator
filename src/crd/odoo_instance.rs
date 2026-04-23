@@ -1,5 +1,5 @@
 use k8s_openapi::api::core::v1::{Affinity, ResourceRequirements, Toleration};
-use kube::CustomResource;
+use kube::{CELSchema, CustomResource};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +72,26 @@ impl Environment {
             Environment::Production => "production",
         }
     }
+}
+
+/// ProductionInstanceRef declares the source-of-truth production
+/// `OdooInstance` that a staging instance should be cloned from on first
+/// initialization. When set, the operator auto-creates an
+/// `OdooStagingRefreshJob` in place of the normal auto-init path so the
+/// staging comes up pre-populated from prod in a single manifest apply.
+///
+/// Only meaningful when `environment == Staging`. Same-namespace only in
+/// v1 (matches the same-ns constraint already enforced by
+/// `OdooStagingRefreshJob` reconciliation).
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductionInstanceRef {
+    /// Name of the source `OdooInstance`.
+    pub name: String,
+    /// Reserved for a future cross-namespace phase; must equal the
+    /// target namespace (or be unset) in v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
 }
 
 /// DeploymentStrategyType specifies the update strategy for the Odoo Deployment.
@@ -193,7 +213,13 @@ fn default_init_modules() -> Vec<String> {
 // ── CRD ───────────────────────────────────────────────────────────────────────
 
 /// OdooInstance is the Schema for the odooinstances API.
-#[derive(CustomResource, Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(CustomResource, Clone, Debug, Serialize, Deserialize, CELSchema)]
+#[cel_validate(
+    rule = Rule::new("self.environment != 'Production' || !has(self.productionInstanceRef)")
+        .message(Message::Expression(
+            "'spec.productionInstanceRef is forbidden on production instances'".into()
+        ))
+)]
 #[kube(
     group = "bemade.org",
     version = "v1alpha1",
@@ -246,6 +272,15 @@ pub struct OdooInstanceSpec {
     /// policies and future mail-server auto-configuration key on this.
     #[serde(default)]
     pub environment: Environment,
+
+    /// When set on a staging instance, the operator clones the named
+    /// source production `OdooInstance` into this one on first
+    /// initialization (via an auto-created `OdooStagingRefreshJob`)
+    /// instead of running the normal `OdooInitJob` path. Ignored once
+    /// `status.dbInitialized == true`. Forbidden on
+    /// `environment: Production`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_instance_ref: Option<ProductionInstanceRef>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<StrategySpec>,

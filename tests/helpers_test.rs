@@ -132,6 +132,7 @@ fn make_instance(uid: Option<&str>, db_name: Option<&str>) -> OdooInstance {
             }),
             init: Default::default(),
             environment: Default::default(),
+            production_instance_ref: None,
             strategy: None,
             webhook: None,
             probes: None,
