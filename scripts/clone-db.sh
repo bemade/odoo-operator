@@ -65,6 +65,7 @@ PGPASSWORD=$SRC_PASSWORD pg_dump \
 sed -E \
     -e '/^SET transaction_timeout /d' \
     -e '/^ALTER [A-Z ]+[^;]*OWNER TO [^;]*;$/d' \
+    -e '/^COMMENT ON EXTENSION [^;]*;$/d' \
     -e '/^GRANT [^;]*;$/d' \
     -e '/^REVOKE [^;]*;$/d' \
     -e '/^REASSIGN OWNED BY [^;]*;$/d' | \

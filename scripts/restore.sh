@@ -91,6 +91,7 @@ load_sql() {
     # simply won't fire, instead of surgically corrupting a multi-line stmt.
     sed -E \
         -e '/^ALTER [A-Z ]+[^;]*OWNER TO [^;]*;$/d' \
+        -e '/^COMMENT ON EXTENSION [^;]*;$/d' \
         -e '/^GRANT [^;]*;$/d' \
         -e '/^REVOKE [^;]*;$/d' \
         -e '/^REASSIGN OWNED BY [^;]*;$/d' \
