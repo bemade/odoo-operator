@@ -146,8 +146,26 @@ spec:
                 description: batch/v1 Job name for the DB clone.
                 nullable: true
                 type: string
+              dbJobPhase:
+                description: Recorded terminal phase (`Completed`/`Failed`) of the DB clone Job. Persisted on first observation so that future reconciles remain correct after the underlying batch/v1 Job is garbage-collected by `ttlSecondsAfterFinished` while sibling sub-Jobs are still running.
+                enum:
+                - Pending
+                - Running
+                - Completed
+                - Failed
+                nullable: true
+                type: string
               filestoreJobName:
                 description: batch/v1 Job name for the filestore copy/clone.
+                nullable: true
+                type: string
+              filestoreJobPhase:
+                description: Recorded terminal phase of the filestore clone Job.  See `dbJobPhase`.
+                enum:
+                - Pending
+                - Running
+                - Completed
+                - Failed
                 nullable: true
                 type: string
               message:
@@ -155,6 +173,15 @@ spec:
                 type: string
               neutralizeJobName:
                 description: batch/v1 Job name for the neutralize step.
+                nullable: true
+                type: string
+              neutralizeJobPhase:
+                description: Recorded terminal phase of the neutralize Job.  See `dbJobPhase`.
+                enum:
+                - Pending
+                - Running
+                - Completed
+                - Failed
                 nullable: true
                 type: string
               phase:

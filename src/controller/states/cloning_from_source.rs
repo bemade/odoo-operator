@@ -9,6 +9,7 @@ use tracing::info;
 
 use crate::crd::odoo_instance::OdooInstance;
 use crate::crd::odoo_staging_refresh_job::OdooStagingRefreshJob;
+use crate::crd::shared::Phase;
 use crate::error::{Error, Result};
 
 use super::{Context, ReconcileSnapshot, State};
@@ -197,21 +198,29 @@ impl State for CloningFromSource {
 
         // ── Step 3: neutralize (after DB + filestore succeed) ─────────
         let jobs_api: Api<Job> = Api::namespaced(ctx.client.clone(), &ns);
-        let db_done = job_succeeded(
+        let db_done = sub_job_succeeded(
             &jobs_api,
             refresh
                 .status
                 .as_ref()
                 .and_then(|s| s.db_job_name.as_deref()),
+            refresh
+                .status
+                .as_ref()
+                .and_then(|s| s.db_job_phase.as_ref()),
         )
         .await;
         let fs_done = refresh.spec.skip_filestore
-            || job_succeeded(
+            || sub_job_succeeded(
                 &jobs_api,
                 refresh
                     .status
                     .as_ref()
                     .and_then(|s| s.filestore_job_name.as_deref()),
+                refresh
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.filestore_job_phase.as_ref()),
             )
             .await;
         if db_done
@@ -275,7 +284,22 @@ impl State for CloningFromSource {
     }
 }
 
-async fn job_succeeded(jobs_api: &Api<Job>, name: Option<&str>) -> bool {
+/// Has a refresh sub-Job reached a successful terminal state?
+///
+/// Prefers the recorded `Phase::Completed` on the parent CR (set by the
+/// snapshot builder once a terminal status is observed) so this gate
+/// keeps returning `true` even after the underlying batch/v1 Job is
+/// garbage-collected by `ttlSecondsAfterFinished` while siblings are
+/// still in flight.  Falls back to a live K8s lookup when no record
+/// exists yet.
+async fn sub_job_succeeded(
+    jobs_api: &Api<Job>,
+    name: Option<&str>,
+    recorded_phase: Option<&Phase>,
+) -> bool {
+    if matches!(recorded_phase, Some(Phase::Completed)) {
+        return true;
+    }
     let Some(name) = name else {
         return false;
     };

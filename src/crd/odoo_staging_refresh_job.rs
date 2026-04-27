@@ -109,13 +109,28 @@ pub struct OdooStagingRefreshJobStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub db_job_name: Option<String>,
 
+    /// Recorded terminal phase (`Completed`/`Failed`) of the DB clone Job.
+    /// Persisted on first observation so that future reconciles remain
+    /// correct after the underlying batch/v1 Job is garbage-collected by
+    /// `ttlSecondsAfterFinished` while sibling sub-Jobs are still running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_job_phase: Option<Phase>,
+
     /// batch/v1 Job name for the filestore copy/clone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filestore_job_name: Option<String>,
 
+    /// Recorded terminal phase of the filestore clone Job.  See `dbJobPhase`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filestore_job_phase: Option<Phase>,
+
     /// batch/v1 Job name for the neutralize step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neutralize_job_name: Option<String>,
+
+    /// Recorded terminal phase of the neutralize Job.  See `dbJobPhase`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neutralize_job_phase: Option<Phase>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_time: Option<String>,
