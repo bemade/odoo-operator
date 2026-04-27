@@ -272,10 +272,16 @@ impl ReconcileSnapshot {
                     Some(Phase::Completed) | Some(Phase::Failed) => {}
                     _ => {
                         if active_refresh_job.is_none() {
+                            let crd_name = job.name_any();
                             let sub_statuses = [
-                                resolve_k8s_job_status(
+                                resolve_refresh_sub_job_status(
+                                    client,
+                                    ns,
+                                    &crd_name,
                                     &jobs_api,
                                     job.status.as_ref().and_then(|s| s.db_job_name.as_deref()),
+                                    job.status.as_ref().and_then(|s| s.db_job_phase.as_ref()),
+                                    "dbJobPhase",
                                 )
                                 .await,
                                 // Filestore sub-job is skipped when
@@ -284,19 +290,33 @@ impl ReconcileSnapshot {
                                 if job.spec.skip_filestore {
                                     JobStatus::Succeeded
                                 } else {
-                                    resolve_k8s_job_status(
+                                    resolve_refresh_sub_job_status(
+                                        client,
+                                        ns,
+                                        &crd_name,
                                         &jobs_api,
                                         job.status
                                             .as_ref()
                                             .and_then(|s| s.filestore_job_name.as_deref()),
+                                        job.status
+                                            .as_ref()
+                                            .and_then(|s| s.filestore_job_phase.as_ref()),
+                                        "filestoreJobPhase",
                                     )
                                     .await
                                 },
-                                resolve_k8s_job_status(
+                                resolve_refresh_sub_job_status(
+                                    client,
+                                    ns,
+                                    &crd_name,
                                     &jobs_api,
                                     job.status
                                         .as_ref()
                                         .and_then(|s| s.neutralize_job_name.as_deref()),
+                                    job.status
+                                        .as_ref()
+                                        .and_then(|s| s.neutralize_job_phase.as_ref()),
+                                    "neutralizeJobPhase",
                                 )
                                 .await,
                             ];
@@ -590,18 +610,43 @@ async fn gather_stuck_mount_pods(
     stuck
 }
 
-/// Resolve a single K8s Job's observed status by name.  Used by the
-/// staging-refresh aggregator which needs per-sub-job state, rather than
-/// the CR-centric view `resolve_job_status` gives.
+/// Resolve a staging-refresh sub-Job's status, preferring a previously
+/// recorded terminal phase on the parent CR over a live K8s lookup.
 ///
-/// Returns `Absent` when the job name is not yet populated (so the
-/// CloningFromSource state knows to create it), `Succeeded` / `Failed` /
-/// `Active` based on the K8s Job status.
-async fn resolve_k8s_job_status(jobs_api: &Api<Job>, job_name: Option<&str>) -> JobStatus {
+/// Why: the underlying batch/v1 Jobs carry `ttlSecondsAfterFinished`, so
+/// a sub-Job that finishes well ahead of its siblings (e.g. DB clone vs.
+/// a long rsync filestore copy) gets garbage-collected before the
+/// aggregate refresh completes.  A naive re-read then sees a 404 and
+/// would treat that as `Failed`, killing the in-flight refresh and
+/// orphaning the surviving sub-Jobs.
+///
+/// On first observation of a terminal K8s status, this function persists
+/// the outcome to `status.{field}` on the parent CR, so subsequent
+/// reconciles read the canonical record and never re-evaluate the
+/// (possibly GC'd) batch/v1 Job.  When neither a record nor a live Job
+/// is available (404 with no recording yet), we conservatively report
+/// `Active` rather than `Failed` — losing the terminal observation
+/// window only happens if the operator was offline across the TTL, and
+/// reporting `Failed` on missing evidence is worse than waiting for the
+/// sibling sub-Jobs' `activeDeadlineSeconds` to drive progress.
+async fn resolve_refresh_sub_job_status(
+    client: &Client,
+    ns: &str,
+    crd_name: &str,
+    jobs_api: &Api<Job>,
+    job_name: Option<&str>,
+    recorded_phase: Option<&Phase>,
+    sub_job_field: &str,
+) -> JobStatus {
+    match recorded_phase {
+        Some(Phase::Completed) => return JobStatus::Succeeded,
+        Some(Phase::Failed) => return JobStatus::Failed,
+        _ => {}
+    }
     let Some(name) = job_name else {
         return JobStatus::Absent;
     };
-    match jobs_api.get(name).await {
+    let live = match jobs_api.get(name).await {
         Ok(job) => {
             let succeeded = job.status.as_ref().and_then(|s| s.succeeded).unwrap_or(0) > 0;
             let failed = job.status.as_ref().and_then(|s| s.failed).unwrap_or(0) > 0;
@@ -613,9 +658,30 @@ async fn resolve_k8s_job_status(jobs_api: &Api<Job>, job_name: Option<&str>) -> 
                 JobStatus::Active
             }
         }
-        Err(kube::Error::Api(ref err)) if err.code == 404 => JobStatus::Failed,
+        Err(kube::Error::Api(ref err)) if err.code == 404 => JobStatus::Active,
         Err(_) => JobStatus::Active,
+    };
+    if matches!(live, JobStatus::Succeeded | JobStatus::Failed) {
+        let phase_str = if matches!(live, JobStatus::Succeeded) {
+            "Completed"
+        } else {
+            "Failed"
+        };
+        let patch = json!({"status": {sub_job_field: phase_str}});
+        let api: Api<OdooStagingRefreshJob> = Api::namespaced(client.clone(), ns);
+        if let Err(e) = api
+            .patch_status(
+                crd_name,
+                &PatchParams::apply(FIELD_MANAGER),
+                &Patch::Merge(&patch),
+            )
+            .await
+        {
+            tracing::warn!(%crd_name, %sub_job_field, error = %e,
+                "failed to record refresh sub-job terminal phase; will retry on next reconcile");
+        }
     }
+    live
 }
 
 /// Roll up the staging-refresh sub-Job statuses into a single JobStatus.
