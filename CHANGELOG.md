@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.2](https://github.com/bemade/odoo-operator/compare/v1.10.1...v1.10.2) (2026-04-27)
+
+
+### Bug Fixes
+
+* **staging-refresh:** record sub-job phases to survive Job GC ([92482ba](https://github.com/bemade/odoo-operator/commit/92482ba102d0d4eea92b8a97790f49614d347d75))
+
 ## [1.10.1](https://github.com/bemade/odoo-operator/compare/v1.10.0...v1.10.1) (2026-04-23)
 
 
