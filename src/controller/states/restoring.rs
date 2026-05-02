@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use k8s_openapi::api::{
     batch::v1::Job,
-    core::v1::{Container, Volume, VolumeMount},
+    core::v1::{
+        Container, PersistentVolumeClaimVolumeSource, SecurityContext, Volume, VolumeMount,
+    },
 };
 use kube::api::{Api, Patch, PatchParams, PostParams, ResourceExt};
 use kube::runtime::events::EventType;
@@ -16,14 +18,16 @@ use crate::notify;
 
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{
-    cm_env, cron_depl_name, env, odoo_volume_mounts, staging_mail_env_vars, OdooJobBuilder,
+    cm_env, cron_depl_name, env, pg_tools_image, staging_mail_env_vars, OdooJobBuilder,
     FIELD_MANAGER,
 };
 use crate::controller::state_machine::scale_deployment;
 
 const S3_DOWNLOAD_SCRIPT: &str = include_str!("../../../scripts/s3-download.sh");
 const ODOO_DOWNLOAD_SCRIPT: &str = include_str!("../../../scripts/odoo-download.sh");
-const RESTORE_SCRIPT: &str = include_str!("../../../scripts/restore.sh");
+const EXTRACT_SCRIPT: &str = include_str!("../../../scripts/restore-extract.sh");
+const LOAD_DB_SCRIPT: &str = include_str!("../../../scripts/restore-load-db.sh");
+const NEUTRALIZE_SCRIPT: &str = include_str!("../../../scripts/restore-neutralize.sh");
 
 /// Restoring: restore job running, deployment must be down.
 ///
@@ -63,40 +67,50 @@ impl State for Restoring {
         let crd_name = restore_job.name_any();
         let client = &ctx.client;
         let instance_name = instance.name_any();
-        let image = instance.spec.image.as_deref().unwrap_or("odoo:18.0");
+        let odoo_image = instance.spec.image.as_deref().unwrap_or("odoo:18.0");
         let db = crate::helpers::db_name(instance);
         let odoo_conf_name = format!("{instance_name}-odoo-conf");
 
-        let neutralize = if restore_job.spec.neutralize {
-            "True"
-        } else {
-            "False"
-        };
-        let output_file = match restore_job.spec.format {
-            BackupFormat::Dump => "/mnt/backup/dump.dump",
-            BackupFormat::Sql => "/mnt/backup/dump.sql",
-            BackupFormat::Zip => "/mnt/backup/backup.zip",
+        // Backup-format string is shared by extract + load-db.  For Odoo
+        // pull-from-URL (which can only deliver zip or custom dump), we map
+        // BackupFormat::Sql onto a custom dump too.
+        let format_str = match restore_job.spec.format {
+            BackupFormat::Dump => "dump",
+            BackupFormat::Sql => "sql",
+            BackupFormat::Zip => "zip",
         };
 
-        let shared_mount = VolumeMount {
-            name: "backup".into(),
-            mount_path: "/mnt/backup".into(),
+        // Where the downloader writes.  For zip we land at a generic
+        // /workspace/artifact (the extract container picks it up).  For
+        // dump/sql we write directly to the file the load-db step expects.
+        let output_file = match restore_job.spec.format {
+            BackupFormat::Dump => "/workspace/dump.dump",
+            BackupFormat::Sql => "/workspace/dump.sql",
+            BackupFormat::Zip => "/workspace/artifact",
+        };
+
+        let workspace_mount = VolumeMount {
+            name: "workspace".into(),
+            mount_path: "/workspace".into(),
+            ..Default::default()
+        };
+        let filestore_mount_rw = VolumeMount {
+            name: "filestore".into(),
+            mount_path: "/var/lib/odoo".into(),
             ..Default::default()
         };
 
-        let mut db_env = vec![
-            env("DB_NAME", db.clone()),
-            env("NEUTRALIZE", neutralize),
-            cm_env("HOST", &odoo_conf_name, "db_host"),
-            cm_env("PORT", &odoo_conf_name, "db_port"),
-            cm_env("USER", &odoo_conf_name, "db_user"),
-            cm_env("PASSWORD", &odoo_conf_name, "db_password"),
-        ];
-        db_env.extend(staging_mail_env_vars(instance, &ctx.defaults));
+        // Detect target server major and pick a pg client image whose
+        // pg_restore is ≥ the running server.  Failure aborts.
+        let (_, tgt_pg) = super::super::odoo_instance::load_postgres_cluster(ctx, instance).await?;
+        let major = ctx.postgres.detect_server_major_version(&tgt_pg).await?;
+        let pg_image = pg_tools_image(major);
+        info!(%crd_name, %pg_image, server_major = %major, "selected pg client image for restore");
 
         let mut init_containers = vec![];
         let src = &restore_job.spec.source;
 
+        // ── init: download ──────────────────────────────────────────────
         match src.source_type {
             RestoreSourceType::S3 => {
                 if let Some(ref s3) = src.s3 {
@@ -128,13 +142,15 @@ impl State for Restoring {
                             S3_DOWNLOAD_SCRIPT.into(),
                         ]),
                         env: Some(dl_env),
-                        volume_mounts: Some(vec![shared_mount.clone()]),
+                        volume_mounts: Some(vec![workspace_mount.clone()]),
                         ..Default::default()
                     });
                 }
             }
             RestoreSourceType::Odoo => {
                 if let Some(ref odoo_src) = src.odoo {
+                    // Odoo's master/dump endpoint only delivers zip or custom
+                    // dump.  Map our BackupFormat onto whichever it speaks.
                     let backup_format = if restore_job.spec.format != BackupFormat::Zip {
                         "dump"
                     } else {
@@ -162,34 +178,105 @@ impl State for Restoring {
                             ODOO_DOWNLOAD_SCRIPT.into(),
                         ]),
                         env: Some(dl_env),
-                        volume_mounts: Some(vec![shared_mount.clone()]),
+                        volume_mounts: Some(vec![workspace_mount.clone()]),
                         ..Default::default()
                     });
                 }
             }
         }
 
-        let backup_vol = Volume {
-            name: "backup".into(),
-            empty_dir: Some(Default::default()),
+        // package-upload-style helpers run `apk add ...` which needs root.
+        let root_sc = SecurityContext {
+            run_as_user: Some(0),
             ..Default::default()
         };
 
-        let mut restore_mounts = odoo_volume_mounts();
-        restore_mounts.push(shared_mount);
+        // ── init: extract (zip only) ────────────────────────────────────
+        if restore_job.spec.format == BackupFormat::Zip {
+            init_containers.push(Container {
+                name: "extract".into(),
+                image: Some("alpine:latest".into()),
+                command: Some(vec!["/bin/sh".into(), "-c".into(), EXTRACT_SCRIPT.into()]),
+                env: Some(vec![
+                    env("DB_NAME", db.clone()),
+                    env("INPUT_FILE", "/workspace/artifact"),
+                ]),
+                volume_mounts: Some(vec![workspace_mount.clone(), filestore_mount_rw.clone()]),
+                security_context: Some(root_sc.clone()),
+                ..Default::default()
+            });
+        }
+
+        // ── init: load-db ───────────────────────────────────────────────
+        let load_env = vec![
+            cm_env("HOST", &odoo_conf_name, "db_host"),
+            cm_env("PORT", &odoo_conf_name, "db_port"),
+            cm_env("USER", &odoo_conf_name, "db_user"),
+            cm_env("PASSWORD", &odoo_conf_name, "db_password"),
+            env("DB_NAME", db.clone()),
+            env("BACKUP_FORMAT", format_str),
+        ];
+        init_containers.push(Container {
+            name: "load-db".into(),
+            image: Some(pg_image),
+            command: Some(vec!["/bin/sh".into(), "-c".into(), LOAD_DB_SCRIPT.into()]),
+            env: Some(load_env),
+            volume_mounts: Some(vec![workspace_mount.clone()]),
+            ..Default::default()
+        });
+
+        // ── main: neutralize (Odoo image) or alpine no-op ───────────────
+        let main_container = if restore_job.spec.neutralize {
+            let mut neut_env = vec![
+                cm_env("HOST", &odoo_conf_name, "db_host"),
+                cm_env("PORT", &odoo_conf_name, "db_port"),
+                cm_env("USER", &odoo_conf_name, "db_user"),
+                cm_env("PASSWORD", &odoo_conf_name, "db_password"),
+                env("DB_NAME", db.clone()),
+            ];
+            neut_env.extend(staging_mail_env_vars(instance, &ctx.defaults));
+            Container {
+                name: "neutralize".into(),
+                image: Some(odoo_image.into()),
+                command: Some(vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    NEUTRALIZE_SCRIPT.into(),
+                ]),
+                env: Some(neut_env),
+                ..Default::default()
+            }
+        } else {
+            Container {
+                name: "noop".into(),
+                image: Some("alpine:latest".into()),
+                command: Some(vec!["/bin/true".into()]),
+                ..Default::default()
+            }
+        };
+
+        // Volumes: workspace scratch + filestore PVC.  No odoo-conf —
+        // creds flow through cm_env.
+        let workspace_vol = Volume {
+            name: "workspace".into(),
+            empty_dir: Some(Default::default()),
+            ..Default::default()
+        };
+        let filestore_vol = Volume {
+            name: "filestore".into(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: format!("{instance_name}-filestore-pvc"),
+                read_only: Some(false),
+            }),
+            ..Default::default()
+        };
 
         let job = OdooJobBuilder::new(&format!("{crd_name}-"), &ns, restore_job, instance)
             .active_deadline(3600)
-            .extra_volumes(vec![backup_vol])
+            .without_standard_volumes()
+            .extra_volumes(vec![workspace_vol, filestore_vol])
             .init_containers(init_containers)
-            .containers(vec![Container {
-                name: "restore".into(),
-                image: Some(image.into()),
-                command: Some(vec!["/bin/sh".into(), "-c".into(), RESTORE_SCRIPT.into()]),
-                env: Some(db_env),
-                volume_mounts: Some(restore_mounts),
-                ..Default::default()
-            }])
+            .containers(vec![main_container])
             .build();
 
         let jobs_api: Api<Job> = Api::namespaced(client.clone(), &ns);

@@ -50,7 +50,7 @@ pub fn instance_labels(instance: &OdooInstance) -> std::collections::BTreeMap<St
 /// - the operator has no `staging_smtp_host` configured (keep the
 ///   neutralize sentinel, i.e. `smtp_host=invalid` — no outbound mail).
 ///
-/// Consumed by `restore.sh` and `neutralize.sh` via `MAIL_*` env vars.
+/// Consumed by `restore-neutralize.sh` and `neutralize.sh` via `MAIL_*` env vars.
 pub fn staging_mail_env_vars(
     instance: &OdooInstance,
     defaults: &crate::helpers::OperatorDefaults,
