@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.10.3](https://github.com/bemade/odoo-operator/compare/v1.10.2...v1.10.3) (2026-05-02)
+
+
+### Bug Fixes
+
+* **db-migration:** use pg-tools image matching server major version ([9674175](https://github.com/bemade/odoo-operator/commit/9674175d64762e593b6b572e88dfc334cc8f9a53))
+* **db-migration:** use pg-tools image matching server major version ([aa02c4d](https://github.com/bemade/odoo-operator/commit/aa02c4d5e6fc3e82d8c097f3c6dd4a1cfd08dd1e))
+* **staging-refresh:** use pg-tools image matching server major version ([d6769a3](https://github.com/bemade/odoo-operator/commit/d6769a3bfdc908854ac0b45eabbc628840039af7))
+
 ## [1.10.2](https://github.com/bemade/odoo-operator/compare/v1.10.1...v1.10.2) (2026-04-27)
 
 
