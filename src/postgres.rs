@@ -39,6 +39,9 @@ pub trait PostgresManager: Send + Sync {
         db_name: &str,
         report_url: &str,
     ) -> Result<()>;
+
+    /// Query the running PostgreSQL server for its major version (e.g. 16, 17, 18).
+    async fn detect_server_major_version(&self, pg: &PostgresClusterConfig) -> Result<u32>;
 }
 
 /// Production implementation backed by tokio-postgres.
@@ -169,6 +172,26 @@ impl PostgresManager for PgPostgresManager {
         info!(%username, "deleted postgres role");
         Ok(())
     }
+
+    async fn detect_server_major_version(&self, pg: &PostgresClusterConfig) -> Result<u32> {
+        let connstr = format!(
+            "host={} port={} user={} password={} dbname=postgres",
+            pg.host, pg.port, pg.admin_user, pg.admin_password
+        );
+        let (client, connection) = tokio_postgres::connect(&connstr, NoTls).await?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                warn!("postgres connection error: {e}");
+            }
+        });
+
+        let row = client.query_one("SHOW server_version_num", &[]).await?;
+        let raw: String = row.get(0);
+        let n: u32 = raw.trim().parse().map_err(|e| {
+            crate::error::Error::config(format!("could not parse server_version_num {raw:?}: {e}"))
+        })?;
+        Ok(n / 10000)
+    }
 }
 
 /// Minimal SQL identifier quoting (double-quote wrapping + escape internal quotes).
@@ -196,5 +219,8 @@ impl PostgresManager for NoopPostgresManager {
         _: &str,
     ) -> Result<()> {
         Ok(())
+    }
+    async fn detect_server_major_version(&self, _: &PostgresClusterConfig) -> Result<u32> {
+        Ok(18)
     }
 }

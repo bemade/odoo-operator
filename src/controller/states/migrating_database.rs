@@ -18,8 +18,7 @@ use crate::error::Result;
 use crate::postgres::PostgresClusterConfig;
 
 use super::super::helpers::{
-    cron_depl_name, env, image_pull_secrets, odoo_security_context, odoo_volume_mounts,
-    odoo_volumes, FIELD_MANAGER,
+    cron_depl_name, env, image_pull_secrets, odoo_security_context, pg_tools_image, FIELD_MANAGER,
 };
 use super::super::odoo_instance::{load_postgres_cluster_by_name, Context};
 use super::super::state_machine::{scale_deployment, ReconcileSnapshot};
@@ -80,9 +79,21 @@ pub async fn begin_database_migration(instance: &OdooInstance, ctx: &Context) ->
 
     let migration_env = build_migration_env(&old_pg, &new_pg, &odoo_conf_name, &db);
 
+    // Detect server major versions on both clusters and pick an image whose
+    // pg client tools satisfy `pg_dump/pg_restore >= server_major` on both ends.
+    // Failing this query aborts the transition — we can't migrate a cluster
+    // we can't reach.
+    let src_major = ctx.postgres.detect_server_major_version(&old_pg).await?;
+    let dst_major = ctx.postgres.detect_server_major_version(&new_pg).await?;
+    let tools_major = src_major.max(dst_major);
+    let image = pg_tools_image(tools_major);
+    info!(
+        %inst_name, src_major, dst_major, %image,
+        "selected pg client image for migration"
+    );
+
     // Build the migration Job.
-    let image = instance.spec.image.as_deref().unwrap_or("odoo:18.0");
-    let job = build_migration_job(&inst_name, &ns, instance, image, migration_env);
+    let job = build_migration_job(&inst_name, &ns, instance, &image, migration_env);
     let jobs: Api<Job> = Api::namespaced(client.clone(), &ns);
     let created = jobs.create(&PostParams::default(), &job).await?;
     let job_name = created.name_any();
@@ -225,10 +236,8 @@ fn build_migration_job(
                         command: Some(vec!["/bin/sh".to_string(), "-c".to_string()]),
                         args: Some(vec![MIGRATE_SCRIPT.to_string()]),
                         env: Some(env_vars),
-                        volume_mounts: Some(odoo_volume_mounts()),
                         ..Default::default()
                     }],
-                    volumes: Some(odoo_volumes(inst_name)),
                     ..Default::default()
                 }),
             },

@@ -182,6 +182,13 @@ pub fn cron_depl_name(instance: &OdooInstance) -> String {
     instance.name_any().to_string() + "-cron"
 }
 
+/// Image carrying pg client tools (`psql`, `pg_dump`, `pg_restore`, `createdb`)
+/// that match a server major version. pg_dump/pg_restore must be ≥ the server
+/// major on both ends of a pipe, so callers should pass `max(src_major, dst_major)`.
+pub fn pg_tools_image(major: u32) -> String {
+    format!("postgres:{major}-alpine")
+}
+
 // ── OdooJobBuilder ──────────────────────────────────────────────────────────
 
 /// Builder for batch/v1 `Job` resources used by the operator's job controllers.
@@ -257,6 +264,14 @@ impl OdooJobBuilder {
     /// Append extra volumes beyond the standard filestore + odoo-conf.
     pub fn extra_volumes(mut self, extra: Vec<Volume>) -> Self {
         self.volumes.extend(extra);
+        self
+    }
+
+    /// Drop the standard filestore PVC + odoo-conf volumes. Useful for jobs
+    /// that don't run odoo-bin and don't touch the filestore — skipping the
+    /// PVC mount avoids the fsGroup chown traversal at pod start.
+    pub fn without_standard_volumes(mut self) -> Self {
+        self.volumes.clear();
         self
     }
 

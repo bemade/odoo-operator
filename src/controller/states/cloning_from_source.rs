@@ -14,8 +14,8 @@ use crate::error::{Error, Result};
 
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{
-    cm_env, cron_depl_name, env, odoo_volume_mounts, staging_mail_env_vars, OdooJobBuilder,
-    FIELD_MANAGER,
+    cm_env, cron_depl_name, env, odoo_volume_mounts, pg_tools_image, staging_mail_env_vars,
+    OdooJobBuilder, FIELD_MANAGER,
 };
 use crate::controller::state_machine::scale_deployment;
 
@@ -120,10 +120,29 @@ impl State for CloningFromSource {
                 hex[..8].to_string()
             };
             let temp_db = format!("{target_db}_refresh_{short}");
+
+            // Detect PG server majors on both source and target clusters and
+            // run clone-db.sh with a pg client image whose tools are ≥ both
+            // server majors. Using the Odoo image's pg_dump (16.x) against a
+            // PG18 server fails outright. Failure to probe aborts the refresh
+            // — we can't clone a cluster we can't reach.
+            let (_, src_pg) =
+                super::super::odoo_instance::load_postgres_cluster(ctx, &source_instance).await?;
+            let (_, tgt_pg) =
+                super::super::odoo_instance::load_postgres_cluster(ctx, instance).await?;
+            let src_major = ctx.postgres.detect_server_major_version(&src_pg).await?;
+            let tgt_major = ctx.postgres.detect_server_major_version(&tgt_pg).await?;
+            let db_image = pg_tools_image(src_major.max(tgt_major));
+            info!(
+                crd_name = %refresh.name_any(),
+                src_major, tgt_major, %db_image,
+                "selected pg client image for staging refresh DB clone"
+            );
+
             let job = build_db_clone_job(
                 &refresh.name_any(),
                 &ns,
-                image,
+                &db_image,
                 instance,
                 refresh,
                 &source_conf,
@@ -362,16 +381,12 @@ fn build_db_clone_job(
     ];
     OdooJobBuilder::new(&format!("{crd_name}-db-"), ns, refresh, instance)
         .active_deadline(3600)
+        .without_standard_volumes()
         .containers(vec![Container {
             name: "clone-db".into(),
             image: Some(image.into()),
-            command: Some(vec![
-                "/bin/bash".into(),
-                "-c".into(),
-                CLONE_DB_SCRIPT.into(),
-            ]),
+            command: Some(vec!["/bin/sh".into(), "-c".into(), CLONE_DB_SCRIPT.into()]),
             env: Some(envs),
-            volume_mounts: Some(odoo_volume_mounts()),
             ..Default::default()
         }])
         .build()
