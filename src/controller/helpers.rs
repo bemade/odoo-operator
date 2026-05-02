@@ -267,6 +267,14 @@ impl OdooJobBuilder {
         self
     }
 
+    /// Drop the standard filestore PVC + odoo-conf volumes. Useful for jobs
+    /// that don't run odoo-bin and don't touch the filestore — skipping the
+    /// PVC mount avoids the fsGroup chown traversal at pod start.
+    pub fn without_standard_volumes(mut self) -> Self {
+        self.volumes.clear();
+        self
+    }
+
     /// Set `spec.activeDeadlineSeconds` on the Job.
     pub fn active_deadline(mut self, seconds: i64) -> Self {
         self.active_deadline = Some(seconds);
