@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.10.4](https://github.com/bemade/odoo-operator/compare/v1.10.3...v1.10.4) (2026-05-02)
+
+
+### Bug Fixes
+
+* **backup,restore:** trigger release for PG18 client/server fix ([b3e5974](https://github.com/bemade/odoo-operator/commit/b3e5974c876f6003b642b3e4f7357eebfae6da6a))
+* **backup,restore:** trigger release for PG18 client/server fix ([8ad924f](https://github.com/bemade/odoo-operator/commit/8ad924f80fa0a56d10bcadab30694119f9b36bb5))
+
 ## [1.10.3](https://github.com/bemade/odoo-operator/compare/v1.10.2...v1.10.3) (2026-05-02)
 
 
