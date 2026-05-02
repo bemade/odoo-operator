@@ -182,6 +182,13 @@ pub fn cron_depl_name(instance: &OdooInstance) -> String {
     instance.name_any().to_string() + "-cron"
 }
 
+/// Image carrying pg client tools (`psql`, `pg_dump`, `pg_restore`, `createdb`)
+/// that match a server major version. pg_dump/pg_restore must be ≥ the server
+/// major on both ends of a pipe, so callers should pass `max(src_major, dst_major)`.
+pub fn pg_tools_image(major: u32) -> String {
+    format!("postgres:{major}-alpine")
+}
+
 // ── OdooJobBuilder ──────────────────────────────────────────────────────────
 
 /// Builder for batch/v1 `Job` resources used by the operator's job controllers.
