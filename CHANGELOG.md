@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.0](https://github.com/bemade/odoo-operator/compare/v1.10.6...v1.11.0) (2026-05-04)
+
+
+### Features
+
+* **operator:** wire defaults.resources/affinity/tolerations to Odoo pods ([74d5dcf](https://github.com/bemade/odoo-operator/commit/74d5dcfc2ee863ad58c1b347f6be6cffd6dcfd4e))
+* **operator:** wire defaults.resources/affinity/tolerations to Odoo pods ([218b53b](https://github.com/bemade/odoo-operator/commit/218b53b650c8bfce74bba838985d2c17d685ba27))
+
 ## [1.10.6](https://github.com/bemade/odoo-operator/compare/v1.10.5...v1.10.6) (2026-05-04)
 
 
