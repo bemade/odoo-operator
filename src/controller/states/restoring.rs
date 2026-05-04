@@ -185,7 +185,7 @@ impl State for Restoring {
             }
         }
 
-        // package-upload-style helpers run `apk add ...` which needs root.
+        // The extract container runs `apk add unzip` which needs root.
         let root_sc = SecurityContext {
             run_as_user: Some(0),
             ..Default::default()

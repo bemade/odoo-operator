@@ -23,7 +23,8 @@ use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{cm_env, env, pg_tools_image, OdooJobBuilder, FIELD_MANAGER};
 
 const DUMP_SCRIPT: &str = include_str!("../../../scripts/backup-dump.sh");
-const PACKAGE_UPLOAD_SCRIPT: &str = include_str!("../../../scripts/backup-package-upload.sh");
+const PACKAGE_SCRIPT: &str = include_str!("../../../scripts/backup-package.sh");
+const UPLOAD_SCRIPT: &str = include_str!("../../../scripts/backup-upload.sh");
 
 /// BackingUp: backup job running, deployment stays up (non-disruptive).
 ///
@@ -99,13 +100,16 @@ impl State for BackingUp {
             env("BACKUP_FORMAT", format),
         ];
 
-        let insecure = if dest.insecure { "true" } else { "false" };
-        let mut package_env = vec![
+        let package_env = vec![
             env("INSTANCE_NAME", instance_name.clone()),
             env("DB_NAME", db.clone()),
             env("BACKUP_FORMAT", format),
             env("BACKUP_WITH_FILESTORE", with_filestore),
             env("LOCAL_FILENAME", local_filename),
+        ];
+
+        let insecure = if dest.insecure { "true" } else { "false" };
+        let mut upload_env = vec![
             env("S3_BUCKET", dest.bucket.clone()),
             env("S3_KEY", dest.object_key.clone()),
             env("S3_ENDPOINT", dest.endpoint.clone()),
@@ -118,8 +122,8 @@ impl State for BackingUp {
             let secret_name = secret_ref.name.as_deref().unwrap_or_default();
             if let Ok((ak, sk)) = notify::read_s3_credentials(client, secret_name, secret_ns).await
             {
-                package_env.push(env("AWS_ACCESS_KEY_ID", ak));
-                package_env.push(env("AWS_SECRET_ACCESS_KEY", sk));
+                upload_env.push(env("AWS_ACCESS_KEY_ID", ak));
+                upload_env.push(env("AWS_SECRET_ACCESS_KEY", sk));
             }
         }
 
@@ -150,8 +154,8 @@ impl State for BackingUp {
             ..Default::default()
         };
 
-        // package-upload runs `apk add zip` which needs root.  Override the
-        // pod-level non-root user for this container only.
+        // The package init container runs `apk add zip` (zip format only)
+        // which needs root.  The upload container stays non-root.
         let root_sc = SecurityContext {
             run_as_user: Some(0),
             ..Default::default()
@@ -179,25 +183,31 @@ impl State for BackingUp {
             .without_standard_volumes()
             .extra_volumes(vec![workspace_vol, filestore_vol])
             .affinity(pod_affinity)
-            .init_containers(vec![Container {
-                name: "dump".into(),
-                image: Some(dump_image),
-                command: Some(vec!["/bin/sh".into(), "-c".into(), DUMP_SCRIPT.into()]),
-                env: Some(dump_env),
-                volume_mounts: Some(vec![workspace_mount.clone()]),
-                ..Default::default()
-            }])
+            .init_containers(vec![
+                Container {
+                    name: "dump".into(),
+                    image: Some(dump_image),
+                    command: Some(vec!["/bin/sh".into(), "-c".into(), DUMP_SCRIPT.into()]),
+                    env: Some(dump_env),
+                    volume_mounts: Some(vec![workspace_mount.clone()]),
+                    ..Default::default()
+                },
+                Container {
+                    name: "package".into(),
+                    image: Some("alpine:latest".into()),
+                    command: Some(vec!["/bin/sh".into(), "-c".into(), PACKAGE_SCRIPT.into()]),
+                    env: Some(package_env),
+                    volume_mounts: Some(vec![workspace_mount.clone(), filestore_mount_ro]),
+                    security_context: Some(root_sc),
+                    ..Default::default()
+                },
+            ])
             .containers(vec![Container {
-                name: "package-upload".into(),
+                name: "upload".into(),
                 image: Some("quay.io/minio/mc:latest".into()),
-                command: Some(vec![
-                    "/bin/sh".into(),
-                    "-c".into(),
-                    PACKAGE_UPLOAD_SCRIPT.into(),
-                ]),
-                env: Some(package_env),
-                volume_mounts: Some(vec![workspace_mount, filestore_mount_ro]),
-                security_context: Some(root_sc),
+                command: Some(vec!["/bin/sh".into(), "-c".into(), UPLOAD_SCRIPT.into()]),
+                env: Some(upload_env),
+                volume_mounts: Some(vec![workspace_mount]),
                 ..Default::default()
             }])
             .build();
