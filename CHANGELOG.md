@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.10.6](https://github.com/bemade/odoo-operator/compare/v1.10.5...v1.10.6) (2026-05-04)
+
+
+### Bug Fixes
+
+* **filestore:** reconcile PVC storage size on spec changes ([e484de0](https://github.com/bemade/odoo-operator/commit/e484de036c3a50bd013e973dbf37933947a75d21))
+* **filestore:** reconcile PVC storage size on spec changes ([12114a9](https://github.com/bemade/odoo-operator/commit/12114a9c4c0f91561e772e13b7aefa9980eff66a))
+
 ## [1.10.5](https://github.com/bemade/odoo-operator/compare/v1.10.4...v1.10.5) (2026-05-04)
 
 
