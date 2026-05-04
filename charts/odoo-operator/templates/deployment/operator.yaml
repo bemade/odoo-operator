@@ -66,6 +66,18 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            {{- if not (empty .Values.defaults.resources) }}
+            - name: DEFAULT_ODOO_RESOURCES
+              value: {{ .Values.defaults.resources | toJson | quote }}
+            {{- end }}
+            {{- if not (empty .Values.defaults.affinity) }}
+            - name: DEFAULT_ODOO_AFFINITY
+              value: {{ .Values.defaults.affinity | toJson | quote }}
+            {{- end }}
+            {{- if not (empty .Values.defaults.tolerations) }}
+            - name: DEFAULT_ODOO_TOLERATIONS
+              value: {{ .Values.defaults.tolerations | toJson | quote }}
+            {{- end }}
           ports:
             - name: webhook-server
               containerPort: 9443

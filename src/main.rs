@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
+use k8s_openapi::api::core::v1::{Affinity, ResourceRequirements, Toleration};
 use kube::runtime::events::Reporter;
 use kube::Client;
 use tracing::info;
@@ -15,6 +16,30 @@ use odoo_operator::controller;
 use odoo_operator::helpers::OperatorDefaults;
 use odoo_operator::postgres::PgPostgresManager;
 use odoo_operator::webhook;
+
+/// Parse a JSON-encoded string into `Option<T>`. Empty / `{}` / `null` → `None`.
+fn parse_json_opt<T: serde::de::DeserializeOwned>(
+    s: &str,
+    field: &str,
+) -> anyhow::Result<Option<T>> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed == "{}" || trimmed == "null" {
+        return Ok(None);
+    }
+    serde_json::from_str::<T>(trimmed)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("failed to parse --{field} as JSON: {e}"))
+}
+
+/// Parse a JSON-encoded array into `Vec<T>`. Empty / `[]` / `null` → empty vec.
+fn parse_json_vec<T: serde::de::DeserializeOwned>(s: &str, field: &str) -> anyhow::Result<Vec<T>> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed == "[]" || trimmed == "null" {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str::<Vec<T>>(trimmed)
+        .map_err(|e| anyhow::anyhow!("failed to parse --{field} as JSON array: {e}"))
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -69,6 +94,21 @@ struct Args {
     /// Defaults to `none` (Mailpit doesn't terminate TLS by default).
     #[arg(long, default_value = "none", env = "DEFAULT_STAGING_SMTP_ENCRYPTION")]
     default_staging_smtp_encryption: String,
+
+    /// Default Odoo pod ResourceRequirements (JSON-encoded). Applied to
+    /// OdooInstances that don't set `spec.resources`. Empty string disables.
+    #[arg(long, default_value = "", env = "DEFAULT_ODOO_RESOURCES")]
+    default_odoo_resources: String,
+
+    /// Default Odoo pod node Affinity (JSON-encoded). Applied to
+    /// OdooInstances that don't set `spec.affinity`. Empty string disables.
+    #[arg(long, default_value = "", env = "DEFAULT_ODOO_AFFINITY")]
+    default_odoo_affinity: String,
+
+    /// Default Odoo pod tolerations (JSON-encoded array). Applied to
+    /// OdooInstances that don't set `spec.tolerations`. Empty string disables.
+    #[arg(long, default_value = "", env = "DEFAULT_ODOO_TOLERATIONS")]
+    default_odoo_tolerations: String,
 
     /// Name of the Secret containing postgres cluster configuration.
     #[arg(
@@ -129,9 +169,21 @@ async fn main() -> anyhow::Result<()> {
 
     let client = Client::try_default().await?;
 
+    let default_resources = parse_json_opt::<ResourceRequirements>(
+        &args.default_odoo_resources,
+        "default-odoo-resources",
+    )?;
+    let default_affinity =
+        parse_json_opt::<Affinity>(&args.default_odoo_affinity, "default-odoo-affinity")?;
+    let default_tolerations =
+        parse_json_vec::<Toleration>(&args.default_odoo_tolerations, "default-odoo-tolerations")?;
+
     info!(
         image = %args.default_odoo_image,
         ns = %args.operator_namespace,
+        resources = default_resources.is_some(),
+        affinity = default_affinity.is_some(),
+        tolerations = default_tolerations.len(),
         "starting odoo-operator"
     );
 
@@ -148,7 +200,9 @@ async fn main() -> anyhow::Result<()> {
             staging_smtp_host: args.default_staging_smtp_host,
             staging_smtp_port: args.default_staging_smtp_port,
             staging_smtp_encryption: args.default_staging_smtp_encryption,
-            ..Default::default()
+            resources: default_resources,
+            affinity: default_affinity,
+            tolerations: default_tolerations,
         },
         operator_namespace: args.operator_namespace,
         postgres_clusters_secret: args.postgres_clusters_secret,
@@ -194,4 +248,63 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_json_opt_handles_empty_and_brackets() {
+        assert!(parse_json_opt::<Affinity>("", "x").unwrap().is_none());
+        assert!(parse_json_opt::<Affinity>("{}", "x").unwrap().is_none());
+        assert!(parse_json_opt::<Affinity>("null", "x").unwrap().is_none());
+        assert!(parse_json_opt::<Affinity>("  {}  ", "x").unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_json_opt_parses_affinity() {
+        let json = r#"{"nodeAffinity":{"preferredDuringSchedulingIgnoredDuringExecution":[{"weight":100,"preference":{"matchExpressions":[{"key":"bemade.org/compute","operator":"In","values":["true"]}]}}]}}"#;
+        let aff = parse_json_opt::<Affinity>(json, "x").unwrap().unwrap();
+        let pref = aff
+            .node_affinity
+            .unwrap()
+            .preferred_during_scheduling_ignored_during_execution
+            .unwrap();
+        assert_eq!(pref.len(), 1);
+        assert_eq!(pref[0].weight, 100);
+    }
+
+    #[test]
+    fn parse_json_opt_parses_resources() {
+        let json = r#"{"requests":{"cpu":"400m","memory":"256Mi"},"limits":{"cpu":"2000m","memory":"4Gi"}}"#;
+        let r = parse_json_opt::<ResourceRequirements>(json, "x")
+            .unwrap()
+            .unwrap();
+        assert!(r.requests.is_some());
+        assert!(r.limits.is_some());
+    }
+
+    #[test]
+    fn parse_json_vec_handles_empty() {
+        assert!(parse_json_vec::<Toleration>("", "x").unwrap().is_empty());
+        assert!(parse_json_vec::<Toleration>("[]", "x").unwrap().is_empty());
+        assert!(parse_json_vec::<Toleration>("null", "x")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn parse_json_vec_parses_tolerations() {
+        let json =
+            r#"[{"key":"dedicated","operator":"Equal","value":"odoo","effect":"NoSchedule"}]"#;
+        let t = parse_json_vec::<Toleration>(json, "x").unwrap();
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].key.as_deref(), Some("dedicated"));
+    }
+
+    #[test]
+    fn parse_json_opt_returns_error_on_invalid() {
+        assert!(parse_json_opt::<Affinity>("not json", "x").is_err());
+    }
 }
