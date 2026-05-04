@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.5](https://github.com/bemade/odoo-operator/compare/v1.10.4...v1.10.5) (2026-05-04)
+
+
+### Bug Fixes
+
+* **backup:** split package and upload to drop apk dependency ([a2291f9](https://github.com/bemade/odoo-operator/commit/a2291f9cf25dabe6d36789e561ea6d9496499d31))
+
 ## [1.10.4](https://github.com/bemade/odoo-operator/compare/v1.10.3...v1.10.4) (2026-05-02)
 
 
