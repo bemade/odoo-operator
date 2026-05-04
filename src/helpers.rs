@@ -177,3 +177,36 @@ pub fn build_odoo_conf(
 
     out
 }
+
+/// Parse a Kubernetes resource quantity string into bytes.
+/// Supports: Ki, Mi, Gi, Ti (binary) and k, M, G, T (decimal).
+pub fn parse_quantity(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty quantity".to_string());
+    }
+
+    let num_end = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(s.len());
+    let (num_str, suffix) = s.split_at(num_end);
+
+    let num: f64 = num_str
+        .parse()
+        .map_err(|e| format!("invalid number {num_str:?}: {e}"))?;
+
+    let multiplier: u64 = match suffix {
+        "" => 1,
+        "Ki" => 1024,
+        "Mi" => 1024 * 1024,
+        "Gi" => 1024 * 1024 * 1024,
+        "Ti" => 1024 * 1024 * 1024 * 1024,
+        "k" => 1000,
+        "M" => 1_000_000,
+        "G" => 1_000_000_000,
+        "T" => 1_000_000_000_000,
+        other => return Err(format!("unknown suffix {other:?}")),
+    };
+
+    Ok((num * multiplier as f64) as u64)
+}

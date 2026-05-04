@@ -12,6 +12,7 @@ use tracing::{info, warn};
 use warp::Filter;
 
 use crate::crd::odoo_instance::OdooInstance;
+use crate::helpers::parse_quantity;
 
 /// Start the validating webhook server on the given address.
 /// Returns a future that runs the HTTPS server forever.
@@ -172,40 +173,6 @@ fn compare_quantities(old: &str, new: &str) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-/// Parse a Kubernetes resource quantity string into bytes.
-/// Supports: Ki, Mi, Gi, Ti (binary) and k, M, G, T (decimal).
-fn parse_quantity(s: &str) -> Result<u64, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err("empty quantity".to_string());
-    }
-
-    // Find where the numeric part ends.
-    let num_end = s
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .unwrap_or(s.len());
-    let (num_str, suffix) = s.split_at(num_end);
-
-    let num: f64 = num_str
-        .parse()
-        .map_err(|e| format!("invalid number {num_str:?}: {e}"))?;
-
-    let multiplier: u64 = match suffix {
-        "" => 1,
-        "Ki" => 1024,
-        "Mi" => 1024 * 1024,
-        "Gi" => 1024 * 1024 * 1024,
-        "Ti" => 1024 * 1024 * 1024 * 1024,
-        "k" => 1000,
-        "M" => 1_000_000,
-        "G" => 1_000_000_000,
-        "T" => 1_000_000_000_000,
-        other => return Err(format!("unknown suffix {other:?}")),
-    };
-
-    Ok((num * multiplier as f64) as u64)
 }
 
 #[cfg(test)]

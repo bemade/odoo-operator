@@ -34,7 +34,9 @@ use gateway_api::apis::standard::httproutes::{
 
 use crate::crd::odoo_instance::{DeploymentStrategyType, GatewayRef, OdooInstance};
 use crate::error::Result;
-use crate::helpers::{build_odoo_conf, db_name, generate_password, odoo_username, sha256_hex};
+use crate::helpers::{
+    build_odoo_conf, db_name, generate_password, odoo_username, parse_quantity, sha256_hex,
+};
 use crate::postgres::PostgresClusterConfig;
 
 use super::helpers::{
@@ -285,8 +287,48 @@ pub async fn ensure_filestore_pvc(
         .and_then(|f| f.storage_class.as_deref())
         .unwrap_or(&ctx.defaults.storage_class);
 
-    // Only create if it doesn't exist (PVCs are immutable after creation).
-    if pvcs.get(&pvc_name).await.is_ok() {
+    // If the PVC already exists, reconcile its storage request: expand if the
+    // spec asks for more than what's currently requested. Storage class changes
+    // and shrinks are out of scope here (handled by the migration phases /
+    // rejected by the webhook).
+    if let Ok(existing) = pvcs.get(&pvc_name).await {
+        let current_size = existing
+            .spec
+            .as_ref()
+            .and_then(|s| s.resources.as_ref())
+            .and_then(|r| r.requests.as_ref())
+            .and_then(|m| m.get("storage"))
+            .map(|q| q.0.clone())
+            .unwrap_or_default();
+
+        let desired_bytes = parse_quantity(storage_size).unwrap_or(0);
+        let current_bytes = parse_quantity(&current_size).unwrap_or(0);
+
+        if desired_bytes > current_bytes {
+            tracing::info!(
+                pvc = %pvc_name,
+                from = %current_size,
+                to = %storage_size,
+                "expanding filestore PVC",
+            );
+            let patch = json!({
+                "spec": {
+                    "resources": {
+                        "requests": { "storage": storage_size }
+                    }
+                }
+            });
+            pvcs.patch(&pvc_name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
+        } else if desired_bytes < current_bytes && desired_bytes > 0 {
+            tracing::warn!(
+                pvc = %pvc_name,
+                current = %current_size,
+                desired = %storage_size,
+                "spec.filestore.storageSize is smaller than the existing PVC; \
+                 PVCs cannot shrink — ignoring",
+            );
+        }
         return Ok(());
     }
 
