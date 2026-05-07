@@ -367,19 +367,32 @@ async fn get_pvc_source(
     ns: &str,
     instance: &OdooInstance,
 ) -> Option<TypedObjectReference> {
+    let inst_name = instance.name_any();
     let Environment::Staging = instance.spec.environment else {
+        tracing::debug!(name = %inst_name, "get_pvc_source: not staging");
         return None;
     };
-    let production_ref = instance.spec.production_instance_ref.as_ref()?;
-    let ns = production_ref.namespace.as_deref().unwrap_or(ns);
+    let Some(production_ref) = instance.spec.production_instance_ref.as_ref() else {
+        tracing::debug!(name = %inst_name, "get_pvc_source: no production_instance_ref");
+        return None;
+    };
+    let prod_ns = production_ref.namespace.as_deref().unwrap_or(ns);
     let production_name = production_ref.name.as_str();
     let src_pvc_name = format!("{production_name}-filestore-pvc");
-    let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
-    let prod_pvc = pvcs
-        .get(src_pvc_name.as_str())
-        .await
-        .map_err(|e| tracing::warn!(error = %e, pvc = %src_pvc_name, "prod PVC lookup failed"))
-        .ok()?;
+    let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), prod_ns);
+    let prod_pvc = match pvcs.get(src_pvc_name.as_str()).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                name = %inst_name,
+                error = %e,
+                pvc = %src_pvc_name,
+                ns = %prod_ns,
+                "get_pvc_source: prod PVC lookup failed"
+            );
+            return None;
+        }
+    };
     let sc = instance
         .spec
         .filestore
@@ -390,13 +403,36 @@ async fn get_pvc_source(
         .as_ref()
         .and_then(|spec| spec.storage_class_name.as_deref());
     if sc != prod_sc {
+        tracing::info!(
+            name = %inst_name,
+            target_sc = ?sc,
+            prod_sc = ?prod_sc,
+            "get_pvc_source: storage class mismatch — falling back to copy"
+        );
         return None;
     }
+    tracing::info!(
+        name = %inst_name,
+        src_pvc = %src_pvc_name,
+        ns = %prod_ns,
+        "get_pvc_source: returning dataSourceRef for snapshot/clone"
+    );
+    // Only set `namespace` when the source PVC is actually in a different
+    // namespace.  Setting it for same-namespace clones triggers K8s'
+    // cross-namespace data-source path, which requires the alpha
+    // `CrossNamespaceVolumeDataSource` feature gate plus a ReferenceGrant
+    // — without those, the API server silently drops the entire
+    // `dataSourceRef` field and the PVC binds empty.
+    let namespace = if prod_ns == ns {
+        None
+    } else {
+        Some(prod_ns.to_string())
+    };
     Some(TypedObjectReference {
         api_group: None,
         kind: "PersistentVolumeClaim".to_string(),
         name: src_pvc_name,
-        namespace: Some(ns.to_string()),
+        namespace,
     })
 }
 
