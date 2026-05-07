@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.12.0](https://github.com/bemade/odoo-operator/compare/v1.11.0...v1.12.0) (2026-05-07)
+
+
+### Features
+
+* **refresh:** snapshot/clone mode for staging filestore copy ([a25f448](https://github.com/bemade/odoo-operator/commit/a25f4487f3b1e7c0bab7fa822562c2f2e4b582a7))
+* **refresh:** snapshot/clone mode for staging filestore copy ([04aeb81](https://github.com/bemade/odoo-operator/commit/04aeb81785113b3e31c5babd3319ae0a8305965d))
+
+
+### Bug Fixes
+
+* **snapshot:** drop dataSourceRef.namespace for same-namespace clones ([826ba2a](https://github.com/bemade/odoo-operator/commit/826ba2a53c99fc85d903fb0d3211e881a8d3dd10))
+
 ## [1.11.0](https://github.com/bemade/odoo-operator/compare/v1.10.6...v1.11.0) (2026-05-04)
 
 
