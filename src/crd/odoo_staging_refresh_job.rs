@@ -124,6 +124,15 @@ pub struct OdooStagingRefreshJobStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filestore_job_phase: Option<Phase>,
 
+    /// Mode-agnostic phase for the filestore step.  Set to `Running` once
+    /// either the rsync Job has been created or the snapshot/clone PVC
+    /// recreate has been kicked off; transitions to `Completed`/`Failed`
+    /// when the underlying Job terminates (Copy path) or the new PVC binds
+    /// (Snapshot path).  Used as the start guard and completion gate for
+    /// the filestore step regardless of `filestoreMethod`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filestore_phase: Option<Phase>,
+
     /// batch/v1 Job name for the neutralize step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neutralize_job_name: Option<String>,

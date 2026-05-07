@@ -168,6 +168,15 @@ spec:
                 - Failed
                 nullable: true
                 type: string
+              filestorePhase:
+                description: Mode-agnostic phase for the filestore step.  Set to `Running` once either the rsync Job has been created or the snapshot/clone PVC recreate has been kicked off; transitions to `Completed`/`Failed` when the underlying Job terminates (Copy path) or the new PVC binds (Snapshot path).  Used as the start guard and completion gate for the filestore step regardless of `filestoreMethod`.
+                enum:
+                - Pending
+                - Running
+                - Completed
+                - Failed
+                nullable: true
+                type: string
               message:
                 nullable: true
                 type: string

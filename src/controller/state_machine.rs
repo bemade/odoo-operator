@@ -284,26 +284,41 @@ impl ReconcileSnapshot {
                                     "dbJobPhase",
                                 )
                                 .await,
-                                // Filestore sub-job is skipped when
-                                // skipFilestore is set; treat Absent as
-                                // "not applicable" = Succeeded for rollup.
+                                // Filestore step is mode-agnostic: prefer the
+                                // explicit `filestore_phase` field when set
+                                // (covers the snapshot path, which has no
+                                // underlying Job).  On the Copy path, fall
+                                // back to the Job-based observer so that
+                                // `filestore_job_phase` keeps being recorded
+                                // for GC durability.  skipFilestore short-
+                                // circuits to Succeeded.
                                 if job.spec.skip_filestore {
                                     JobStatus::Succeeded
                                 } else {
-                                    resolve_refresh_sub_job_status(
-                                        client,
-                                        ns,
-                                        &crd_name,
-                                        &jobs_api,
-                                        job.status
-                                            .as_ref()
-                                            .and_then(|s| s.filestore_job_name.as_deref()),
-                                        job.status
-                                            .as_ref()
-                                            .and_then(|s| s.filestore_job_phase.as_ref()),
-                                        "filestoreJobPhase",
-                                    )
-                                    .await
+                                    match job
+                                        .status
+                                        .as_ref()
+                                        .and_then(|s| s.filestore_phase.as_ref())
+                                    {
+                                        Some(Phase::Completed) => JobStatus::Succeeded,
+                                        Some(Phase::Failed) => JobStatus::Failed,
+                                        _ => {
+                                            resolve_refresh_sub_job_status(
+                                                client,
+                                                ns,
+                                                &crd_name,
+                                                &jobs_api,
+                                                job.status
+                                                    .as_ref()
+                                                    .and_then(|s| s.filestore_job_name.as_deref()),
+                                                job.status
+                                                    .as_ref()
+                                                    .and_then(|s| s.filestore_job_phase.as_ref()),
+                                                "filestoreJobPhase",
+                                            )
+                                            .await
+                                        }
+                                    }
                                 },
                                 resolve_refresh_sub_job_status(
                                     client,

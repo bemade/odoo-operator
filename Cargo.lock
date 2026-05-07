@@ -1505,6 +1505,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kube-custom-resources-rs"
+version = "2024.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aba3e0e4c19a14aff2f0834f24acb02f57ac2d05a1ee6367a0c4fc3036cfc9ea"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kube-derive"
 version = "0.98.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1767,6 +1780,7 @@ dependencies = [
  "http-body-util",
  "k8s-openapi",
  "kube",
+ "kube-custom-resources-rs",
  "rand 0.8.5",
  "reqwest",
  "schemars",

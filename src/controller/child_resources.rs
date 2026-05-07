@@ -11,7 +11,7 @@ use k8s_openapi::api::{
     core::v1::{
         ConfigMap, Container, ContainerPort, ExecAction, HTTPGetAction, PersistentVolumeClaim,
         PersistentVolumeClaimSpec, PodSpec, PodTemplateSpec, Probe, Secret, Service, ServicePort,
-        ServiceSpec, VolumeResourceRequirements,
+        ServiceSpec, TypedObjectReference, VolumeResourceRequirements,
     },
     networking::v1::{
         HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
@@ -32,7 +32,7 @@ use gateway_api::apis::standard::httproutes::{
     HTTPRouteRulesMatches, HTTPRouteRulesMatchesPath, HTTPRouteRulesMatchesPathType, HTTPRouteSpec,
 };
 
-use crate::crd::odoo_instance::{DeploymentStrategyType, GatewayRef, OdooInstance};
+use crate::crd::odoo_instance::{DeploymentStrategyType, Environment, GatewayRef, OdooInstance};
 use crate::error::Result;
 use crate::helpers::{
     build_odoo_conf, db_name, generate_password, odoo_username, parse_quantity, sha256_hex,
@@ -332,6 +332,8 @@ pub async fn ensure_filestore_pvc(
         return Ok(());
     }
 
+    // No existing PVC, so we fully construct it, possibly with a snapshot source
+    let source = get_pvc_source(client, ns, instance).await;
     let pvc = PersistentVolumeClaim {
         metadata: ObjectMeta {
             name: Some(pvc_name),
@@ -341,6 +343,7 @@ pub async fn ensure_filestore_pvc(
         },
         spec: Some(PersistentVolumeClaimSpec {
             access_modes: Some(vec!["ReadWriteMany".to_string()]),
+            data_source_ref: source,
             resources: Some(VolumeResourceRequirements {
                 requests: Some(BTreeMap::from([(
                     "storage".to_string(),
@@ -355,6 +358,46 @@ pub async fn ensure_filestore_pvc(
     };
     pvcs.create(&PostParams::default(), &pvc).await?;
     Ok(())
+}
+
+/// Make a snapshot from the production instance PVC if possible,
+/// returns a reference to be used in the PVC spec as a source_ref.
+async fn get_pvc_source(
+    client: &Client,
+    ns: &str,
+    instance: &OdooInstance,
+) -> Option<TypedObjectReference> {
+    let Environment::Staging = instance.spec.environment else {
+        return None;
+    };
+    let production_ref = instance.spec.production_instance_ref.as_ref()?;
+    let ns = production_ref.namespace.as_deref().unwrap_or(ns);
+    let production_name = production_ref.name.as_str();
+    let src_pvc_name = format!("{production_name}-filestore-pvc");
+    let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
+    let prod_pvc = pvcs
+        .get(src_pvc_name.as_str())
+        .await
+        .map_err(|e| tracing::warn!(error = %e, pvc = %src_pvc_name, "prod PVC lookup failed"))
+        .ok()?;
+    let sc = instance
+        .spec
+        .filestore
+        .as_ref()
+        .and_then(|spec| spec.storage_class.as_deref());
+    let prod_sc = prod_pvc
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.storage_class_name.as_deref());
+    if sc != prod_sc {
+        return None;
+    }
+    Some(TypedObjectReference {
+        api_group: None,
+        kind: "PersistentVolumeClaim".to_string(),
+        name: src_pvc_name,
+        namespace: Some(ns.to_string()),
+    })
 }
 
 pub async fn ensure_config_map(

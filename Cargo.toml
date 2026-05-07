@@ -54,6 +54,7 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Webhook server
 warp = { version = "0.3", features = ["tls"] }
+kube-custom-resources-rs = { version = "2024.11.1", features = ["snapshot_storage_k8s_io"] }
 
 [dev-dependencies]
 tower-test = "0.4"

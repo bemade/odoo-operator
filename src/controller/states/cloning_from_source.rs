@@ -1,21 +1,27 @@
 use async_trait::async_trait;
 use k8s_openapi::api::{
     batch::v1::Job,
-    core::v1::{Container, PersistentVolumeClaimVolumeSource, Volume, VolumeMount},
+    core::v1::{
+        Container, PersistentVolumeClaim, PersistentVolumeClaimVolumeSource, Volume, VolumeMount,
+    },
 };
-use kube::api::{Api, Patch, PatchParams, PostParams, ResourceExt};
+use kube::{
+    api::{Api, DeleteParams, Patch, PatchParams, PostParams, ResourceExt},
+    core::ErrorResponse,
+};
 use serde_json::json;
 use tracing::info;
 
-use crate::crd::odoo_instance::OdooInstance;
+use crate::crd::odoo_staging_refresh_job::FilestoreMethod;
 use crate::crd::odoo_staging_refresh_job::OdooStagingRefreshJob;
 use crate::crd::shared::Phase;
 use crate::error::{Error, Result};
+use crate::{controller::child_resources, crd::odoo_instance::OdooInstance};
 
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{
-    cm_env, cron_depl_name, env, odoo_volume_mounts, pg_tools_image, staging_mail_env_vars,
-    OdooJobBuilder, FIELD_MANAGER,
+    cm_env, controller_owner_ref, cron_depl_name, env, odoo_volume_mounts, pg_tools_image,
+    staging_mail_env_vars, OdooJobBuilder, FIELD_MANAGER,
 };
 use crate::controller::state_machine::scale_deployment;
 
@@ -175,44 +181,171 @@ impl State for CloningFromSource {
             .await?;
         }
 
-        // ── Step 2b: filestore clone Job (unless skipped) ─────────────
+        // ── Step 2b: filestore step (unless skipped) ──────────────────
+        // Mode-agnostic gate: the start guard and completion check both
+        // ride on `filestore_phase`, set to Running once kickoff succeeds
+        // and Completed/Failed when the underlying work terminates.
         if !refresh.spec.skip_filestore
             && refresh
                 .status
                 .as_ref()
-                .and_then(|s| s.filestore_job_name.as_deref())
+                .and_then(|s| s.filestore_phase.as_ref())
                 .is_none()
         {
             let source_pvc = format!("{source_name}-filestore-pvc");
-            let job = build_filestore_clone_job(
-                &refresh.name_any(),
-                &ns,
-                image,
-                instance,
-                refresh,
-                &source_pvc,
-                &source_db,
-                &target_db,
-            );
-            let jobs_api: Api<Job> = Api::namespaced(ctx.client.clone(), &ns);
-            let created = jobs_api.create(&PostParams::default(), &job).await?;
-            let k8s_job_name = created.name_any();
-            info!(
-                crd_name = %refresh.name_any(),
-                %k8s_job_name,
-                "created filestore clone job"
-            );
-            patch_refresh_status(
-                &ctx.client,
-                &ns,
-                &refresh.name_any(),
-                &json!({
-                    "status": {
-                        "filestoreJobName": &k8s_job_name,
+            let use_copy = refresh.spec.filestore_method == FilestoreMethod::Copy
+                || (refresh.spec.filestore_method == FilestoreMethod::Auto
+                    && !can_refresh_with_snapshot(&source_instance, instance));
+            if use_copy {
+                let job = build_filestore_clone_job(
+                    &refresh.name_any(),
+                    &ns,
+                    image,
+                    instance,
+                    refresh,
+                    &source_pvc,
+                    &source_db,
+                    &target_db,
+                );
+                let jobs_api: Api<Job> = Api::namespaced(ctx.client.clone(), &ns);
+                let created = jobs_api.create(&PostParams::default(), &job).await?;
+                let k8s_job_name = created.name_any();
+                info!(
+                    crd_name = %refresh.name_any(),
+                    %k8s_job_name,
+                    "created filestore clone job"
+                );
+                patch_refresh_status(
+                    &ctx.client,
+                    &ns,
+                    &refresh.name_any(),
+                    &json!({
+                        "status": {
+                            "filestoreJobName": &k8s_job_name,
+                            "filestorePhase": Phase::Running,
+                        }
+                    }),
+                )
+                .await?;
+            } else {
+                // Snapshot path: replace the staging PVC with one cloned
+                // from the source PVC's contents.  Done in two phases
+                // across reconciles to avoid racing the old PVC's deletion:
+                //   tick A: delete (idempotent on 404), then bail if the
+                //           PVC is still terminating — kubelet may take a
+                //           while to release the volume on a real CSI.
+                //   tick B: PVC is gone → recreate it, patch filestorePhase
+                //           Running.  Settle block then waits for Bound.
+                // Patching Running while the OLD PVC still lingers would
+                // let the settle block see its `phase: Bound` and prematurely
+                // mark the step Completed — racing neutralize against a PVC
+                // that's about to vanish.
+                let target_pvc = format!("{inst_name}-filestore-pvc");
+                let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), &ns);
+                // Background delete (the default): PVCs don't have
+                // OwnerReference dependents, so foreground propagation
+                // would only add a `foregroundDeletion` finalizer that
+                // kube-controller-manager has to strip — pointless on a
+                // real cluster and a deadlock in envtest, which has no
+                // GC controller.
+                if let Err(e) = pvcs
+                    .delete(target_pvc.as_str(), &DeleteParams::default())
+                    .await
+                {
+                    if !matches!(&e, kube::Error::Api(ErrorResponse { code: 404, .. })) {
+                        return Err(e.into());
                     }
-                }),
-            )
-            .await?;
+                }
+                match pvcs.get_opt(target_pvc.as_str()).await? {
+                    Some(existing) if existing.metadata.deletion_timestamp.is_some() => {
+                        info!(
+                            crd_name = %refresh.name_any(),
+                            pvc = %target_pvc,
+                            "old staging filestore PVC still terminating; waiting before recreate"
+                        );
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+                let oref = controller_owner_ref(instance);
+                child_resources::ensure_filestore_pvc(
+                    &ctx.client,
+                    &ns,
+                    &inst_name,
+                    instance,
+                    ctx,
+                    &oref,
+                )
+                .await?;
+                info!(
+                    crd_name = %refresh.name_any(),
+                    pvc = %target_pvc,
+                    "kicked off filestore snapshot/clone PVC recreate"
+                );
+                patch_refresh_status(
+                    &ctx.client,
+                    &ns,
+                    &refresh.name_any(),
+                    &json!({
+                        "status": {
+                            "filestorePhase": Phase::Running,
+                        }
+                    }),
+                )
+                .await?;
+            }
+        }
+
+        // ── Step 2c: settle filestore_phase from underlying signal ────
+        if matches!(
+            refresh
+                .status
+                .as_ref()
+                .and_then(|s| s.filestore_phase.as_ref()),
+            Some(Phase::Running)
+        ) {
+            let terminal = if refresh
+                .status
+                .as_ref()
+                .and_then(|s| s.filestore_job_name.as_deref())
+                .is_some()
+            {
+                // Copy path: mirror Job's recorded terminal phase.
+                match refresh
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.filestore_job_phase.as_ref())
+                {
+                    Some(Phase::Completed) => Some(Phase::Completed),
+                    Some(Phase::Failed) => Some(Phase::Failed),
+                    _ => None,
+                }
+            } else {
+                // Snapshot path: new PVC bound ⇒ Completed.  Defensively
+                // require no `deletionTimestamp` so a still-terminating
+                // old PVC can't masquerade as the recreated one.
+                let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), &ns);
+                let target_pvc = format!("{inst_name}-filestore-pvc");
+                match pvcs.get(target_pvc.as_str()).await {
+                    Ok(pvc)
+                        if pvc.metadata.deletion_timestamp.is_none()
+                            && pvc.status.as_ref().and_then(|s| s.phase.as_deref())
+                                == Some("Bound") =>
+                    {
+                        Some(Phase::Completed)
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(p) = terminal {
+                patch_refresh_status(
+                    &ctx.client,
+                    &ns,
+                    &refresh.name_any(),
+                    &json!({"status": {"filestorePhase": p}}),
+                )
+                .await?;
+            }
         }
 
         // ── Step 3: neutralize (after DB + filestore succeed) ─────────
@@ -230,18 +363,13 @@ impl State for CloningFromSource {
         )
         .await;
         let fs_done = refresh.spec.skip_filestore
-            || sub_job_succeeded(
-                &jobs_api,
+            || matches!(
                 refresh
                     .status
                     .as_ref()
-                    .and_then(|s| s.filestore_job_name.as_deref()),
-                refresh
-                    .status
-                    .as_ref()
-                    .and_then(|s| s.filestore_job_phase.as_ref()),
-            )
-            .await;
+                    .and_then(|s| s.filestore_phase.as_ref()),
+                Some(Phase::Completed)
+            );
         if db_done
             && fs_done
             && refresh
@@ -413,6 +541,7 @@ fn build_filestore_clone_job(
         }),
         ..Default::default()
     };
+
     let src_mount = VolumeMount {
         name: "source-filestore".into(),
         mount_path: "/src".into(),
@@ -480,4 +609,16 @@ fn build_neutralize_job(
             ..Default::default()
         }])
         .build()
+}
+
+fn can_refresh_with_snapshot(source_instance: &OdooInstance, dest_instance: &OdooInstance) -> bool {
+    sc(source_instance).is_some() && sc(source_instance) == sc(dest_instance)
+}
+
+fn sc(instance: &OdooInstance) -> Option<&str> {
+    instance
+        .spec
+        .filestore
+        .as_ref()
+        .and_then(|s| s.storage_class.as_deref())
 }
