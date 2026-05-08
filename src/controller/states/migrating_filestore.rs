@@ -215,7 +215,12 @@ fn build_rsync_job(inst_name: &str, ns: &str, instance: &OdooInstance) -> Job {
         },
         spec: Some(JobSpec {
             backoff_limit: Some(3),
-            active_deadline_seconds: Some(3600),
+            // 2h cushion: storage-class migrations rsync the entire
+            // filestore between PVCs.  On consumer-SSD-backed CephFS
+            // we observe ~3 min/GiB for small-file Odoo workloads, so
+            // an originally-1h budget tipped over for prod-sized data.
+            // Match the staging-refresh filestore deadline.
+            active_deadline_seconds: Some(7200),
             ttl_seconds_after_finished: Some(300),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {

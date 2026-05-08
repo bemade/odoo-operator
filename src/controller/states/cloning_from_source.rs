@@ -615,7 +615,14 @@ fn build_neutralize_job(
     ];
     envs.extend(staging_mail_env_vars(instance, defaults));
     OdooJobBuilder::new(&format!("{crd_name}-neut-"), ns, refresh, instance)
-        .active_deadline(1800)
+        // Neutralize is a small set of SQL UPDATEs (disable cron jobs,
+        // swap ir_mail_server, blank API keys / passwords).  Realistic
+        // wall time is seconds; 5 min is generous headroom for a slow
+        // DB.  The previous 30 min was masking image-pull failures as
+        // long-running jobs instead of failing fast — fixed in concert
+        // with the neutralize-image-hash retry path so an image typo
+        // surfaces in 5 min instead of 30.
+        .active_deadline(300)
         // Allow K8s' built-in exponential backoff to absorb transient pod
         // failures (script crashes, OOM, network blips during DB connect).
         // ImagePullBackOff is *not* covered by backoffLimit (the Pod never
