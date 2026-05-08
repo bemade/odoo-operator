@@ -329,11 +329,20 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
                 | &OdooInstancePhase::FinalizingFilestoreMigration
         )
     );
+    // CloningFromSource owns the filestore PVC lifecycle (delete + recreate
+    // with dataSourceRef pointing at the production snapshot/clone). The
+    // always-on path must not touch the PVC during that window — otherwise
+    // it races with the state handler and orphans in-flight CephFS clones,
+    // saturating mds_max_concurrent_clones.
+    let is_cloning_filestore = matches!(
+        current_phase_ref,
+        Some(&OdooInstancePhase::CloningFromSource)
+    );
     // Database migration doesn't need to skip child resource creation —
     // the state's ensure() handles scaling deployments to 0, and
     // ensure_deployment/ensure_config_map preserve current replicas and
     // update connection details (which is desirable for the switchover).
-    if !is_migrating_filestore {
+    if !is_migrating_filestore && !is_cloning_filestore {
         child_resources::ensure_filestore_pvc(client, &ns, &name, instance, ctx, &oref).await?;
     }
     child_resources::ensure_config_map(client, &ns, &name, instance, &pg_cluster, &oref).await?;
