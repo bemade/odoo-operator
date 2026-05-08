@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.12.2](https://github.com/bemade/odoo-operator/compare/v1.12.1...v1.12.2) (2026-05-08)
+
+
+### Bug Fixes
+
+* **refresh:** retry neutralize on image change; bump backoffLimit ([8763092](https://github.com/bemade/odoo-operator/commit/8763092016d95816795f3d5f87d714f95746349c))
+* **refresh:** retry neutralize on image change; bump backoffLimit ([efea992](https://github.com/bemade/odoo-operator/commit/efea9920fb8dc3054fe8394e3822d263573775a0))
+* **refresh:** tighten neutralize-retry filter; use defaults.odoo_image ([9833bd6](https://github.com/bemade/odoo-operator/commit/9833bd666fb3e299f487d457a9f2735e27a6e481))
+
 ## [1.12.1](https://github.com/bemade/odoo-operator/compare/v1.12.0...v1.12.1) (2026-05-08)
 
 
