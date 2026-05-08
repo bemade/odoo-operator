@@ -213,6 +213,7 @@ pub struct OdooJobBuilder {
     containers: Vec<Container>,
     init_containers: Option<Vec<Container>>,
     active_deadline: Option<i64>,
+    backoff_limit: Option<i32>,
     affinity: Option<Affinity>,
     labels: std::collections::BTreeMap<String, String>,
 }
@@ -240,6 +241,7 @@ impl OdooJobBuilder {
             containers: vec![],
             init_containers: None,
             active_deadline: None,
+            backoff_limit: None,
             affinity: None,
             labels: instance_labels(instance),
         }
@@ -281,6 +283,17 @@ impl OdooJobBuilder {
         self
     }
 
+    /// Set `spec.backoffLimit` on the Job.  Default (when unset) is 0 —
+    /// any pod failure terminates the Job.  Override to allow K8s' built-in
+    /// exponential backoff retries for transient failures (network blips,
+    /// DB connect, etc.).  Note: ImagePullBackOff is bounded by
+    /// `activeDeadlineSeconds`, not `backoffLimit`, because the Pod never
+    /// transitions to a terminal exit-code state under that condition.
+    pub fn backoff_limit(mut self, n: i32) -> Self {
+        self.backoff_limit = Some(n);
+        self
+    }
+
     /// Set pod affinity (e.g. co-locate with the instance deployment).
     pub fn affinity(mut self, affinity: Affinity) -> Self {
         self.affinity = Some(affinity);
@@ -302,7 +315,7 @@ impl OdooJobBuilder {
                 ..Default::default()
             },
             spec: Some(JobSpec {
-                backoff_limit: Some(0),
+                backoff_limit: Some(self.backoff_limit.unwrap_or(0)),
                 ttl_seconds_after_finished: Some(900),
                 active_deadline_seconds: self.active_deadline,
                 template: PodTemplateSpec {

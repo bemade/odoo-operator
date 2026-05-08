@@ -180,6 +180,10 @@ spec:
               message:
                 nullable: true
                 type: string
+              neutralizeJobImageHash:
+                description: SHA-256 hex prefix of the OdooInstance image that the neutralize Job was created with.  When the neutralize step has terminally failed and the user corrects the image, the operator detects the hash mismatch, deletes the failed Job, clears the neutralize_* status fields, and recreates the Job with the corrected image.
+                nullable: true
+                type: string
               neutralizeJobName:
                 description: batch/v1 Job name for the neutralize step.
                 nullable: true

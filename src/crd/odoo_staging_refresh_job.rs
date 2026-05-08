@@ -141,6 +141,14 @@ pub struct OdooStagingRefreshJobStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neutralize_job_phase: Option<Phase>,
 
+    /// SHA-256 hex prefix of the OdooInstance image that the neutralize
+    /// Job was created with.  When the neutralize step has terminally
+    /// failed and the user corrects the image, the operator detects the
+    /// hash mismatch, deletes the failed Job, clears the neutralize_*
+    /// status fields, and recreates the Job with the corrected image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neutralize_job_image_hash: Option<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_time: Option<String>,
 
