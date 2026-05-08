@@ -94,64 +94,71 @@ async fn ensure_source_snapshot(
     let ns = refresh.namespace().unwrap_or_default();
     let snapshots: Api<VolumeSnapshot> = Api::namespaced(ctx.client.clone(), &ns);
 
+    // Convention: <refresh-crd>-src.  Deterministic per refresh CR so
+    // we can always recompute the name even if status.sourceSnapshot
+    // hasn't been persisted yet (or got cleared by an admin force-delete
+    // of the snapshot mid-flight).
+    let snap_name = format!("{}-src", refresh.name_any());
+
+    // Idempotent create-or-adopt.  Three cases:
+    //   1. Snapshot exists with this name and we're already tracking it
+    //      → 409 from create, status.sourceSnapshot already set, no-op.
+    //   2. Snapshot exists from a prior reconcile that crashed before
+    //      patching status → 409 + status.sourceSnapshot empty.  Adopt
+    //      and persist.
+    //   3. Snapshot doesn't exist (fresh refresh, OR admin force-deleted
+    //      the snapshot to recover from a stuck state) → create + persist.
+    // This handles the case where status.sourceSnapshot points at a name
+    // that no longer exists in the cluster: previous code returned
+    // Pending forever because it only created on `recorded == None`.
+    let snap = VolumeSnapshot {
+        metadata: kube::api::ObjectMeta {
+            name: Some(snap_name.clone()),
+            namespace: Some(ns.clone()),
+            owner_references: Some(vec![controller_owner_ref(refresh)]),
+            ..Default::default()
+        },
+        spec: VolumeSnapshotSpec {
+            source: VolumeSnapshotSource {
+                persistent_volume_claim_name: Some(source_pvc_name.to_string()),
+                volume_snapshot_content_name: None,
+            },
+            volume_snapshot_class_name: None,
+        },
+        status: None,
+    };
+    let created_now = match snapshots.create(&PostParams::default(), &snap).await {
+        Ok(_) => {
+            info!(
+                crd_name = %refresh.name_any(),
+                snapshot = %snap_name,
+                source_pvc = %source_pvc_name,
+                "created source VolumeSnapshot for staging refresh"
+            );
+            true
+        }
+        Err(kube::Error::Api(ErrorResponse { code: 409, .. })) => false,
+        Err(e) => return Err(Error::Kube(e)),
+    };
+
     let recorded = refresh
         .status
         .as_ref()
         .and_then(|s| s.source_snapshot.as_deref());
-
-    let snap_name = match recorded {
-        Some(n) => n.to_string(),
-        None => {
-            // Convention: <refresh-crd>-src.  Stable per refresh CR;
-            // recreated fresh on each new refresh CR.
-            let name = format!("{}-src", refresh.name_any());
-            let snap = VolumeSnapshot {
-                metadata: kube::api::ObjectMeta {
-                    name: Some(name.clone()),
-                    namespace: Some(ns.clone()),
-                    owner_references: Some(vec![controller_owner_ref(refresh)]),
-                    ..Default::default()
-                },
-                spec: VolumeSnapshotSpec {
-                    source: VolumeSnapshotSource {
-                        persistent_volume_claim_name: Some(source_pvc_name.to_string()),
-                        volume_snapshot_content_name: None,
-                    },
-                    volume_snapshot_class_name: None,
-                },
-                status: None,
-            };
-            match snapshots.create(&PostParams::default(), &snap).await {
-                Ok(_) => {
-                    info!(
-                        crd_name = %refresh.name_any(),
-                        snapshot = %name,
-                        source_pvc = %source_pvc_name,
-                        "created source VolumeSnapshot for staging refresh"
-                    );
-                }
-                Err(kube::Error::Api(ErrorResponse { code: 409, .. })) => {
-                    // Pre-existing snapshot from a prior reconcile that
-                    // crashed before persisting status.source_snapshot.
-                    // Adopt it; idempotent.
-                }
-                Err(e) => return Err(Error::Kube(e)),
-            }
-            patch_refresh_status(
-                &ctx.client,
-                &ns,
-                &refresh.name_any(),
-                &json!({ "status": { "sourceSnapshot": &name } }),
-            )
-            .await?;
-            name
-        }
-    };
+    if created_now || recorded != Some(snap_name.as_str()) {
+        patch_refresh_status(
+            &ctx.client,
+            &ns,
+            &refresh.name_any(),
+            &json!({ "status": { "sourceSnapshot": &snap_name } }),
+        )
+        .await?;
+    }
 
     // Check readiness.  `readyToUse: true` means the CSI driver has
     // finished snapshot creation; the snapshot can be referenced by a new
-    // PVC.  Anything else (None, false, missing object) → not ready,
-    // requeue.
+    // PVC.  Anything else (None, false, transient lookup miss) → not
+    // ready, requeue.
     match snapshots.get_opt(&snap_name).await? {
         Some(s) => {
             let ready = s
@@ -166,9 +173,8 @@ async fn ensure_source_snapshot(
             }
         }
         None => {
-            // Snapshot we just created is missing (e.g. cascading delete
-            // from the refresh CR being deleted while we were running).
-            // Treat as Pending — the next reconcile will recreate it.
+            // Race: we just created it but the read-after-write hasn't
+            // settled.  Pending; next reconcile will see it.
             Ok(SourceSnapshotState::Pending { name: snap_name })
         }
     }
