@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.12.1](https://github.com/bemade/odoo-operator/compare/v1.12.0...v1.12.1) (2026-05-08)
+
+
+### Bug Fixes
+
+* **snapshot:** skip filestore PVC reconcile during CloningFromSource ([fdc2675](https://github.com/bemade/odoo-operator/commit/fdc2675160d782596ea8e5940178d346d3353936))
+* **snapshot:** skip filestore PVC reconcile during CloningFromSource ([ff80b5a](https://github.com/bemade/odoo-operator/commit/ff80b5a603a2245775432647acbe57a6c2142a9f))
+
 ## [1.12.0](https://github.com/bemade/odoo-operator/compare/v1.11.0...v1.12.0) (2026-05-07)
 
 
