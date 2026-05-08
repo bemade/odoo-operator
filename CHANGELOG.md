@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.13.0](https://github.com/bemade/odoo-operator/compare/v1.12.2...v1.13.0) (2026-05-08)
+
+
+### Features
+
+* **refresh:** use VolumeSnapshot intermediary for filestore clone ([471fefa](https://github.com/bemade/odoo-operator/commit/471fefa87273aefc9de1e47648e9bb7e3c564648))
+* **refresh:** use VolumeSnapshot intermediary for filestore clone ([fde1bfc](https://github.com/bemade/odoo-operator/commit/fde1bfc6a16a03642998d758d844b72216c2dede))
+
+
+### Bug Fixes
+
+* bump filestore-migration deadline to 2h, drop neutralize to 5m ([9f525a7](https://github.com/bemade/odoo-operator/commit/9f525a718ef40d68ac0abcd1535f8ed805d3af97))
+* bump filestore-migration deadline to 2h, drop neutralize to 5m ([77ff741](https://github.com/bemade/odoo-operator/commit/77ff7414ed952465b3e19d2fe324b477df6f2dcf))
+
 ## [1.12.2](https://github.com/bemade/odoo-operator/compare/v1.12.1...v1.12.2) (2026-05-08)
 
 
