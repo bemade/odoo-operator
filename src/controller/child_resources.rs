@@ -263,6 +263,16 @@ pub async fn ensure_postgres_role(
     ctx.postgres.ensure_role(pg, &username, &password).await
 }
 
+/// Create the filestore PVC for an OdooInstance, expanding it in place if
+/// the spec requests a larger size than what's already provisioned.
+///
+/// `explicit_data_source` is an override used by the staging refresh's
+/// `CloningFromSource` state to inject a `VolumeSnapshot` reference (the
+/// universal path that works for both CephFS and JuiceFS CSI drivers).
+/// When `None`, the function falls back to the legacy auto-detection in
+/// `get_pvc_source` (PVC→PVC clone, only works on CephFS-class drivers).
+/// The always-on reconcile path always passes `None`; only the refresh
+/// state handler passes `Some`.
 pub async fn ensure_filestore_pvc(
     client: &Client,
     ns: &str,
@@ -270,6 +280,7 @@ pub async fn ensure_filestore_pvc(
     instance: &OdooInstance,
     ctx: &Context,
     oref: &OwnerReference,
+    explicit_data_source: Option<TypedObjectReference>,
 ) -> Result<()> {
     let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
     let pvc_name = format!("{name}-filestore-pvc");
@@ -332,8 +343,14 @@ pub async fn ensure_filestore_pvc(
         return Ok(());
     }
 
-    // No existing PVC, so we fully construct it, possibly with a snapshot source
-    let source = get_pvc_source(client, ns, instance).await;
+    // No existing PVC, so we fully construct it, possibly with a data source.
+    // Explicit caller-provided source wins (used by CloningFromSource's
+    // VolumeSnapshot path).  Otherwise fall back to the legacy
+    // PVC-to-PVC clone auto-detection.
+    let source = match explicit_data_source {
+        Some(s) => Some(s),
+        None => get_pvc_source(client, ns, instance).await,
+    };
     let pvc = PersistentVolumeClaim {
         metadata: ObjectMeta {
             name: Some(pvc_name),

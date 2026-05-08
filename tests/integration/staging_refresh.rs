@@ -410,6 +410,31 @@ async fn fake_pvc_bound(client: &kube::Client, ns: &str, name: &str) {
         .expect("patch PVC status");
 }
 
+/// Fake a `VolumeSnapshot.status.readyToUse: true` so the snapshot-path
+/// `ensure_source_snapshot` proceeds past the Pending gate.  envtest has no
+/// external-snapshotter, so without this the operator would loop forever
+/// waiting for the CSI driver to ack the snapshot.
+async fn fake_volume_snapshot_ready(client: &kube::Client, ns: &str, name: &str) {
+    use kube_custom_resources_rs::snapshot_storage_k8s_io::v1::volumesnapshots::VolumeSnapshot;
+    let snaps: Api<VolumeSnapshot> = Api::namespaced(client.clone(), ns);
+    let start = Instant::now();
+    loop {
+        if snaps.get_opt(name).await.ok().flatten().is_some() {
+            break;
+        }
+        assert!(
+            start.elapsed() < TIMEOUT,
+            "VolumeSnapshot {name} never appeared so it could be marked ready"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+    let patch = json!({ "status": { "readyToUse": true } });
+    snaps
+        .patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .expect("patch VolumeSnapshot status");
+}
+
 /// Snapshot path: when source and target share a StorageClass and
 /// `filestoreMethod: snapshot` is requested, the operator must NOT spawn a
 /// filestore Job.  Instead, it deletes the staging PVC, recreates it (which
@@ -480,6 +505,13 @@ async fn staging_refresh_snapshot_path_completes_via_pvc_bound() -> anyhow::Resu
         &Patch::Merge(&json!({ "status": { "succeeded": 1 } })),
     )
     .await?;
+
+    // Snapshot path: the operator first creates a VolumeSnapshot of the
+    // source PVC and gates on `readyToUse: true` before recreating the
+    // dest PVC.  envtest has no CSI snapshotter, so the test must mark
+    // it ready manually.  The snapshot is named `<refresh-crd>-src` per
+    // the operator's convention.
+    fake_volume_snapshot_ready(c, ns, "tgt-snap-refresh-src").await;
 
     // filestorePhase should reach Running once the snapshot kickoff patches
     // status (PVC delete + ensure_filestore_pvc complete).
@@ -686,6 +718,29 @@ async fn staging_refresh_snapshot_does_not_complete_while_old_pvc_terminates() -
         &Patch::Merge(&json!({ "status": { "succeeded": 1 } })),
     )
     .await?;
+
+    // Snapshot path requires a Ready VolumeSnapshot before the operator
+    // proceeds to the PVC delete-and-recreate dance that this test is
+    // really exercising.
+    fake_volume_snapshot_ready(c, ns, "tgt-snap3-refresh-src").await;
+
+    // Wait for the operator to have actually attempted the PVC delete
+    // (deletionTimestamp set) before starting the race assertion window —
+    // otherwise we'd be asserting on a PVC that's still Bound and
+    // pristine, which trips the test invariant before the operator has
+    // had a chance to misbehave.
+    let wait_start = Instant::now();
+    loop {
+        let live = pvcs.get(pvc_name).await?;
+        if live.metadata.deletion_timestamp.is_some() {
+            break;
+        }
+        assert!(
+            wait_start.elapsed() < TIMEOUT,
+            "operator never attempted to delete the staging PVC after snapshot ready"
+        );
+        tokio::time::sleep(POLL).await;
+    }
 
     // Critical assertion: while the old PVC has deletionTimestamp set
     // and is still phase=Bound, filestorePhase MUST NOT reach Completed.

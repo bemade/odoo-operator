@@ -24,6 +24,7 @@ use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
 use gateway_api::apis::standard::httproutes::HTTPRoute;
+use kube_custom_resources_rs::snapshot_storage_k8s_io::v1::volumesnapshots::VolumeSnapshot;
 
 use odoo_operator::controller::helpers::FIELD_MANAGER;
 use odoo_operator::controller::odoo_instance::Context;
@@ -98,6 +99,40 @@ fn init_shared() -> SharedEnv {
                     "https://github.com/kubernetes-sigs/gateway-api/pull/1538".to_string(),
                 );
                 crds.push(httproute_crd);
+                // VolumeSnapshot CRD: needed by the staging refresh
+                // snapshot path so the operator can create VolumeSnapshots
+                // as the dataSource for the dest PVC.  The
+                // kube-custom-resources-rs CRD is generated with
+                // `#[kube(schema = "disabled")]`, but envtest's CRD
+                // validator rejects that — patch on a permissive schema
+                // (`x-kubernetes-preserve-unknown-fields: true`) and the
+                // api-approved annotation that protected groups require.
+                // envtest has no CSI controller, so the snapshot never
+                // becomes ready on its own — tests that exercise the
+                // snapshot path patch the snapshot's `readyToUse` status
+                // directly via the `fake_volume_snapshot_ready` helper.
+                let mut snap_crd = VolumeSnapshot::crd();
+                let snap_annotations = snap_crd
+                    .metadata
+                    .annotations
+                    .get_or_insert_with(Default::default);
+                snap_annotations.insert(
+                    "api-approved.kubernetes.io".to_string(),
+                    "https://github.com/kubernetes-csi/external-snapshotter/pull/665".to_string(),
+                );
+                for v in snap_crd.spec.versions.iter_mut() {
+                    use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::{
+                        CustomResourceValidation, JSONSchemaProps,
+                    };
+                    v.schema = Some(CustomResourceValidation {
+                        open_api_v3_schema: Some(JSONSchemaProps {
+                            type_: Some("object".to_string()),
+                            x_kubernetes_preserve_unknown_fields: Some(true),
+                            ..Default::default()
+                        }),
+                    });
+                }
+                crds.push(snap_crd);
                 crds
             })
             .expect("failed to configure CRDs");

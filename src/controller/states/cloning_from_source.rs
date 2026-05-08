@@ -2,12 +2,16 @@ use async_trait::async_trait;
 use k8s_openapi::api::{
     batch::v1::Job,
     core::v1::{
-        Container, PersistentVolumeClaim, PersistentVolumeClaimVolumeSource, Volume, VolumeMount,
+        Container, PersistentVolumeClaim, PersistentVolumeClaimVolumeSource, TypedObjectReference,
+        Volume, VolumeMount,
     },
 };
 use kube::{
     api::{Api, DeleteParams, Patch, PatchParams, PostParams, ResourceExt},
     core::ErrorResponse,
+};
+use kube_custom_resources_rs::snapshot_storage_k8s_io::v1::volumesnapshots::{
+    VolumeSnapshot, VolumeSnapshotSource, VolumeSnapshotSpec,
 };
 use serde_json::json;
 use tracing::info;
@@ -42,6 +46,146 @@ const IMAGE_HASH_LEN: usize = 16;
 pub(crate) fn neutralize_image_hash(image: &str) -> String {
     let full = sha256_hex(image);
     full[..IMAGE_HASH_LEN.min(full.len())].to_string()
+}
+
+/// Outcome of `ensure_source_snapshot` — whether the dataSource is ready
+/// to be referenced by a new PVC.
+enum SourceSnapshotState {
+    /// Snapshot exists, `readyToUse: true` — safe to recreate the dest PVC
+    /// with `dataSourceRef → VolumeSnapshot/<name>`.
+    Ready { name: String },
+    /// Snapshot exists but `readyToUse` is `false` or `None` — caller should
+    /// requeue and check again next reconcile.  The CSI driver will mark
+    /// it ready when the underlying snapshot operation completes (instant
+    /// for CephFS / RBD, seconds-to-minutes for JuiceFS depending on
+    /// metadata engine + file count).
+    Pending { name: String },
+}
+
+/// Ensure a `VolumeSnapshot` of the source filestore PVC exists and report
+/// its readiness.
+///
+/// The snapshot is the **source of truth** for the staging refresh's
+/// filestore — it pins a point-in-time view of production at the moment
+/// the refresh started, so the new dest PVC can be cloned from it via
+/// `dataSourceRef → VolumeSnapshot`.  This is the universal path: CephFS
+/// CSI accepts both PVC-and snapshot dataSources for clones, but JuiceFS
+/// CSI accepts **only** VolumeSnapshot — so always going through a
+/// snapshot is the only way to support both backends with the same code
+/// path.
+///
+/// Snapshot naming is keyed on the refresh CR's name (one snapshot per
+/// refresh, persisted in `status.source_snapshot` for idempotency across
+/// reconciles).  The snapshot is owned by the refresh CR so K8s GC cleans
+/// it up if the refresh is deleted; on a successful refresh, the
+/// `CompleteRefreshJob` transition action deletes it explicitly.
+///
+/// `volumeSnapshotClassName` is left unset — the cluster's default
+/// snapshot class for the source PVC's CSI driver is used.  Each driver
+/// in the cluster should have exactly one default class (annotated
+/// `snapshot.storage.kubernetes.io/is-default-class: "true"`); without
+/// that the API server returns an error which surfaces in the CR
+/// `message` field for the user to fix.
+async fn ensure_source_snapshot(
+    ctx: &Context,
+    refresh: &OdooStagingRefreshJob,
+    source_pvc_name: &str,
+) -> Result<SourceSnapshotState> {
+    let ns = refresh.namespace().unwrap_or_default();
+    let snapshots: Api<VolumeSnapshot> = Api::namespaced(ctx.client.clone(), &ns);
+
+    let recorded = refresh
+        .status
+        .as_ref()
+        .and_then(|s| s.source_snapshot.as_deref());
+
+    let snap_name = match recorded {
+        Some(n) => n.to_string(),
+        None => {
+            // Convention: <refresh-crd>-src.  Stable per refresh CR;
+            // recreated fresh on each new refresh CR.
+            let name = format!("{}-src", refresh.name_any());
+            let snap = VolumeSnapshot {
+                metadata: kube::api::ObjectMeta {
+                    name: Some(name.clone()),
+                    namespace: Some(ns.clone()),
+                    owner_references: Some(vec![controller_owner_ref(refresh)]),
+                    ..Default::default()
+                },
+                spec: VolumeSnapshotSpec {
+                    source: VolumeSnapshotSource {
+                        persistent_volume_claim_name: Some(source_pvc_name.to_string()),
+                        volume_snapshot_content_name: None,
+                    },
+                    volume_snapshot_class_name: None,
+                },
+                status: None,
+            };
+            match snapshots.create(&PostParams::default(), &snap).await {
+                Ok(_) => {
+                    info!(
+                        crd_name = %refresh.name_any(),
+                        snapshot = %name,
+                        source_pvc = %source_pvc_name,
+                        "created source VolumeSnapshot for staging refresh"
+                    );
+                }
+                Err(kube::Error::Api(ErrorResponse { code: 409, .. })) => {
+                    // Pre-existing snapshot from a prior reconcile that
+                    // crashed before persisting status.source_snapshot.
+                    // Adopt it; idempotent.
+                }
+                Err(e) => return Err(Error::Kube(e)),
+            }
+            patch_refresh_status(
+                &ctx.client,
+                &ns,
+                &refresh.name_any(),
+                &json!({ "status": { "sourceSnapshot": &name } }),
+            )
+            .await?;
+            name
+        }
+    };
+
+    // Check readiness.  `readyToUse: true` means the CSI driver has
+    // finished snapshot creation; the snapshot can be referenced by a new
+    // PVC.  Anything else (None, false, missing object) → not ready,
+    // requeue.
+    match snapshots.get_opt(&snap_name).await? {
+        Some(s) => {
+            let ready = s
+                .status
+                .as_ref()
+                .and_then(|st| st.ready_to_use)
+                .unwrap_or(false);
+            if ready {
+                Ok(SourceSnapshotState::Ready { name: snap_name })
+            } else {
+                Ok(SourceSnapshotState::Pending { name: snap_name })
+            }
+        }
+        None => {
+            // Snapshot we just created is missing (e.g. cascading delete
+            // from the refresh CR being deleted while we were running).
+            // Treat as Pending — the next reconcile will recreate it.
+            Ok(SourceSnapshotState::Pending { name: snap_name })
+        }
+    }
+}
+
+/// Delete the source `VolumeSnapshot` recorded on a refresh CR's status.
+/// Best-effort — 404 is the expected case once K8s GC has run.
+pub async fn delete_source_snapshot(ctx: &Context, ns: &str, snapshot_name: &str) -> Result<()> {
+    let snapshots: Api<VolumeSnapshot> = Api::namespaced(ctx.client.clone(), ns);
+    match snapshots
+        .delete(snapshot_name, &DeleteParams::background())
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => Ok(()),
+        Err(e) => Err(Error::Kube(e)),
+    }
 }
 
 /// CloningFromSource: orchestrates the three-Job refresh pipeline.
@@ -247,18 +391,45 @@ impl State for CloningFromSource {
                 )
                 .await?;
             } else {
-                // Snapshot path: replace the staging PVC with one cloned
-                // from the source PVC's contents.  Done in two phases
-                // across reconciles to avoid racing the old PVC's deletion:
-                //   tick A: delete (idempotent on 404), then bail if the
-                //           PVC is still terminating — kubelet may take a
-                //           while to release the volume on a real CSI.
-                //   tick B: PVC is gone → recreate it, patch filestorePhase
-                //           Running.  Settle block then waits for Bound.
-                // Patching Running while the OLD PVC still lingers would
-                // let the settle block see its `phase: Bound` and prematurely
-                // mark the step Completed — racing neutralize against a PVC
-                // that's about to vanish.
+                // Snapshot path: take a VolumeSnapshot of the source PVC,
+                // wait for it to be ready, then recreate the dest PVC with
+                // dataSourceRef → VolumeSnapshot.  Going via a snapshot is
+                // the universal CSI path: CephFS accepts both PVC and
+                // snapshot dataSources, but JuiceFS only accepts snapshot
+                // (`only VolumeSnapshot data source is supported, got
+                // PersistentVolumeClaim`), so PVC→PVC clone breaks JuiceFS
+                // refreshes outright.  Single code path → both backends.
+                //
+                // Done in three reconcile-amenable steps so we don't
+                // block the controller:
+                //   tick A: ensure source snapshot exists; if not Ready,
+                //           bail (next tick checks again).  Snapshot
+                //           creation is instant on CephFS, may take
+                //           seconds-to-minutes on JuiceFS depending on
+                //           file count and metadata engine speed.
+                //   tick B: snapshot Ready → delete the existing dest PVC.
+                //           If still terminating, bail.
+                //   tick C: dest PVC is gone → create it with
+                //           dataSourceRef → VolumeSnapshot, patch
+                //           filestorePhase Running.  Settle block then
+                //           waits for Bound.
+                // Patching Running before all three steps complete would
+                // let the settle block see a stale `Bound` and mark the
+                // step Completed before the new clone is actually live.
+                let source_pvc = format!("{source_name}-filestore-pvc");
+                let snap_state = ensure_source_snapshot(ctx, refresh, &source_pvc).await?;
+                let snap_name = match snap_state {
+                    SourceSnapshotState::Ready { name } => name,
+                    SourceSnapshotState::Pending { name } => {
+                        info!(
+                            crd_name = %refresh.name_any(),
+                            snapshot = %name,
+                            "source VolumeSnapshot not yet readyToUse; waiting"
+                        );
+                        return Ok(());
+                    }
+                };
+
                 let target_pvc = format!("{inst_name}-filestore-pvc");
                 let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), &ns);
                 // Background delete (the default): PVCs don't have
@@ -287,6 +458,12 @@ impl State for CloningFromSource {
                     _ => {}
                 }
                 let oref = controller_owner_ref(instance);
+                let snap_data_source = TypedObjectReference {
+                    api_group: Some("snapshot.storage.k8s.io".to_string()),
+                    kind: "VolumeSnapshot".to_string(),
+                    name: snap_name.clone(),
+                    namespace: None,
+                };
                 child_resources::ensure_filestore_pvc(
                     &ctx.client,
                     &ns,
@@ -294,11 +471,13 @@ impl State for CloningFromSource {
                     instance,
                     ctx,
                     &oref,
+                    Some(snap_data_source),
                 )
                 .await?;
                 info!(
                     crd_name = %refresh.name_any(),
                     pvc = %target_pvc,
+                    snapshot = %snap_name,
                     "kicked off filestore snapshot/clone PVC recreate"
                 );
                 patch_refresh_status(

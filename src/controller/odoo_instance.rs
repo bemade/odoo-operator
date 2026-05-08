@@ -343,7 +343,8 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
     // ensure_deployment/ensure_config_map preserve current replicas and
     // update connection details (which is desirable for the switchover).
     if !is_migrating_filestore && !is_cloning_filestore {
-        child_resources::ensure_filestore_pvc(client, &ns, &name, instance, ctx, &oref).await?;
+        child_resources::ensure_filestore_pvc(client, &ns, &name, instance, ctx, &oref, None)
+            .await?;
     }
     child_resources::ensure_config_map(client, &ns, &name, instance, &pg_cluster, &oref).await?;
     child_resources::ensure_service(client, &ns, &name, &oref).await?;

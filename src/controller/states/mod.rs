@@ -30,7 +30,7 @@ mod uninitialized;
 mod upgrading;
 
 pub use backing_up::BackingUp;
-pub use cloning_from_source::CloningFromSource;
+pub use cloning_from_source::{delete_source_snapshot, CloningFromSource};
 pub use degraded::Degraded;
 pub use error::Error;
 pub use finalizing_database_migration::FinalizingDatabaseMigration;

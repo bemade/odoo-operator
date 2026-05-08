@@ -892,6 +892,33 @@ pub async fn execute_action(
                     &Patch::Merge(&patch_val),
                 )
                 .await?;
+                // On success, drop the source VolumeSnapshot.  The dest
+                // PVC is fully cloned by this point — keeping the
+                // snapshot consumes metadata-engine state on JuiceFS and
+                // a reservation against the source PVC on CephFS, with
+                // no benefit (we never roll back via the *source*
+                // snapshot; that's what `rollback_snapshot` is for, a
+                // separate concern).  On failure we keep it for
+                // diagnostics.  Deletion is best-effort: 404s and CSI
+                // errors are logged but don't fail the action.
+                if matches!(action, CompleteRefreshJob) {
+                    if let Some(snap) = job
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.source_snapshot.as_deref())
+                    {
+                        if let Err(e) =
+                            crate::controller::states::delete_source_snapshot(ctx, &ns, snap).await
+                        {
+                            tracing::warn!(
+                                crd_name = %crd_name,
+                                snapshot = %snap,
+                                error = %e,
+                                "failed to delete source VolumeSnapshot post-refresh"
+                            );
+                        }
+                    }
+                }
                 if let Some(ref wh) = job.spec.webhook {
                     // All three sub-jobs share the same webhook payload
                     // shape as the other job CRDs.  We report whichever of
