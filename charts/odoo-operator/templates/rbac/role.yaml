@@ -56,6 +56,15 @@ rules:
     resources: ["volumeattachments"]
     verbs: ["get", "list", "delete"]
 
+  # VolumeSnapshots — staging refresh's snapshot path creates a snapshot
+  # of the source filestore PVC and uses it as the dest PVC's
+  # dataSourceRef.  Required for both CephFS and JuiceFS backends; the
+  # latter only accepts VolumeSnapshot dataSources, so this is the
+  # universal path.
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+
   # PersistentVolumes (for filestore StorageClass migration rebind)
   - apiGroups: [""]
     resources: ["persistentvolumes"]
