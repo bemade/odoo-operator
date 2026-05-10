@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.13.1](https://github.com/bemade/odoo-operator/compare/v1.13.0...v1.13.1) (2026-05-10)
+
+
+### Bug Fixes
+
+* **rbac:** grant operator VolumeSnapshot create/delete ([c03e9c8](https://github.com/bemade/odoo-operator/commit/c03e9c89c278fb0f3fe50d30c6d0fdd3e0eb4de0))
+* **refresh:** always create-or-adopt source snapshot ([2c011e8](https://github.com/bemade/odoo-operator/commit/2c011e855f14541668542ef0e1793967f7ac4277))
+
 ## [1.13.0](https://github.com/bemade/odoo-operator/compare/v1.12.2...v1.13.0) (2026-05-08)
 
 
