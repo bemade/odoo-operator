@@ -1,4 +1,4 @@
-.PHONY: build test test-all test-cluster crds helm-crds check fmt clippy \
+.PHONY: build test test-all test-cluster test-scripts crds helm-crds check fmt clippy \
        docker-build docker-push docker-load state-machine \
        release-patch release-minor release-major
 
@@ -33,11 +33,18 @@ test:
 	cargo test
 
 ## All tests including cluster integration (requires running k8s cluster)
-test-all: test test-cluster
+test-all: test test-scripts test-cluster
 
 ## Cluster integration tests only
 test-cluster:
 	cargo test --test integration_test -- --ignored
+
+## Shell-script contract tests for scripts/* (requires docker, zip)
+test-scripts:
+	@for t in scripts/tests/test-*.sh; do \
+		echo "=== $$t ==="; \
+		bash "$$t" || exit $$?; \
+	done
 
 # ── Docker ────────────────────────────────────────────────────────────────────
 

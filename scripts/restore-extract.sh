@@ -33,4 +33,14 @@ if [ -n "${rc:-}" ] && [ "$rc" -ne 0 ] && [ "$rc" -ne 11 ]; then
 fi
 
 ls -l /workspace/dump.sql
+
+# The script runs as root so apk can install unzip, which means everything
+# unzip wrote — including the mkdir'd parent — is owned root.  The Odoo
+# container runs as uid 100 (odoo) and must be able to write here.  On
+# cephfs the CSI driver's fsGroupPolicy=File lets kubelet rescue this with
+# a recursive chown, but JuiceFS RWX volumes (fsGroupPolicy=ReadWriteOnceWithFSType)
+# skip fsGroup entirely.  Chown unconditionally so the script's output is
+# usable regardless of the underlying CSI driver.
+chown -R 100:101 "/var/lib/odoo/filestore/$DB_NAME"
+
 echo "=== Extract complete ==="

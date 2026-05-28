@@ -45,3 +45,14 @@ jobs:
 
       - name: Run integration tests
         run: cargo test --test integration -- --test-threads=1
+
+  test-scripts:
+    name: Script tests
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install zip
+        run: sudo apt-get update && sudo apt-get install -y zip
+      - name: Run shell-script tests
+        run: make test-scripts
