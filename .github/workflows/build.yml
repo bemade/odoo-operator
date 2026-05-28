@@ -56,3 +56,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y zip
       - name: Run shell-script tests
         run: make test-scripts
+
+  test-postgres:
+    name: Postgres integration tests
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run docker-backed postgres tests
+        run: make test-postgres
