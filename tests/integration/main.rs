@@ -12,6 +12,7 @@ mod auto_init;
 mod backup_job;
 mod bootstrap;
 mod child_resources;
+mod database_missing_policy;
 mod degraded;
 mod environment_labels;
 mod finalizer;

@@ -36,6 +36,24 @@ pub struct FilestoreSpec {
     pub storage_class: Option<String>,
 }
 
+/// Policy for what to do when the per-instance database is observed
+/// missing (e.g. dropped out-of-band) while `status.dbInitialized == true`.
+///
+///   * `Ignore` (default) — publish a Warning event and let humans decide
+///     whether to restore the DB or trigger a re-init (manually flipping
+///     `status.dbInitialized` to false). Safe default: never wipes data
+///     during operator-external maintenance windows.
+///   * `Recreate` — automatically flip `status.dbInitialized` to false so
+///     the state machine drives back to `Uninitialized` and the
+///     `init.enabled` auto-init path recreates the DB. Opt in only when
+///     the operator is the exclusive owner of DB lifecycle.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub enum DatabaseMissingPolicy {
+    #[default]
+    Ignore,
+    Recreate,
+}
+
 /// DatabaseSpec identifies which PostgreSQL cluster to use for this instance.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +62,10 @@ pub struct DatabaseSpec {
     pub cluster: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Reaction when the database is observed missing post-initialization.
+    /// See `DatabaseMissingPolicy`. Default `Ignore`.
+    #[serde(default)]
+    pub missing_policy: DatabaseMissingPolicy,
 }
 
 /// Environment tags an OdooInstance as production or staging.  Used by:

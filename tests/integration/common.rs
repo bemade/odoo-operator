@@ -347,6 +347,8 @@ fn test_context(client: Client) -> Arc<Context> {
 pub struct MockPostgresManager {
     // username -> error message to return from delete_role
     delete_role_failures: RwLock<HashMap<String, String>>,
+    // db_name -> "exists?" override. Absent → default behavior (exists=true).
+    database_exists_override: RwLock<HashMap<String, bool>>,
 }
 
 impl MockPostgresManager {
@@ -362,6 +364,24 @@ impl MockPostgresManager {
     #[allow(dead_code)]
     pub fn clear_delete_role_failure(&self, username: &str) {
         self.delete_role_failures.write().unwrap().remove(username);
+    }
+
+    /// Force `database_exists(db_name)` to return the supplied bool. Used by
+    /// tests that drive the operator's "DB missing" reaction without a real
+    /// PG cluster.
+    pub fn set_database_exists(&self, db_name: &str, exists: bool) {
+        self.database_exists_override
+            .write()
+            .unwrap()
+            .insert(db_name.to_string(), exists);
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_database_exists_override(&self, db_name: &str) {
+        self.database_exists_override
+            .write()
+            .unwrap()
+            .remove(db_name);
     }
 }
 
@@ -382,6 +402,16 @@ impl PostgresManager for MockPostgresManager {
             return Err(Error::config(msg));
         }
         Ok(())
+    }
+
+    async fn database_exists(&self, _: &PostgresClusterConfig, db_name: &str) -> PgResult<bool> {
+        Ok(self
+            .database_exists_override
+            .read()
+            .unwrap()
+            .get(db_name)
+            .copied()
+            .unwrap_or(true))
     }
 
     async fn ensure_report_url(
@@ -548,6 +578,28 @@ pub async fn fake_job_failed(client: &Client, ns: &str, job_name: &str) {
     )
     .await
     .expect("failed to patch job status (failure)");
+}
+
+/// Patch a benign annotation on the OdooInstance to trigger a reconcile
+/// without changing meaningful state. Use in tests that need the
+/// controller to wake up after some out-of-band change (e.g. a mock fault
+/// injection) that wouldn't otherwise fire a watch event.
+pub async fn touch_instance(client: &Client, ns: &str, name: &str) {
+    let api: Api<OdooInstance> = Api::namespaced(client.clone(), ns);
+    let patch = json!({
+        "metadata": {
+            "annotations": {
+                "bemade.org/test-tick": chrono::Utc::now().to_rfc3339(),
+            }
+        }
+    });
+    api.patch(
+        name,
+        &PatchParams::apply(FIELD_MANAGER),
+        &Patch::Merge(&patch),
+    )
+    .await
+    .expect("failed to touch instance");
 }
 
 /// Patch the OdooInstance spec (e.g. replicas).

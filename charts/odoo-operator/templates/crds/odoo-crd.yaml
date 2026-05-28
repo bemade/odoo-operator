@@ -603,6 +603,13 @@ spec:
                   cluster:
                     nullable: true
                     type: string
+                  missingPolicy:
+                    default: Ignore
+                    description: Reaction when the database is observed missing post-initialization. See `DatabaseMissingPolicy`. Default `Ignore`.
+                    enum:
+                    - Ignore
+                    - Recreate
+                    type: string
                   name:
                     nullable: true
                     type: string

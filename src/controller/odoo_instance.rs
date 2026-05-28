@@ -31,7 +31,7 @@ use tracing::{debug, info, warn};
 
 use crate::crd::odoo_backup_job::OdooBackupJob;
 use crate::crd::odoo_init_job::OdooInitJob;
-use crate::crd::odoo_instance::{OdooInstance, OdooInstancePhase};
+use crate::crd::odoo_instance::{DatabaseMissingPolicy, OdooInstance, OdooInstancePhase};
 use crate::crd::odoo_restore_job::OdooRestoreJob;
 use crate::crd::odoo_staging_refresh_job::OdooStagingRefreshJob;
 use crate::crd::odoo_upgrade_job::OdooUpgradeJob;
@@ -363,6 +363,67 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
         &cluster_name,
     )
     .await?;
+
+    // Reality-check that the per-instance database still exists. If it was
+    // dropped out-of-band, react per spec.database.missingPolicy.
+    if snapshot.db_initialized && snapshot.init_job == super::state_machine::JobStatus::Absent {
+        let db = crate::helpers::db_name(instance);
+        match ctx.postgres.database_exists(&pg_cluster, &db).await {
+            Ok(false) => {
+                let policy = instance
+                    .spec
+                    .database
+                    .as_ref()
+                    .map(|d| d.missing_policy)
+                    .unwrap_or_default();
+                publish_event(
+                    ctx,
+                    instance,
+                    EventType::Warning,
+                    "DatabaseMissing",
+                    "Reconcile",
+                    Some(format!(
+                        "Database {db:?} not found on cluster {cluster_name:?} \
+                         (policy: {policy:?})"
+                    )),
+                )
+                .await;
+                if policy == DatabaseMissingPolicy::Recreate {
+                    // Flip dbInitialized so the state machine drives back to
+                    // Uninitialized, then delete the previous auto-init CR so
+                    // Uninitialized.ensure() can recreate it from spec.init.
+                    let api: Api<OdooInstance> = Api::namespaced(client.clone(), &ns);
+                    let patch = json!({"status": {"dbInitialized": false}});
+                    api.patch_status(
+                        &name,
+                        &PatchParams::apply(FIELD_MANAGER),
+                        &Patch::Merge(&patch),
+                    )
+                    .await?;
+                    let auto_init_name = format!("{name}-auto-init");
+                    let inits: Api<OdooInitJob> = Api::namespaced(client.clone(), &ns);
+                    if let Err(e) = inits
+                        .delete(&auto_init_name, &kube::api::DeleteParams::default())
+                        .await
+                    {
+                        // Already-gone is fine; anything else is logged but
+                        // not fatal — the flip is the important bit.
+                        if !e.to_string().contains("NotFound") {
+                            warn!(%name, %e, "failed to delete stale auto-init CR after dbInitialized flip");
+                        }
+                    }
+                    info!(%name, %db, "DB missing under Recreate policy — flipped dbInitialized=false");
+                    return Ok(Action::requeue(Duration::from_secs(0)));
+                }
+            }
+            Ok(true) => {}
+            Err(e) => {
+                // Don't act on probe failure — treat as "unknown" to avoid
+                // false flips during transient PG outages.
+                warn!(%name, %e, "database_exists probe failed; skipping missing-policy check");
+            }
+        }
+    }
 
     // Ensure report.url points to the in-cluster web service so cron workers
     // can reach the report rendering endpoint (wkhtmltopdf via HTTP).

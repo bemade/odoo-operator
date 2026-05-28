@@ -28,6 +28,12 @@ pub trait PostgresManager: Send + Sync {
 
     async fn delete_role(&self, pg: &PostgresClusterConfig, username: &str) -> Result<()>;
 
+    /// Returns whether a database with `db_name` exists on the cluster.
+    /// Distinguishes "definitely absent" (`Ok(false)`) from "cannot reach
+    /// cluster" (`Err(_)`) so callers can act on the former without
+    /// false-positive flips on transient outages.
+    async fn database_exists(&self, pg: &PostgresClusterConfig, db_name: &str) -> Result<bool>;
+
     /// Ensure the `report.url` system parameter in the Odoo database points to
     /// the in-cluster web service so that cron-triggered report generation can
     /// reach the wkhtmltopdf endpoint.
@@ -176,6 +182,26 @@ impl PostgresManager for PgPostgresManager {
         Ok(())
     }
 
+    async fn database_exists(&self, pg: &PostgresClusterConfig, db_name: &str) -> Result<bool> {
+        let connstr = format!(
+            "host={} port={} user={} password={} dbname=postgres",
+            pg.host, pg.port, pg.admin_user, pg.admin_password
+        );
+        let (client, connection) = tokio_postgres::connect(&connstr, NoTls).await?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                warn!("postgres connection error: {e}");
+            }
+        });
+        let row = client
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
+                &[&db_name],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
     async fn detect_server_major_version(&self, pg: &PostgresClusterConfig) -> Result<u32> {
         let connstr = format!(
             "host={} port={} user={} password={} dbname=postgres",
@@ -212,6 +238,9 @@ impl PostgresManager for NoopPostgresManager {
     }
     async fn delete_role(&self, _: &PostgresClusterConfig, _: &str) -> Result<()> {
         Ok(())
+    }
+    async fn database_exists(&self, _: &PostgresClusterConfig, _: &str) -> Result<bool> {
+        Ok(true)
     }
     async fn ensure_report_url(
         &self,
