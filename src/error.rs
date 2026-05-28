@@ -5,7 +5,7 @@ pub enum Error {
     #[error("Kubernetes API error: {0}")]
     Kube(#[from] kube::Error),
 
-    #[error("PostgreSQL error: {0}")]
+    #[error("PostgreSQL error: {}", format_pg_error(.0))]
     Postgres(#[from] tokio_postgres::Error),
 
     #[error("Serialization error: {0}")]
@@ -40,5 +40,16 @@ impl Error {
     }
     pub fn config(msg: impl Into<String>) -> Self {
         Self::Config(msg.into())
+    }
+}
+
+/// Render a `tokio_postgres::Error` with the actual server-side message body
+/// when available — the default Display just emits "db error", which makes
+/// operator logs / events useless for diagnosing finalizer-blocked deletes.
+fn format_pg_error(e: &tokio_postgres::Error) -> String {
+    if let Some(db) = e.as_db_error() {
+        format!("{}: {}", db.severity(), db.message())
+    } else {
+        e.to_string()
     }
 }

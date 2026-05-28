@@ -1,4 +1,4 @@
-.PHONY: build test test-all test-cluster test-scripts crds helm-crds check fmt clippy \
+.PHONY: build test test-all test-cluster test-scripts test-postgres crds helm-crds check fmt clippy \
        docker-build docker-push docker-load state-machine \
        release-patch release-minor release-major
 
@@ -33,7 +33,7 @@ test:
 	cargo test
 
 ## All tests including cluster integration (requires running k8s cluster)
-test-all: test test-scripts test-cluster
+test-all: test test-scripts test-postgres test-cluster
 
 ## Cluster integration tests only
 test-cluster:
@@ -45,6 +45,10 @@ test-scripts:
 		echo "=== $$t ==="; \
 		bash "$$t" || exit $$?; \
 	done
+
+## Docker-backed PostgreSQL integration tests for PgPostgresManager (requires docker)
+test-postgres:
+	cargo test --test postgres_harness -- --test-threads=1
 
 # ── Docker ────────────────────────────────────────────────────────────────────
 

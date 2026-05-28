@@ -73,14 +73,17 @@ impl PostgresManager for PgPostgresManager {
             )
             .await?;
         let exists: bool = row.get(0);
+        let safe_user = quote_ident(username);
+        // Passwords are random per-instance Secrets; rotate to the current
+        // value whether the role is new or already present so a same-name
+        // re-create after a finalizer-blocked delete can authenticate with
+        // its fresh Secret (issue #119, part C).
         if exists {
+            let stmt = format!("ALTER ROLE {safe_user} WITH PASSWORD '{password}'");
+            client.execute(&stmt, &[]).await?;
             return Ok(());
         }
 
-        // tokio-postgres doesn't have Identifier.Sanitize() like pgx, so we
-        // use a simple allowlist check + quoting. In production you'd want a
-        // proper identifier escaper.
-        let safe_user = quote_ident(username);
         let stmt = format!("CREATE ROLE {safe_user} WITH PASSWORD '{password}' CREATEDB LOGIN");
         client.execute(&stmt, &[]).await?;
         info!(%username, "created postgres role");
