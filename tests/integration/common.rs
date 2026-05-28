@@ -7,8 +7,9 @@
 //! There is no kubelet or scheduler in envtest, so Deployment status and Job
 //! completion must be faked by patching status subresources.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use envtest::Environment;
@@ -34,8 +35,9 @@ use odoo_operator::crd::odoo_instance::{OdooInstance, OdooInstancePhase};
 use odoo_operator::crd::odoo_restore_job::OdooRestoreJob;
 use odoo_operator::crd::odoo_staging_refresh_job::OdooStagingRefreshJob;
 use odoo_operator::crd::odoo_upgrade_job::OdooUpgradeJob;
+use odoo_operator::error::{Error, Result as PgResult};
 use odoo_operator::helpers::OperatorDefaults;
-use odoo_operator::postgres::NoopPostgresManager;
+use odoo_operator::postgres::{PostgresClusterConfig, PostgresManager};
 
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 pub const POLL: Duration = Duration::from_millis(500);
@@ -327,13 +329,85 @@ fn test_context(client: Client) -> Arc<Context> {
         defaults: test_defaults(),
         operator_namespace: "default".into(),
         postgres_clusters_secret: "".into(),
-        postgres: Arc::new(NoopPostgresManager),
+        postgres: mock_pg(),
         http_client: reqwest::Client::new(),
         reporter: Reporter {
             controller: "odoo-operator-test".into(),
             instance: None,
         },
     })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MockPostgresManager — succeeds by default, supports per-username fault
+// injection so tests can drive cleanup/provisioning failure paths.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Default)]
+pub struct MockPostgresManager {
+    // username -> error message to return from delete_role
+    delete_role_failures: RwLock<HashMap<String, String>>,
+}
+
+impl MockPostgresManager {
+    /// Configure delete_role to fail for the given username with the given
+    /// error message until `clear_delete_role_failure` is called.
+    pub fn fail_delete_role(&self, username: &str, msg: &str) {
+        self.delete_role_failures
+            .write()
+            .unwrap()
+            .insert(username.to_string(), msg.to_string());
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_delete_role_failure(&self, username: &str) {
+        self.delete_role_failures.write().unwrap().remove(username);
+    }
+}
+
+#[async_trait::async_trait]
+impl PostgresManager for MockPostgresManager {
+    async fn ensure_role(&self, _: &PostgresClusterConfig, _: &str, _: &str) -> PgResult<()> {
+        Ok(())
+    }
+
+    async fn delete_role(&self, _: &PostgresClusterConfig, username: &str) -> PgResult<()> {
+        if let Some(msg) = self
+            .delete_role_failures
+            .read()
+            .unwrap()
+            .get(username)
+            .cloned()
+        {
+            return Err(Error::config(msg));
+        }
+        Ok(())
+    }
+
+    async fn ensure_report_url(
+        &self,
+        _: &PostgresClusterConfig,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> PgResult<()> {
+        Ok(())
+    }
+
+    async fn detect_server_major_version(&self, _: &PostgresClusterConfig) -> PgResult<u32> {
+        Ok(18)
+    }
+}
+
+static MOCK_PG: OnceLock<Arc<MockPostgresManager>> = OnceLock::new();
+
+/// Singleton mock postgres manager used by the shared test controller. Tests
+/// call this to configure fault injection (e.g. `mock_pg().fail_delete_role(...)`).
+pub fn mock_pg() -> Arc<MockPostgresManager> {
+    MOCK_PG
+        .get_or_init(|| Arc::new(MockPostgresManager::default()))
+        .clone()
 }
 
 /// Poll until a condition is true, or timeout.

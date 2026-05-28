@@ -519,7 +519,7 @@ async fn cleanup_instance(instance: &OdooInstance, ctx: &Context) -> Result<Acti
     let username = odoo_username(&ns, &name);
     if let Ok((cluster_name, pg_cluster)) = load_postgres_cluster(ctx, instance).await {
         if let Err(e) = ctx.postgres.delete_role(&pg_cluster, &username).await {
-            warn!(%name, %e, "failed to delete postgres role — removing finalizer anyway");
+            warn!(%name, %e, "failed to delete postgres role — retaining finalizer for retry");
             publish_event(
                 ctx,
                 instance,
@@ -529,6 +529,10 @@ async fn cleanup_instance(instance: &OdooInstance, ctx: &Context) -> Result<Acti
                 Some(format!("Failed to delete postgres role: {e}")),
             )
             .await;
+            // Return Err so the kube-rs finalizer helper keeps the finalizer
+            // in place and the controller requeues — otherwise we orphan the
+            // postgres role and block same-name re-create (issue #119).
+            return Err(e);
         }
 
         // If deleted mid-migration, also clean up the old cluster.
@@ -542,8 +546,20 @@ async fn cleanup_instance(instance: &OdooInstance, ctx: &Context) -> Result<Acti
                     if let Err(e) = ctx.postgres.delete_role(&old_pg, &username).await {
                         warn!(
                             %name, %old_cluster, %e,
-                            "failed to delete role on old cluster during cleanup"
+                            "failed to delete role on old cluster — retaining finalizer for retry"
                         );
+                        publish_event(
+                            ctx,
+                            instance,
+                            EventType::Warning,
+                            "CleanupFailed",
+                            "Finalize",
+                            Some(format!(
+                                "Failed to delete postgres role on old cluster {old_cluster}: {e}"
+                            )),
+                        )
+                        .await;
+                        return Err(e);
                     }
                 }
             }

@@ -15,6 +15,7 @@ mod child_resources;
 mod degraded;
 mod environment_labels;
 mod finalizer;
+mod finalizer_postgres_cleanup_failure;
 mod init_job;
 mod migrate_database;
 mod migrate_filestore;
