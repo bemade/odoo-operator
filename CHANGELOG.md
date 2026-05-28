@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.0.0](https://github.com/bemade/odoo-operator/compare/v1.13.0...v2.0.0) (2026-05-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **chart:** For clusters already running the chart, the first `helm upgrade` after this release may report an ownership conflict. In such a case, the secret must either be relabeled or recreated so that Helm can adopt it.
+
+### Features
+
+* **ci:** publish multi-arch images via native build matrix ([ed93ac2](https://github.com/bemade/odoo-operator/commit/ed93ac22585fcf5f6ff5900eb3867c9426ba2dea))
+
+
+### Bug Fixes
+
+* **chart:** make imagePullSecrets a release-managed resource ([ea3e351](https://github.com/bemade/odoo-operator/commit/ea3e3514415d58825e5b6ffa6f6c31974a41af2e)), closes [#117](https://github.com/bemade/odoo-operator/issues/117)
+* **rbac:** grant operator VolumeSnapshot create/delete ([c03e9c8](https://github.com/bemade/odoo-operator/commit/c03e9c89c278fb0f3fe50d30c6d0fdd3e0eb4de0))
+* **refresh:** always create-or-adopt source snapshot ([2c011e8](https://github.com/bemade/odoo-operator/commit/2c011e855f14541668542ef0e1793967f7ac4277))
+* **restore:** chown filestore to odoo uid after zip extract ([e8ed70c](https://github.com/bemade/odoo-operator/commit/e8ed70cac19b5d88275c4aef0a77d88ecda2b163))
+
 ## [1.13.0](https://github.com/bemade/odoo-operator/compare/v1.12.2...v1.13.0) (2026-05-08)
 
 
