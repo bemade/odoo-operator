@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.1.0](https://github.com/bemade/odoo-operator/compare/v2.0.0...v2.1.0) (2026-05-29)
+
+
+### Features
+
+* **database:** missingPolicy for auto-recovery when DB is dropped out-of-band ([#124](https://github.com/bemade/odoo-operator/issues/124)) ([8ffa04e](https://github.com/bemade/odoo-operator/commit/8ffa04e149623787e0a724af519ab41b6440a4c8))
+
+
+### Bug Fixes
+
+* **finalizer:** retain postgres-cleanup finalizer when delete_role fails ([#121](https://github.com/bemade/odoo-operator/issues/121)) ([15fcf42](https://github.com/bemade/odoo-operator/commit/15fcf42f5af058d814fedaa5ae709d9c5e74c3fe))
+* **postgres:** reset role password on every ensure_role; surface real PG error ([#123](https://github.com/bemade/odoo-operator/issues/123)) ([c7f1341](https://github.com/bemade/odoo-operator/commit/c7f13411bfca18e4c9ecafa656b0307ba6e0e1fe))
+
 ## [2.0.0](https://github.com/bemade/odoo-operator/compare/v1.13.0...v2.0.0) (2026-05-28)
 
 
