@@ -40,8 +40,8 @@ use crate::helpers::{
 use crate::postgres::PostgresClusterConfig;
 
 use super::helpers::{
-    cron_depl_name, env, image_pull_secrets, odoo_security_context, odoo_volume_mounts,
-    odoo_volumes, FIELD_MANAGER,
+    cron_depl_name, env, image_pull_secrets, merge_extra_env, odoo_security_context,
+    odoo_volume_mounts, odoo_volumes, FIELD_MANAGER,
 };
 use super::odoo_instance::Context;
 
@@ -795,7 +795,9 @@ pub async fn ensure_deployment(
                                 ..Default::default()
                             },
                         ]),
-                        env: Some(pg_env),
+                        env: Some(merge_extra_env(&pg_env, &instance.spec.extra_env)),
+                        env_from: (!instance.spec.extra_env_from.is_empty())
+                            .then(|| instance.spec.extra_env_from.clone()),
                         volume_mounts: Some(odoo_volume_mounts()),
                         resources: instance.spec.resources.clone(),
                         startup_probe: Some(Probe {
@@ -1074,7 +1076,9 @@ pub async fn ensure_cron_deployment(
                                 "0".to_string(),
                                 "--no-http".to_string(),
                             ]),
-                            env: Some(pg_env),
+                            env: Some(merge_extra_env(&pg_env, &instance.spec.extra_env)),
+                            env_from: (!instance.spec.extra_env_from.is_empty())
+                                .then(|| instance.spec.extra_env_from.clone()),
                             volume_mounts: Some(odoo_volume_mounts()),
                             resources: instance.spec.cron.resources.clone(),
                             startup_probe: Some(Probe {

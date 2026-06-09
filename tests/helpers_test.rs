@@ -139,6 +139,8 @@ fn make_instance(uid: Option<&str>, db_name: Option<&str>) -> OdooInstance {
             probes: None,
             affinity: None,
             tolerations: vec![],
+            extra_env: vec![],
+            extra_env_from: vec![],
         },
         status: None,
     }

@@ -8,8 +8,8 @@
 use k8s_openapi::api::{
     batch::v1::{Job, JobSpec},
     core::v1::{
-        Affinity, ConfigMapKeySelector, Container, EnvVar, EnvVarSource, LocalObjectReference,
-        PodSecurityContext, PodSpec, PodTemplateSpec, Volume, VolumeMount,
+        Affinity, ConfigMapKeySelector, Container, EnvFromSource, EnvVar, EnvVarSource,
+        LocalObjectReference, PodSecurityContext, PodSpec, PodTemplateSpec, Volume, VolumeMount,
     },
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -177,6 +177,23 @@ pub fn cm_env(env_name: &str, cm_name: &str, key: &str) -> EnvVar {
     }
 }
 
+/// Merge two `EnvVar` slices, last-wins by `name`. `base` order is preserved;
+/// an `extra` entry whose `name` matches a base entry overrides it in place,
+/// and new names are appended. Used to layer an instance's `spec.extra_env` on
+/// top of the operator's own env so users can override by name (not by
+/// ordering) without silently clobbering reserved operator vars.
+pub fn merge_extra_env(base: &[EnvVar], extra: &[EnvVar]) -> Vec<EnvVar> {
+    let mut out: Vec<EnvVar> = base.to_vec();
+    for e in extra {
+        if let Some(slot) = out.iter_mut().find(|x| x.name == e.name) {
+            *slot = e.clone();
+        } else {
+            out.push(e.clone());
+        }
+    }
+    out
+}
+
 /// Get the cron deployment name for an odoo instance
 pub fn cron_depl_name(instance: &OdooInstance) -> String {
     instance.name_any().to_string() + "-cron"
@@ -216,6 +233,8 @@ pub struct OdooJobBuilder {
     backoff_limit: Option<i32>,
     affinity: Option<Affinity>,
     labels: std::collections::BTreeMap<String, String>,
+    extra_env: Vec<EnvVar>,
+    extra_env_from: Vec<EnvFromSource>,
 }
 
 impl OdooJobBuilder {
@@ -244,6 +263,11 @@ impl OdooJobBuilder {
             backoff_limit: None,
             affinity: None,
             labels: instance_labels(instance),
+            // Instance-level extra env flows to every job pod this builder makes
+            // (init/upgrade/backup/restore/staging-refresh), mirroring the web +
+            // cron containers. Applied to the main containers in `build()`.
+            extra_env: instance.spec.extra_env.clone(),
+            extra_env_from: instance.spec.extra_env_from.clone(),
         }
     }
 
@@ -306,6 +330,25 @@ impl OdooJobBuilder {
             labels: Some(self.labels.clone()),
             ..Default::default()
         };
+        // Layer the instance's extra env onto every main container: merge
+        // `extra_env` (last-wins by name) over the container's own env, and
+        // append `extra_env_from` to its envFrom.
+        let extra_env = self.extra_env;
+        let extra_env_from = self.extra_env_from;
+        let containers: Vec<Container> = self
+            .containers
+            .into_iter()
+            .map(|mut c| {
+                let base = c.env.take().unwrap_or_default();
+                c.env = Some(merge_extra_env(&base, &extra_env));
+                if !extra_env_from.is_empty() {
+                    let mut ef = c.env_from.take().unwrap_or_default();
+                    ef.extend(extra_env_from.clone());
+                    c.env_from = Some(ef);
+                }
+                c
+            })
+            .collect();
         Job {
             metadata: ObjectMeta {
                 generate_name: Some(self.generate_name),
@@ -327,7 +370,7 @@ impl OdooJobBuilder {
                         affinity: self.affinity,
                         volumes: Some(self.volumes),
                         init_containers: self.init_containers,
-                        containers: self.containers,
+                        containers,
                         ..Default::default()
                     }),
                 },
@@ -335,5 +378,56 @@ impl OdooJobBuilder {
             }),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_extra_env;
+    use k8s_openapi::api::core::v1::EnvVar;
+
+    fn ev(name: &str, value: &str) -> EnvVar {
+        EnvVar {
+            name: name.into(),
+            value: Some(value.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn empty_base_empty_extra() {
+        assert!(merge_extra_env(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn empty_base_returns_extra() {
+        let extra = vec![ev("A", "1"), ev("B", "2")];
+        assert_eq!(merge_extra_env(&[], &extra), extra);
+    }
+
+    #[test]
+    fn empty_extra_returns_base() {
+        let base = vec![ev("PGDATABASE", "db")];
+        assert_eq!(merge_extra_env(&base, &[]), base);
+    }
+
+    #[test]
+    fn extra_overrides_base_in_place_and_appends_new() {
+        let base = vec![ev("PGDATABASE", "db"), ev("KEEP", "k")];
+        let extra = vec![ev("PGDATABASE", "override"), ev("NEW", "n")];
+        let out = merge_extra_env(&base, &extra);
+        // Order preserved: overridden entry stays in its base slot; new appended.
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], ev("PGDATABASE", "override"));
+        assert_eq!(out[1], ev("KEEP", "k"));
+        assert_eq!(out[2], ev("NEW", "n"));
+    }
+
+    #[test]
+    fn multiple_overlaps_last_wins_preserving_order() {
+        let base = vec![ev("A", "1"), ev("B", "2"), ev("C", "3")];
+        let extra = vec![ev("B", "B2"), ev("A", "A2")];
+        let out = merge_extra_env(&base, &extra);
+        assert_eq!(out, vec![ev("A", "A2"), ev("B", "B2"), ev("C", "3")]);
     }
 }

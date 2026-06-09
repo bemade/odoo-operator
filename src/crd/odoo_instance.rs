@@ -1,4 +1,6 @@
-use k8s_openapi::api::core::v1::{Affinity, ResourceRequirements, Toleration};
+use k8s_openapi::api::core::v1::{
+    Affinity, EnvFromSource, EnvVar, ResourceRequirements, Toleration,
+};
 use kube::{CELSchema, CustomResource};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -318,6 +320,24 @@ pub struct OdooInstanceSpec {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tolerations: Vec<Toleration>,
+
+    /// Extra environment variables injected into every pod the operator spawns
+    /// for this instance: the web and cron containers, and the init/upgrade/
+    /// backup/restore/staging-refresh job pods. Use a plain `value`, or
+    /// `valueFrom.secretKeyRef` / `configMapKeyRef` / `fieldRef` to source from
+    /// a Secret/ConfigMap without putting the value in the DB. Merged after the
+    /// operator's own env (last-wins by `name`), so a user entry overrides an
+    /// operator default of the same name — avoid the operator's own names
+    /// (`PGDATABASE`, `ODOO_RC`, …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_env: Vec<EnvVar>,
+
+    /// Extra `envFrom` sources (`secretRef` / `configMapRef`) injected into
+    /// every pod the operator spawns for this instance. Appended after the
+    /// operator's own env, so Kubernetes' last-wins-per-key rule applies on a
+    /// name collision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_env_from: Vec<EnvFromSource>,
 }
 
 fn default_replicas() -> i32 {
