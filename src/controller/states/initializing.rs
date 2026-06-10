@@ -86,28 +86,46 @@ pub fn build_init_job(
 ) -> Job {
     OdooJobBuilder::new(&format!("{cr_name}-"), ns, init_job, instance)
         .active_deadline(3600)
-        .containers(vec![Container {
-            name: "init".to_string(),
-            image: Some(image.to_string()),
-            command: Some(vec!["/entrypoint.sh".into(), "odoo".into()]),
-            args: Some({
-                let mut args = vec![
-                    "-i".into(),
-                    modules.join(","),
-                    "-d".into(),
-                    db_name.to_string(),
-                    "--no-http".into(),
-                    "--stop-after-init".into(),
+        .containers(vec![{
+            let mut odoo_args = vec![
+                "-i".to_string(),
+                modules.join(","),
+                "-d".to_string(),
+                db_name.to_string(),
+                "--no-http".to_string(),
+                "--stop-after-init".to_string(),
+            ];
+            // Demo data: Odoo >= 19 needs `--with-demo` (demo is off by default),
+            // while Odoo <= 18 has no such option and loads demo by default. The
+            // operator can't know the image's Odoo version, so the demo=true path
+            // probes it at runtime (only here) and adds `--with-demo` solely when
+            // the binary is >= 19; on <= 18 the flag is omitted and demo loads by
+            // default. The non-demo path stays a plain exec, unchanged.
+            let (command, args) = if init_job.spec.demo {
+                let mut argv = vec![
+                    "maj=$(odoo --version 2>/dev/null | grep -oE '[0-9]+' | head -n1); \
+                     flag=''; [ \"${maj:-0}\" -ge 19 ] && flag='--with-demo'; \
+                     exec /entrypoint.sh odoo \"$@\" $flag"
+                        .to_string(),
+                    "sh".to_string(), // $0 for the `sh -c` invocation
                 ];
-                if init_job.spec.demo {
-                    args.push("--with-demo".into());
-                } else {
-                    args.push("--without-demo=all".into());
-                }
-                args
-            }),
-            volume_mounts: Some(odoo_volume_mounts()),
-            ..Default::default()
+                argv.append(&mut odoo_args);
+                (vec!["/bin/sh".to_string(), "-c".to_string()], argv)
+            } else {
+                odoo_args.push("--without-demo=all".to_string());
+                (
+                    vec!["/entrypoint.sh".to_string(), "odoo".to_string()],
+                    odoo_args,
+                )
+            };
+            Container {
+                name: "init".to_string(),
+                image: Some(image.to_string()),
+                command: Some(command),
+                args: Some(args),
+                volume_mounts: Some(odoo_volume_mounts()),
+                ..Default::default()
+            }
         }])
         .build()
 }
