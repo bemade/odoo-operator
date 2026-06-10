@@ -43,6 +43,8 @@ fn test_instance(name: &str, pull_secret: Option<&str>) -> OdooInstance {
             probes: None,
             affinity: None,
             tolerations: vec![],
+            extra_env: vec![],
+            extra_env_from: vec![],
         },
         status: None,
     }
