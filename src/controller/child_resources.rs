@@ -35,7 +35,8 @@ use gateway_api::apis::standard::httproutes::{
 use crate::crd::odoo_instance::{DeploymentStrategyType, Environment, GatewayRef, OdooInstance};
 use crate::error::Result;
 use crate::helpers::{
-    build_odoo_conf, db_name, generate_password, odoo_username, parse_quantity, sha256_hex,
+    build_odoo_conf, db_name, generate_password, odoo_ro_username, odoo_username, parse_quantity,
+    sha256_hex,
 };
 use crate::postgres::PostgresClusterConfig;
 
@@ -1116,4 +1117,136 @@ pub async fn ensure_cron_deployment(
         )
         .await?;
     Ok(())
+}
+
+// ── Read-only SQL access ──────────────────────────────────────────────────────
+
+/// Name of the Secret that holds the read-only role password.
+pub fn ro_secret_name(instance_name: &str) -> String {
+    format!("{instance_name}-db-ro-password")
+}
+
+/// Ensure the k8s Secret for the read-only role exists.
+/// The Secret is created once with a random password; subsequent reconciles
+/// are no-ops so the password is stable (rotate by deleting the Secret).
+///
+/// Returns `(ro_username, ro_password)`.
+pub async fn ensure_readonly_secret(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    oref: &OwnerReference,
+) -> Result<(String, String)> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
+    let secret_name = ro_secret_name(name);
+    let ro_username = odoo_ro_username(ns, name);
+
+    match secrets.get(&secret_name).await {
+        Ok(existing) => {
+            let data = existing.data.unwrap_or_default();
+            let password = String::from_utf8_lossy(
+                data.get("password")
+                    .map(|v| v.0.as_slice())
+                    .unwrap_or_default(),
+            )
+            .to_string();
+            Ok((ro_username, password))
+        }
+        Err(kube::Error::Api(ref e)) if e.code == 404 => {
+            let password = generate_password();
+            let secret = Secret {
+                metadata: ObjectMeta {
+                    name: Some(secret_name.clone()),
+                    namespace: Some(ns.to_string()),
+                    owner_references: Some(vec![oref.clone()]),
+                    ..Default::default()
+                },
+                string_data: Some(BTreeMap::from([
+                    ("username".to_string(), ro_username.clone()),
+                    ("password".to_string(), password.clone()),
+                ])),
+                ..Default::default()
+            };
+            secrets.create(&PostParams::default(), &secret).await?;
+            Ok((ro_username, password))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Ensure the read-only Postgres role and its per-DB grants are in place.
+///
+/// Reads/creates the k8s Secret for the RO password, then delegates to
+/// `PostgresManager::ensure_readonly_role` for the SQL side.  Idempotent —
+/// safe to call on every reconcile tick.
+///
+/// No-op when `spec.readOnlySqlAccess` is absent or `enabled: false`.
+pub async fn ensure_readonly_role(
+    ctx: &Context,
+    instance: &OdooInstance,
+    pg: &PostgresClusterConfig,
+    oref: &OwnerReference,
+) -> Result<()> {
+    let spec = match instance
+        .spec
+        .read_only_sql_access
+        .as_ref()
+        .filter(|s| s.enabled)
+    {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let ns = instance.namespace().unwrap_or_default();
+    let name = instance.name_any();
+
+    let (ro_username, ro_password) = ensure_readonly_secret(&ctx.client, &ns, &name, oref).await?;
+    let (owner_username, owner_password) = read_odoo_credentials(&ctx.client, &ns, &name).await?;
+    let db = db_name(instance);
+
+    ctx.postgres
+        .ensure_readonly_role(
+            pg,
+            crate::postgres::ReadonlyRoleParams {
+                ro_username: &ro_username,
+                ro_password: &ro_password,
+                owner_username: &owner_username,
+                owner_password: &owner_password,
+                db_name: &db,
+                connection_limit: spec.connection_limit,
+            },
+        )
+        .await
+}
+
+/// Delete the read-only Postgres role and its k8s Secret.
+///
+/// Called when `spec.readOnlySqlAccess.enabled` transitions to false or when
+/// the instance is being deleted.  The k8s Secret is owned by the instance and
+/// will be garbage-collected by kube on instance deletion; this function
+/// handles both disable-while-alive and the explicit teardown path.
+pub async fn delete_readonly_role(
+    ctx: &Context,
+    instance: &OdooInstance,
+    pg: &PostgresClusterConfig,
+) -> Result<()> {
+    let ns = instance.namespace().unwrap_or_default();
+    let name = instance.name_any();
+    let ro_username = odoo_ro_username(&ns, &name);
+    let db = db_name(instance);
+
+    ctx.postgres
+        .delete_readonly_role(pg, &ro_username, &db)
+        .await?;
+
+    // Also delete the k8s Secret so a re-enable generates fresh credentials.
+    let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
+    let secret_name = ro_secret_name(&name);
+    match secrets
+        .delete(&secret_name, &kube::api::DeleteParams::default())
+        .await
+    {
+        Ok(_) | Err(kube::Error::Api(kube::core::ErrorResponse { code: 404, .. })) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }

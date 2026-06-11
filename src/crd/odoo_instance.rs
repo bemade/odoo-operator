@@ -189,6 +189,56 @@ impl Default for CronSpec {
     }
 }
 
+/// ReadOnlySqlAccessSpec opts a tenant into a read-only Postgres role
+/// (`<pg_user>_ro`) that the operator provisions, manages, and tears down
+/// declaratively.  Default is absent / disabled — existing instances are
+/// unaffected.
+///
+/// When enabled, the operator:
+///   1. Creates a k8s Secret `<instance>-db-ro-password` in the instance
+///      namespace with a random password (generated once, never rotated by
+///      the operator unless the Secret is deleted).
+///   2. Ensures a PostgreSQL role `<pg_user>_ro` with LOGIN, NOSUPERUSER,
+///      NOCREATEDB, and the configured `connection_limit`.
+///   3. Grants CONNECT on the tenant DB, USAGE on schema public, SELECT on
+///      all tables, and ALTER DEFAULT PRIVILEGES … GRANT SELECT for future
+///      tables — explicitly no INSERT/UPDATE/DELETE/DDL.
+///
+/// On disable (field removed or `enabled: false`) or instance deletion, the
+/// operator drops the role and deletes the Secret.
+///
+/// Consumption: the credentials live only in the k8s Secret and are intended
+/// for an in-cluster consumer running inside the tenant's own pod (e.g. an
+/// in-Odoo read-only SQL console that opens its own connection as this role).
+/// The role is not exposed outside the cluster — nothing here provisions a
+/// network path to Postgres, and PUBLIC CONNECT on sibling tenant databases is
+/// left untouched.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadOnlySqlAccessSpec {
+    /// Enable read-only SQL access for this instance.  Defaults to `false`.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Maximum number of simultaneous connections for the read-only role.
+    /// Defaults to 5.
+    #[serde(default = "default_ro_connection_limit")]
+    pub connection_limit: i32,
+}
+
+impl Default for ReadOnlySqlAccessSpec {
+    fn default() -> Self {
+        ReadOnlySqlAccessSpec {
+            enabled: false,
+            connection_limit: default_ro_connection_limit(),
+        }
+    }
+}
+
+fn default_ro_connection_limit() -> i32 {
+    5
+}
+
 /// InitSpec configures automatic database initialization when the instance
 /// first reaches the Uninitialized phase. The operator creates an OdooInitJob
 /// CR automatically — no external controller needed.
@@ -318,6 +368,14 @@ pub struct OdooInstanceSpec {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tolerations: Vec<Toleration>,
+
+    /// Opt in to a read-only Postgres role for this instance.
+    /// When enabled the operator provisions `<pg_user>_ro` with SELECT-only
+    /// privileges on the tenant DB, stores the password in a k8s Secret, and
+    /// tears everything down on disable or instance deletion.
+    /// Default is absent / disabled — existing instances are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_sql_access: Option<ReadOnlySqlAccessSpec>,
 }
 
 fn default_replicas() -> i32 {

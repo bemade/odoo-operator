@@ -9,3 +9,4 @@ mod harness;
 mod database_exists;
 mod delete_role_errors;
 mod ensure_role;
+mod readonly_role;

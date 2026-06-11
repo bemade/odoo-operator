@@ -6,6 +6,25 @@ use odoo_operator::crd::odoo_instance::{
 };
 use odoo_operator::helpers::*;
 
+// ── odoo_ro_username ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_odoo_ro_username_format() {
+    assert_eq!(
+        odoo_ro_username("production", "my-odoo"),
+        "odoo.production.my-odoo_ro"
+    );
+    assert_eq!(odoo_ro_username("default", "test"), "odoo.default.test_ro");
+}
+
+#[test]
+fn test_odoo_ro_username_differs_from_owner() {
+    let owner = odoo_username("ns", "inst");
+    let ro = odoo_ro_username("ns", "inst");
+    assert_ne!(owner, ro);
+    assert!(ro.ends_with("_ro"));
+}
+
 #[test]
 fn test_sanitise_uid_replaces_non_alphanumeric() {
     assert_eq!(sanitise_uid("abc-123-DEF"), "abc_123____");
@@ -139,6 +158,7 @@ fn make_instance(uid: Option<&str>, db_name: Option<&str>) -> OdooInstance {
             probes: None,
             affinity: None,
             tolerations: vec![],
+            read_only_sql_access: None,
         },
         status: None,
     }
