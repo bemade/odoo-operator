@@ -339,10 +339,62 @@ impl PostgresManager for PgPostgresManager {
                 info!(%ro_username, "created read-only postgres role");
             }
 
-            // GRANT CONNECT on the DB — admin-issued, fine from postgres DB.
+            // ── Cluster-wide tenant DB isolation ─────────────────────────
+            //
+            // PostgreSQL grants CONNECT to PUBLIC on every database by default,
+            // which means any role with LOGIN can connect to any DB on the
+            // shared cluster.  We enforce single-tenant scoping by:
+            //
+            //   1. Revoking PUBLIC CONNECT from ALL `odoo_*` databases on this
+            //      cluster — applied on every reconcile tick so newly created
+            //      tenant DBs are locked down immediately.
+            //
+            //   2. Re-granting CONNECT explicitly to the tenant owner + ro role
+            //      for the specific tenant DB being provisioned.
+            //
+            // Non-`odoo_*` system databases (postgres, template0, template1)
+            // are left untouched; they must stay accessible to the admin user
+            // via PUBLIC CONNECT.
+            //
+            // Residual gap: databases whose names don't start with `odoo_` that
+            // were manually created on the same cluster still retain PUBLIC
+            // CONNECT; the _ro role has no SELECT grants there but can connect
+            // and observe system catalog metadata.  Those DBs are outside the
+            // operator's management scope and must be hardened separately.
+            let tenant_dbs: Vec<String> = admin
+                .query(
+                    "SELECT datname FROM pg_database \
+                     WHERE datname LIKE 'odoo\\_%' AND datistemplate = false",
+                    &[],
+                )
+                .await?
+                .into_iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect();
+
+            for db in &tenant_dbs {
+                let safe_other = quote_ident(db);
+                // Best-effort per DB — if this fails (e.g. db is being dropped
+                // concurrently) we log a warning and continue.
+                if let Err(e) = admin
+                    .execute(
+                        &format!("REVOKE CONNECT ON DATABASE {safe_other} FROM PUBLIC"),
+                        &[],
+                    )
+                    .await
+                {
+                    warn!(%db, "failed to revoke PUBLIC CONNECT on tenant db: {e}");
+                }
+            }
+
+            // Re-grant CONNECT explicitly to the tenant owner and the ro role
+            // so they keep access after the PUBLIC revoke.
+            let safe_owner = quote_ident(owner_username);
             admin
                 .execute(
-                    &format!("GRANT CONNECT ON DATABASE {safe_db} TO {safe_ro}"),
+                    &format!(
+                        "GRANT CONNECT ON DATABASE {safe_db} TO {safe_owner}, {safe_ro}"
+                    ),
                     &[],
                 )
                 .await?;
@@ -424,8 +476,53 @@ impl PostgresManager for PgPostgresManager {
         let safe_ro = quote_ident(ro_username);
         let safe_db = quote_ident(db_name);
 
-        // Revoke CONNECT before dropping to avoid "role still has privileges"
-        // errors on some PG versions.
+        // ── Step 1: Revoke all per-DB privileges by connecting as admin to
+        //   the tenant database.  `DROP OWNED BY` removes:
+        //     - GRANT SELECT ON ALL TABLES IN SCHEMA public TO <ro>
+        //     - GRANT USAGE ON SCHEMA public TO <ro>
+        //     - ALTER DEFAULT PRIVILEGES ... GRANT SELECT ON TABLES TO <ro>
+        //   PostgreSQL requires all privileges to be revoked before DROP ROLE
+        //   succeeds; doing it via DROP OWNED BY is the safest single command.
+        //
+        //   We connect as the cluster admin (superuser) to the tenant DB.
+        //   Superusers can drop any role's owned objects.  If the tenant DB no
+        //   longer exists we skip this step gracefully and proceed to DROP ROLE.
+        let tenant_connstr = format!(
+            "host={} port={} user={} password={} dbname={}",
+            pg.host, pg.port, pg.admin_user, pg.admin_password, db_name
+        );
+        match tokio_postgres::connect(&tenant_connstr, NoTls).await {
+            Ok((tenant_client, connection)) => {
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        warn!("postgres connection error: {e}");
+                    }
+                });
+                // Revoke ALTER DEFAULT PRIVILEGES entries created by the owner
+                // for this role — must be done before DROP OWNED BY on some PG
+                // versions to avoid catalog inconsistencies.
+                let _ = tenant_client
+                    .execute(
+                        &format!(
+                            "ALTER DEFAULT PRIVILEGES IN SCHEMA public \
+                             REVOKE SELECT ON TABLES FROM {safe_ro}"
+                        ),
+                        &[],
+                    )
+                    .await;
+                // DROP OWNED BY revokes all remaining privileges for the role
+                // in this database (USAGE, SELECT, etc.).
+                let _ = tenant_client
+                    .execute(&format!("DROP OWNED BY {safe_ro}"), &[])
+                    .await;
+            }
+            Err(e) => {
+                // Tenant DB may have already been dropped; log and continue.
+                warn!(%db_name, "could not connect to tenant db for DROP OWNED BY cleanup: {e}");
+            }
+        }
+
+        // ── Step 2: Revoke CONNECT on the database (admin conn to postgres). ──
         let _ = client
             .execute(
                 &format!("REVOKE CONNECT ON DATABASE {safe_db} FROM {safe_ro}"),
@@ -433,6 +530,7 @@ impl PostgresManager for PgPostgresManager {
             )
             .await;
 
+        // ── Step 3: Drop the role. ─────────────────────────────────────────────
         client
             .execute(&format!("DROP ROLE {safe_ro}"), &[])
             .await?;
