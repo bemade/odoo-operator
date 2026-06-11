@@ -354,6 +354,24 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
         child_resources::ensure_cron_deployment(client, &ns, &name, instance, ctx, &oref).await?;
     }
 
+    // Read-only SQL access — provision or tear down based on spec opt-in.
+    let ro_enabled = instance
+        .spec
+        .read_only_sql_access
+        .as_ref()
+        .is_some_and(|s| s.enabled);
+    if ro_enabled {
+        child_resources::ensure_readonly_role(ctx, instance, &pg_cluster, &oref).await?;
+    } else {
+        // Tear down if previously enabled and now disabled (idempotent — no-op
+        // if the role never existed or was already removed).
+        if let Err(e) =
+            child_resources::delete_readonly_role(ctx, instance, &pg_cluster).await
+        {
+            warn!(%name, %e, "failed to remove read-only role on disable — will retry");
+        }
+    }
+
     // Gather the observed world into a snapshot.
     let snapshot = super::state_machine::ReconcileSnapshot::gather(
         client,
@@ -579,6 +597,13 @@ async fn cleanup_instance(instance: &OdooInstance, ctx: &Context) -> Result<Acti
 
     let username = odoo_username(&ns, &name);
     if let Ok((cluster_name, pg_cluster)) = load_postgres_cluster(ctx, instance).await {
+        // Best-effort: clean up the read-only role before the owner role so we
+        // don't leave orphaned grants.  Non-fatal — the owner role drop is what
+        // the finalizer must guarantee; the RO role has no owned databases.
+        if let Err(e) = child_resources::delete_readonly_role(ctx, instance, &pg_cluster).await {
+            warn!(%name, %e, "failed to delete read-only postgres role during cleanup (non-fatal)");
+        }
+
         if let Err(e) = ctx.postgres.delete_role(&pg_cluster, &username).await {
             warn!(%name, %e, "failed to delete postgres role — retaining finalizer for retry");
             publish_event(

@@ -428,6 +428,23 @@ impl PostgresManager for MockPostgresManager {
     async fn detect_server_major_version(&self, _: &PostgresClusterConfig) -> PgResult<u32> {
         Ok(18)
     }
+
+    async fn ensure_readonly_role(
+        &self,
+        _: &PostgresClusterConfig,
+        _: odoo_operator::postgres::ReadonlyRoleParams<'_>,
+    ) -> PgResult<()> {
+        Ok(())
+    }
+
+    async fn delete_readonly_role(
+        &self,
+        _: &PostgresClusterConfig,
+        _: &str,
+        _: &str,
+    ) -> PgResult<()> {
+        Ok(())
+    }
 }
 
 static MOCK_PG: OnceLock<Arc<MockPostgresManager>> = OnceLock::new();

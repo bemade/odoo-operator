@@ -47,6 +47,12 @@ pub fn odoo_username(namespace: &str, name: &str) -> String {
     format!("odoo.{namespace}.{name}")
 }
 
+/// Derive the read-only PostgreSQL role name for a tenant.
+/// Convention: `<pg_user>_ro` mirrors the owner role name.
+pub fn odoo_ro_username(namespace: &str, name: &str) -> String {
+    format!("odoo.{namespace}.{name}_ro")
+}
+
 /// Convert a UUID string into a safe database name component by replacing
 /// any non-lowercase-alphanumeric characters with underscores.
 pub fn sanitise_uid(uid: &str) -> String {

@@ -16,6 +16,17 @@ pub struct PostgresClusterConfig {
     pub default: bool,
 }
 
+/// Parameters for provisioning a read-only Postgres role on a tenant database.
+/// Bundles the 5 caller-supplied values to stay within clippy's argument-count limit.
+pub struct ReadonlyRoleParams<'a> {
+    pub ro_username: &'a str,
+    pub ro_password: &'a str,
+    pub owner_username: &'a str,
+    pub owner_password: &'a str,
+    pub db_name: &'a str,
+    pub connection_limit: i32,
+}
+
 /// Trait abstracting PostgreSQL role management so tests can substitute a no-op.
 #[async_trait::async_trait]
 pub trait PostgresManager: Send + Sync {
@@ -48,6 +59,37 @@ pub trait PostgresManager: Send + Sync {
 
     /// Query the running PostgreSQL server for its major version (e.g. 16, 17, 18).
     async fn detect_server_major_version(&self, pg: &PostgresClusterConfig) -> Result<u32>;
+
+    /// Ensure a read-only PostgreSQL role `ro_username` exists on the cluster,
+    /// with SELECT-only privileges on `db_name`.
+    ///
+    /// The role is created with LOGIN, NOSUPERUSER, NOCREATEDB and the supplied
+    /// `connection_limit`.  The following grants are applied (idempotently):
+    ///   - CONNECT on the tenant database
+    ///   - USAGE on schema `public`
+    ///   - SELECT on all existing tables in schema `public`
+    ///   - ALTER DEFAULT PRIVILEGES … GRANT SELECT on future tables
+    ///
+    /// Explicitly **no** INSERT/UPDATE/DELETE/DDL is granted.
+    ///
+    /// The method connects as the admin user for role CREATE/ALTER, then as the
+    /// tenant owner (`owner_username` / `owner_password`) for per-DB grants
+    /// (owner-issued grants are required for per-table SELECT in a tenant DB).
+    async fn ensure_readonly_role(
+        &self,
+        pg: &PostgresClusterConfig,
+        params: ReadonlyRoleParams<'_>,
+    ) -> Result<()>;
+
+    /// Drop the read-only role `ro_username` if it exists.  No-op if absent.
+    /// Revokes existing grants before dropping so the DROP ROLE succeeds even
+    /// if other objects hold privileges.
+    async fn delete_readonly_role(
+        &self,
+        pg: &PostgresClusterConfig,
+        ro_username: &str,
+        db_name: &str,
+    ) -> Result<()>;
 }
 
 /// Production implementation backed by tokio-postgres.
@@ -231,6 +273,172 @@ impl PostgresManager for PgPostgresManager {
         })?;
         Ok(n / 10000)
     }
+
+    async fn ensure_readonly_role(
+        &self,
+        pg: &PostgresClusterConfig,
+        params: ReadonlyRoleParams<'_>,
+    ) -> Result<()> {
+        let ReadonlyRoleParams {
+            ro_username,
+            ro_password,
+            owner_username,
+            owner_password,
+            db_name,
+            connection_limit,
+        } = params;
+        let safe_ro = quote_ident(ro_username);
+        let safe_db = quote_ident(db_name);
+
+        // ── Step 1: Create / update the role (admin connection to postgres) ───
+        {
+            let connstr = format!(
+                "host={} port={} user={} password={} dbname=postgres",
+                pg.host, pg.port, pg.admin_user, pg.admin_password
+            );
+            let (admin, connection) = tokio_postgres::connect(&connstr, NoTls).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    warn!("postgres connection error: {e}");
+                }
+            });
+
+            let row = admin
+                .query_one(
+                    "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)",
+                    &[&ro_username],
+                )
+                .await?;
+            let exists: bool = row.get(0);
+
+            if exists {
+                // Update password + connection limit in case they changed.
+                admin
+                    .execute(
+                        &format!(
+                            "ALTER ROLE {safe_ro} WITH \
+                             LOGIN NOSUPERUSER NOCREATEDB NOINHERIT \
+                             CONNECTION LIMIT {connection_limit} \
+                             PASSWORD '{ro_password}'"
+                        ),
+                        &[],
+                    )
+                    .await?;
+            } else {
+                admin
+                    .execute(
+                        &format!(
+                            "CREATE ROLE {safe_ro} WITH \
+                             LOGIN NOSUPERUSER NOCREATEDB NOINHERIT \
+                             CONNECTION LIMIT {connection_limit} \
+                             PASSWORD '{ro_password}'"
+                        ),
+                        &[],
+                    )
+                    .await?;
+                info!(%ro_username, "created read-only postgres role");
+            }
+
+            // GRANT CONNECT on the DB — admin-issued, fine from postgres DB.
+            admin
+                .execute(
+                    &format!("GRANT CONNECT ON DATABASE {safe_db} TO {safe_ro}"),
+                    &[],
+                )
+                .await?;
+        }
+
+        // ── Step 2: Schema/table grants — must run as DB owner ────────────────
+        {
+            let owner_connstr = format!(
+                "host={} port={} user={} password={} dbname={}",
+                pg.host, pg.port, owner_username, owner_password, db_name
+            );
+            let (owner_conn, connection) =
+                tokio_postgres::connect(&owner_connstr, NoTls).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    warn!("postgres connection error: {e}");
+                }
+            });
+
+            owner_conn
+                .execute(
+                    &format!("GRANT USAGE ON SCHEMA public TO {safe_ro}"),
+                    &[],
+                )
+                .await?;
+
+            owner_conn
+                .execute(
+                    &format!("GRANT SELECT ON ALL TABLES IN SCHEMA public TO {safe_ro}"),
+                    &[],
+                )
+                .await?;
+
+            // Ensure future tables created by the owner are also readable.
+            owner_conn
+                .execute(
+                    &format!(
+                        "ALTER DEFAULT PRIVILEGES IN SCHEMA public \
+                         GRANT SELECT ON TABLES TO {safe_ro}"
+                    ),
+                    &[],
+                )
+                .await?;
+
+            info!(%ro_username, %db_name, "applied read-only grants");
+        }
+
+        Ok(())
+    }
+
+    async fn delete_readonly_role(
+        &self,
+        pg: &PostgresClusterConfig,
+        ro_username: &str,
+        db_name: &str,
+    ) -> Result<()> {
+        let connstr = format!(
+            "host={} port={} user={} password={} dbname=postgres",
+            pg.host, pg.port, pg.admin_user, pg.admin_password
+        );
+        let (client, connection) = tokio_postgres::connect(&connstr, NoTls).await?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                warn!("postgres connection error: {e}");
+            }
+        });
+
+        let row = client
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)",
+                &[&ro_username],
+            )
+            .await?;
+        let exists: bool = row.get(0);
+        if !exists {
+            return Ok(());
+        }
+
+        let safe_ro = quote_ident(ro_username);
+        let safe_db = quote_ident(db_name);
+
+        // Revoke CONNECT before dropping to avoid "role still has privileges"
+        // errors on some PG versions.
+        let _ = client
+            .execute(
+                &format!("REVOKE CONNECT ON DATABASE {safe_db} FROM {safe_ro}"),
+                &[],
+            )
+            .await;
+
+        client
+            .execute(&format!("DROP ROLE {safe_ro}"), &[])
+            .await?;
+        info!(%ro_username, "deleted read-only postgres role");
+        Ok(())
+    }
 }
 
 /// Minimal SQL identifier quoting (double-quote wrapping + escape internal quotes).
@@ -288,5 +496,20 @@ impl PostgresManager for NoopPostgresManager {
     }
     async fn detect_server_major_version(&self, _: &PostgresClusterConfig) -> Result<u32> {
         Ok(18)
+    }
+    async fn ensure_readonly_role(
+        &self,
+        _: &PostgresClusterConfig,
+        _: ReadonlyRoleParams<'_>,
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn delete_readonly_role(
+        &self,
+        _: &PostgresClusterConfig,
+        _: &str,
+        _: &str,
+    ) -> Result<()> {
+        Ok(())
     }
 }
