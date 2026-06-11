@@ -80,13 +80,23 @@ impl PostgresManager for PgPostgresManager {
             .await?;
         let exists: bool = row.get(0);
         let safe_user = quote_ident(username);
-        // Passwords are random per-instance Secrets; rotate to the current
-        // value whether the role is new or already present so a same-name
-        // re-create after a finalizer-blocked delete can authenticate with
-        // its fresh Secret (issue #119, part C).
+        // Passwords are random per-instance Secrets; when the role already
+        // exists, rotate to the current value so a same-name re-create after
+        // a finalizer-blocked delete can authenticate with its fresh Secret
+        // (issue #119, part C). But only ALTER when the supplied password
+        // does not already authenticate: on PostgreSQL 16+ ALTER ROLE
+        // requires the admin to hold ADMIN OPTION on the target role (or be
+        // superuser), and an externally managed admin (e.g. CloudNativePG
+        // `managed.roles`) does not retain that grant across the external
+        // manager's own reconciles — an unconditional ALTER then fails every
+        // reconcile with "permission denied to alter role" (issue #128).
         if exists {
+            if password_authenticates(pg, username, password).await {
+                return Ok(());
+            }
             let stmt = format!("ALTER ROLE {safe_user} WITH PASSWORD '{password}'");
             client.execute(&stmt, &[]).await?;
+            info!(%username, "reset postgres role password");
             return Ok(());
         }
 
@@ -226,6 +236,30 @@ impl PostgresManager for PgPostgresManager {
 /// Minimal SQL identifier quoting (double-quote wrapping + escape internal quotes).
 fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+/// Probe whether `username`/`password` can authenticate against the cluster.
+/// Any failure (bad password, unreachable host, missing CONNECT privilege)
+/// returns `false`, in which case the caller falls back to ALTER ROLE — the
+/// pre-#128 behavior.
+async fn password_authenticates(
+    pg: &PostgresClusterConfig,
+    username: &str,
+    password: &str,
+) -> bool {
+    let connstr = format!(
+        "host={} port={} user={} password={} dbname=postgres",
+        pg.host, pg.port, username, password
+    );
+    match tokio_postgres::connect(&connstr, NoTls).await {
+        Ok((client, connection)) => {
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            client.simple_query("SELECT 1").await.is_ok()
+        }
+        Err(_) => false,
+    }
 }
 
 /// No-op implementation for testing.
