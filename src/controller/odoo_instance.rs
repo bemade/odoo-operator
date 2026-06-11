@@ -365,9 +365,7 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
     } else {
         // Tear down if previously enabled and now disabled (idempotent — no-op
         // if the role never existed or was already removed).
-        if let Err(e) =
-            child_resources::delete_readonly_role(ctx, instance, &pg_cluster).await
-        {
+        if let Err(e) = child_resources::delete_readonly_role(ctx, instance, &pg_cluster).await {
             warn!(%name, %e, "failed to remove read-only role on disable — will retry");
         }
     }

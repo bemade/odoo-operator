@@ -1200,10 +1200,8 @@ pub async fn ensure_readonly_role(
     let ns = instance.namespace().unwrap_or_default();
     let name = instance.name_any();
 
-    let (ro_username, ro_password) =
-        ensure_readonly_secret(&ctx.client, &ns, &name, oref).await?;
-    let (owner_username, owner_password) =
-        read_odoo_credentials(&ctx.client, &ns, &name).await?;
+    let (ro_username, ro_password) = ensure_readonly_secret(&ctx.client, &ns, &name, oref).await?;
+    let (owner_username, owner_password) = read_odoo_credentials(&ctx.client, &ns, &name).await?;
     let db = db_name(instance);
 
     ctx.postgres

@@ -392,9 +392,7 @@ impl PostgresManager for PgPostgresManager {
             let safe_owner = quote_ident(owner_username);
             admin
                 .execute(
-                    &format!(
-                        "GRANT CONNECT ON DATABASE {safe_db} TO {safe_owner}, {safe_ro}"
-                    ),
+                    &format!("GRANT CONNECT ON DATABASE {safe_db} TO {safe_owner}, {safe_ro}"),
                     &[],
                 )
                 .await?;
@@ -406,8 +404,7 @@ impl PostgresManager for PgPostgresManager {
                 "host={} port={} user={} password={} dbname={}",
                 pg.host, pg.port, owner_username, owner_password, db_name
             );
-            let (owner_conn, connection) =
-                tokio_postgres::connect(&owner_connstr, NoTls).await?;
+            let (owner_conn, connection) = tokio_postgres::connect(&owner_connstr, NoTls).await?;
             tokio::spawn(async move {
                 if let Err(e) = connection.await {
                     warn!("postgres connection error: {e}");
@@ -415,10 +412,7 @@ impl PostgresManager for PgPostgresManager {
             });
 
             owner_conn
-                .execute(
-                    &format!("GRANT USAGE ON SCHEMA public TO {safe_ro}"),
-                    &[],
-                )
+                .execute(&format!("GRANT USAGE ON SCHEMA public TO {safe_ro}"), &[])
                 .await?;
 
             owner_conn
@@ -531,9 +525,7 @@ impl PostgresManager for PgPostgresManager {
             .await;
 
         // ── Step 3: Drop the role. ─────────────────────────────────────────────
-        client
-            .execute(&format!("DROP ROLE {safe_ro}"), &[])
-            .await?;
+        client.execute(&format!("DROP ROLE {safe_ro}"), &[]).await?;
         info!(%ro_username, "deleted read-only postgres role");
         Ok(())
     }

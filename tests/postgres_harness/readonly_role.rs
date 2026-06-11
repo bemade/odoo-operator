@@ -86,7 +86,9 @@ async fn setup_tenant(owner_user: &str, owner_password: &str, tenant_db: &str) {
     let (owner_conn, conn) = tokio_postgres::connect(&owner_connstr, tokio_postgres::NoTls)
         .await
         .expect("connect as owner");
-    tokio::spawn(async move { let _ = conn.await; });
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
     owner_conn
         .simple_query("CREATE TABLE test_tbl (id serial PRIMARY KEY, val text)")
         .await
@@ -134,7 +136,9 @@ async fn readonly_role_select_allowed_dml_denied() -> anyhow::Result<()> {
     let (ro_conn, conn) = tokio_postgres::connect(&ro_connstr, tokio_postgres::NoTls)
         .await
         .expect("ro role should be able to CONNECT to tenant db");
-    tokio::spawn(async move { let _ = conn.await; });
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
 
     // SELECT must succeed.
     let rows = ro_conn
@@ -327,7 +331,10 @@ async fn readonly_role_teardown_drops_role() -> anyhow::Result<()> {
         .await
         .expect("pg_roles query failed");
     let exists: bool = row.get(0);
-    assert!(!exists, "role must not exist in pg_roles after delete_readonly_role");
+    assert!(
+        !exists,
+        "role must not exist in pg_roles after delete_readonly_role"
+    );
 
     cleanup(ro_user, owner_user, tenant_db, "").await;
     Ok(())

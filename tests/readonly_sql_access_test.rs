@@ -8,10 +8,7 @@ use odoo_operator::helpers::{odoo_ro_username, odoo_username};
 
 // ── Helper ───────────────────────────────────────────────────────────────────
 
-fn make_instance_with_ro(
-    ro_enabled: bool,
-    connection_limit: i32,
-) -> OdooInstance {
+fn make_instance_with_ro(ro_enabled: bool, connection_limit: i32) -> OdooInstance {
     OdooInstance {
         metadata: ObjectMeta {
             name: Some("rwi2".to_string()),
@@ -122,7 +119,9 @@ fn crd_field_enabled_false_round_trips() {
 fn crd_field_json_round_trips() {
     let inst = make_instance_with_ro(true, 10);
     let json = serde_json::to_value(&inst.spec).unwrap();
-    let ro = json.get("readOnlySqlAccess").expect("readOnlySqlAccess present");
+    let ro = json
+        .get("readOnlySqlAccess")
+        .expect("readOnlySqlAccess present");
     assert_eq!(ro["enabled"], true);
     assert_eq!(ro["connectionLimit"], 10);
 }
