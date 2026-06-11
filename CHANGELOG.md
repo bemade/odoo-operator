@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.2.0](https://github.com/bemade/odoo-operator/compare/v2.1.0...v2.2.0) (2026-06-11)
+
+
+### Features
+
+* opt-in per-tenant read-only SQL access role ([#3731](https://github.com/bemade/odoo-operator/issues/3731)) ([#135](https://github.com/bemade/odoo-operator/issues/135)) ([226568f](https://github.com/bemade/odoo-operator/commit/226568f8231ea6bb6408a67610a69b018d173afd))
+
+
+### Bug Fixes
+
+* **postgres:** only ALTER ROLE when the supplied password does not already authenticate ([#134](https://github.com/bemade/odoo-operator/issues/134)) ([45bd6f7](https://github.com/bemade/odoo-operator/commit/45bd6f74581ccc150d71c16fc1d8641f63846acd)), closes [#128](https://github.com/bemade/odoo-operator/issues/128)
+* probe the Odoo version on the demo init path so --with-demo isn't sent to Odoo &lt;=18 ([#133](https://github.com/bemade/odoo-operator/issues/133)) ([bde4355](https://github.com/bemade/odoo-operator/commit/bde435593c428c793ea377b803cc6139ffe40304)), closes [#130](https://github.com/bemade/odoo-operator/issues/130)
+
 ## [2.1.0](https://github.com/bemade/odoo-operator/compare/v2.0.0...v2.1.0) (2026-05-29)
 
 
