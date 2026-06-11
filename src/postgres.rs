@@ -339,60 +339,25 @@ impl PostgresManager for PgPostgresManager {
                 info!(%ro_username, "created read-only postgres role");
             }
 
-            // ── Cluster-wide tenant DB isolation ─────────────────────────
+            // Grant CONNECT on the tenant database to the read-only role.
             //
-            // PostgreSQL grants CONNECT to PUBLIC on every database by default,
-            // which means any role with LOGIN can connect to any DB on the
-            // shared cluster.  We enforce single-tenant scoping by:
+            // PUBLIC already holds CONNECT by default, so this is not strictly
+            // required for the role to connect — but it is explicit, harmless,
+            // and keeps the role working if PUBLIC CONNECT is ever revoked on
+            // this database.
             //
-            //   1. Revoking PUBLIC CONNECT from ALL `odoo_*` databases on this
-            //      cluster — applied on every reconcile tick so newly created
-            //      tenant DBs are locked down immediately.
-            //
-            //   2. Re-granting CONNECT explicitly to the tenant owner + ro role
-            //      for the specific tenant DB being provisioned.
-            //
-            // Non-`odoo_*` system databases (postgres, template0, template1)
-            // are left untouched; they must stay accessible to the admin user
-            // via PUBLIC CONNECT.
-            //
-            // Residual gap: databases whose names don't start with `odoo_` that
-            // were manually created on the same cluster still retain PUBLIC
-            // CONNECT; the _ro role has no SELECT grants there but can connect
-            // and observe system catalog metadata.  Those DBs are outside the
-            // operator's management scope and must be hardened separately.
-            let tenant_dbs: Vec<String> = admin
-                .query(
-                    "SELECT datname FROM pg_database \
-                     WHERE datname LIKE 'odoo\\_%' AND datistemplate = false",
-                    &[],
-                )
-                .await?
-                .into_iter()
-                .map(|row| row.get::<_, String>(0))
-                .collect();
-
-            for db in &tenant_dbs {
-                let safe_other = quote_ident(db);
-                // Best-effort per DB — if this fails (e.g. db is being dropped
-                // concurrently) we log a warning and continue.
-                if let Err(e) = admin
-                    .execute(
-                        &format!("REVOKE CONNECT ON DATABASE {safe_other} FROM PUBLIC"),
-                        &[],
-                    )
-                    .await
-                {
-                    warn!(%db, "failed to revoke PUBLIC CONNECT on tenant db: {e}");
-                }
-            }
-
-            // Re-grant CONNECT explicitly to the tenant owner and the ro role
-            // so they keep access after the PUBLIC revoke.
-            let safe_owner = quote_ident(owner_username);
+            // We deliberately do NOT revoke PUBLIC CONNECT from sibling tenant
+            // databases to enforce single-tenant connectivity.  The read-only
+            // credential is consumed only from inside the tenant's own pod
+            // (e.g. an in-Odoo read-only SQL console that opens its own
+            // connection as this role) and is never network-reachable; it also
+            // holds no SELECT grants on any other database, so the ability to
+            // connect to a sibling DB exposes nothing.  Revoking PUBLIC CONNECT
+            // cluster-wide would be a one-way, global side effect triggered by a
+            // single tenant's opt-in — out of scope for this role.
             admin
                 .execute(
-                    &format!("GRANT CONNECT ON DATABASE {safe_db} TO {safe_owner}, {safe_ro}"),
+                    &format!("GRANT CONNECT ON DATABASE {safe_db} TO {safe_ro}"),
                     &[],
                 )
                 .await?;

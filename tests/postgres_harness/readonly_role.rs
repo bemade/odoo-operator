@@ -3,12 +3,17 @@
 //!
 //! Invariants asserted here:
 //!   1. Granted role can SELECT but not INSERT / UPDATE / DELETE / DDL.
-//!   2. Role is scoped to the tenant DB — CONNECT on a second DB is denied.
+//!   2. Role cannot read another tenant's data — it holds no SELECT grants
+//!      outside its own tenant DB (connectivity to a sibling DB, which PUBLIC
+//!      still permits, exposes nothing).
 //!   3. `delete_readonly_role` drops the role; subsequent login fails.
 
 use odoo_operator::postgres::{PostgresManager, ReadonlyRoleParams};
 
-use super::harness::{admin_client, cluster_config, pg_manager, try_connect_as};
+use super::harness::{
+    admin_client, cluster_config, connect_as, pg_manager, try_connect_as, ADMIN_PASSWORD,
+    ADMIN_USER,
+};
 
 /// Unique prefix so tests can run in parallel without collisions.
 const PREFIX: &str = "odoo.test.ro";
@@ -209,10 +214,15 @@ async fn readonly_role_select_allowed_dml_denied() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ── Test 2: Role is scoped to tenant DB only ──────────────────────────────────
+// ── Test 2: Role cannot read another tenant's data ────────────────────────────
+//
+// We no longer revoke PUBLIC CONNECT cluster-wide, so the RO role *can* connect
+// to a sibling tenant DB (PUBLIC grants CONNECT by default).  The boundary that
+// actually matters — and that this role does enforce — is that it holds no
+// SELECT grants outside its own tenant DB, so it can read nothing there.
 
 #[tokio::test]
-async fn readonly_role_scoped_to_tenant_db() -> anyhow::Result<()> {
+async fn readonly_role_cannot_read_other_tenant_data() -> anyhow::Result<()> {
     let ro_user = &format!("{PREFIX}.scoped_ro");
     let owner_user = &format!("{PREFIX}.scoped_owner");
     let owner_password = "owner-pw-scope";
@@ -223,7 +233,7 @@ async fn readonly_role_scoped_to_tenant_db() -> anyhow::Result<()> {
     cleanup(ro_user, owner_user, tenant_db, other_db).await;
     setup_tenant(owner_user, owner_password, tenant_db).await;
 
-    // Create a second "other tenant" DB that the RO role should NOT access.
+    // Create a second "other tenant" DB with a table holding sensitive data.
     let c = admin_client().await;
     let _ = c
         .simple_query(&format!(r#"DROP DATABASE IF EXISTS "{other_db}""#))
@@ -231,6 +241,14 @@ async fn readonly_role_scoped_to_tenant_db() -> anyhow::Result<()> {
     c.simple_query(&format!(r#"CREATE DATABASE "{other_db}""#))
         .await
         .expect("create other tenant db");
+    let other_admin = connect_as(ADMIN_USER, ADMIN_PASSWORD, other_db).await;
+    other_admin
+        .simple_query(
+            "CREATE TABLE secret_tbl (id serial PRIMARY KEY, val text); \
+             INSERT INTO secret_tbl (val) VALUES ('other-tenant-secret')",
+        )
+        .await
+        .expect("create secret table in other tenant db");
 
     let cfg = cluster_config();
     pg_manager()
@@ -253,21 +271,20 @@ async fn readonly_role_scoped_to_tenant_db() -> anyhow::Result<()> {
         .await
         .expect("ro role should connect to its own tenant db");
 
-    // Connection to the OTHER tenant DB must fail (no CONNECT privilege).
-    let cross_err = try_connect_as(ro_user, ro_password, other_db).await;
-    assert!(
-        cross_err.is_err(),
-        "ro role must NOT be able to connect to a different tenant's database"
-    );
-    let cross_pg_msg = cross_err
-        .as_ref()
-        .unwrap_err()
+    // The RO role may connect to the other tenant DB (PUBLIC CONNECT), but it
+    // must NOT be able to read any data there — no SELECT/USAGE was granted.
+    let ro_other = connect_as(ro_user, ro_password, other_db).await;
+    let read_err = ro_other
+        .simple_query("SELECT val FROM secret_tbl")
+        .await
+        .expect_err("ro role must NOT be able to read another tenant's data");
+    let read_msg = read_err
         .as_db_error()
         .map(|d| d.message().to_lowercase())
-        .unwrap_or_else(|| cross_err.unwrap_err().to_string().to_lowercase());
+        .unwrap_or_else(|| read_err.to_string().to_lowercase());
     assert!(
-        cross_pg_msg.contains("permission denied") || cross_pg_msg.contains("denied"),
-        "expected CONNECT denied on other tenant db, got: {cross_pg_msg:?}"
+        read_msg.contains("permission denied") || read_msg.contains("denied"),
+        "expected permission denied reading other tenant's table, got: {read_msg:?}"
     );
 
     cleanup(ro_user, owner_user, tenant_db, other_db).await;

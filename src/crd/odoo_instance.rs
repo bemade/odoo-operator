@@ -207,9 +207,12 @@ impl Default for CronSpec {
 /// On disable (field removed or `enabled: false`) or instance deletion, the
 /// operator drops the role and deletes the Secret.
 ///
-/// Connection: use the CNPG `<cluster>-ro` read-replica service together
-/// with the credentials from the Secret.  `sslmode=require` is strongly
-/// recommended.
+/// Consumption: the credentials live only in the k8s Secret and are intended
+/// for an in-cluster consumer running inside the tenant's own pod (e.g. an
+/// in-Odoo read-only SQL console that opens its own connection as this role).
+/// The role is not exposed outside the cluster — nothing here provisions a
+/// network path to Postgres, and PUBLIC CONNECT on sibling tenant databases is
+/// left untouched.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadOnlySqlAccessSpec {
