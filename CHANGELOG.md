@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.0](https://github.com/bemade/odoo-operator/compare/v2.2.0...v2.3.0) (2026-06-12)
+
+
+### Features
+
+* **operator:** inject RO DB creds into web pod when readOnlySqlAccess enabled ([#139](https://github.com/bemade/odoo-operator/issues/139)) ([f5f27f5](https://github.com/bemade/odoo-operator/commit/f5f27f5b378479a396d34005bda6551ef24908c1))
+
 ## [2.2.0](https://github.com/bemade/odoo-operator/compare/v2.1.0...v2.2.0) (2026-06-11)
 
 
