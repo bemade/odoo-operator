@@ -9,7 +9,7 @@ use k8s_openapi::api::{
     batch::v1::{Job, JobSpec},
     core::v1::{
         Affinity, ConfigMapKeySelector, Container, EnvVar, EnvVarSource, LocalObjectReference,
-        PodSecurityContext, PodSpec, PodTemplateSpec, Volume, VolumeMount,
+        PodSecurityContext, PodSpec, PodTemplateSpec, SecretKeySelector, Volume, VolumeMount,
     },
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -168,6 +168,22 @@ pub fn cm_env(env_name: &str, cm_name: &str, key: &str) -> EnvVar {
         value_from: Some(EnvVarSource {
             config_map_key_ref: Some(ConfigMapKeySelector {
                 name: cm_name.into(),
+                key: key.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Build an `EnvVar` that reads its value from a Secret key.
+pub fn secret_env(env_name: &str, secret_name: &str, key: &str) -> EnvVar {
+    EnvVar {
+        name: env_name.into(),
+        value_from: Some(EnvVarSource {
+            secret_key_ref: Some(SecretKeySelector {
+                name: secret_name.into(),
                 key: key.into(),
                 ..Default::default()
             }),
