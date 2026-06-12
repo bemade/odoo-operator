@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::{
     apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy},
     core::v1::{
-        ConfigMap, Container, ContainerPort, ExecAction, HTTPGetAction, PersistentVolumeClaim,
-        PersistentVolumeClaimSpec, PodSpec, PodTemplateSpec, Probe, Secret, Service, ServicePort,
-        ServiceSpec, TypedObjectReference, VolumeResourceRequirements,
+        ConfigMap, Container, ContainerPort, EnvVar, ExecAction, HTTPGetAction,
+        PersistentVolumeClaim, PersistentVolumeClaimSpec, PodSpec, PodTemplateSpec, Probe, Secret,
+        Service, ServicePort, ServiceSpec, TypedObjectReference, VolumeResourceRequirements,
     },
     networking::v1::{
         HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
@@ -42,7 +42,7 @@ use crate::postgres::PostgresClusterConfig;
 
 use super::helpers::{
     cron_depl_name, env, image_pull_secrets, odoo_security_context, odoo_volume_mounts,
-    odoo_volumes, FIELD_MANAGER,
+    odoo_volumes, secret_env, FIELD_MANAGER,
 };
 use super::odoo_instance::Context;
 
@@ -718,7 +718,8 @@ pub async fn ensure_deployment(
     // Override PGDATABASE so the Odoo config layer (which reads env vars
     // with higher priority than the config file) uses the correct database.
     let db = db_name(instance);
-    let pg_env = vec![env("PGDATABASE", &db)];
+    let mut pg_env = vec![env("PGDATABASE", &db)];
+    pg_env.extend(readonly_sql_env(instance));
 
     let make_http_probe = |path: &str| -> Probe {
         Probe {
@@ -1124,6 +1125,28 @@ pub async fn ensure_cron_deployment(
 /// Name of the Secret that holds the read-only role password.
 pub fn ro_secret_name(instance_name: &str) -> String {
     format!("{instance_name}-db-ro-password")
+}
+
+/// Build the env vars that expose the read-only DB credentials to the web pod.
+///
+/// Returns two `EnvVar`s sourced from the `<instance>-db-ro-password` Secret
+/// when `spec.readOnlySqlAccess.enabled` is true; otherwise returns an empty
+/// Vec.  Called from `ensure_deployment` to extend the container env.
+pub fn readonly_sql_env(instance: &OdooInstance) -> Vec<EnvVar> {
+    if instance
+        .spec
+        .read_only_sql_access
+        .as_ref()
+        .is_some_and(|s| s.enabled)
+    {
+        let secret = ro_secret_name(&instance.name_any());
+        vec![
+            secret_env("ODOO_RO_DB_USER", &secret, "username"),
+            secret_env("ODOO_RO_DB_PASSWORD", &secret, "password"),
+        ]
+    } else {
+        vec![]
+    }
 }
 
 /// Ensure the k8s Secret for the read-only role exists.
