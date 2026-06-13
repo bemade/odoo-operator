@@ -18,8 +18,8 @@ use crate::notify;
 
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{
-    cm_env, cron_depl_name, env, pg_tools_image, staging_mail_env_vars, OdooJobBuilder,
-    FIELD_MANAGER,
+    apply_extra_env, cm_env, cron_depl_name, env, pg_tools_image, staging_mail_env_vars,
+    OdooJobBuilder, FIELD_MANAGER,
 };
 use crate::controller::state_machine::scale_deployment;
 
@@ -235,17 +235,23 @@ impl State for Restoring {
                 env("DB_NAME", db.clone()),
             ];
             neut_env.extend(staging_mail_env_vars(instance, &ctx.defaults));
-            Container {
-                name: "neutralize".into(),
-                image: Some(odoo_image.into()),
-                command: Some(vec![
-                    "/bin/sh".into(),
-                    "-c".into(),
-                    NEUTRALIZE_SCRIPT.into(),
-                ]),
-                env: Some(neut_env),
-                ..Default::default()
-            }
+            // Neutralize runs the Odoo image; layer the instance's extra env on
+            // (the `noop` alpine fallback below and the pg/mc tooling containers
+            // are left untouched — see `apply_extra_env`).
+            apply_extra_env(
+                Container {
+                    name: "neutralize".into(),
+                    image: Some(odoo_image.into()),
+                    command: Some(vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        NEUTRALIZE_SCRIPT.into(),
+                    ]),
+                    env: Some(neut_env),
+                    ..Default::default()
+                },
+                instance,
+            )
         } else {
             Container {
                 name: "noop".into(),

@@ -193,6 +193,51 @@ pub fn secret_env(env_name: &str, secret_name: &str, key: &str) -> EnvVar {
     }
 }
 
+/// Merge two `EnvVar` slices, last-wins by `name`. `base` order is preserved;
+/// an `extra` entry whose `name` matches a base entry overrides it in place,
+/// and new names are appended. Used to layer an instance's `spec.extra_env` on
+/// top of the operator's own env so users can override by name (not by
+/// ordering) without silently clobbering reserved operator vars.
+pub fn merge_extra_env(base: &[EnvVar], extra: &[EnvVar]) -> Vec<EnvVar> {
+    let mut out: Vec<EnvVar> = base.to_vec();
+    for e in extra {
+        if let Some(slot) = out.iter_mut().find(|x| x.name == e.name) {
+            *slot = e.clone();
+        } else {
+            out.push(e.clone());
+        }
+    }
+    out
+}
+
+/// Layer an instance's `spec.extra_env` / `spec.extra_env_from` onto a single
+/// container and return it: `extra_env` is merged last-wins by `name` over the
+/// container's own env (base order preserved, via [`merge_extra_env`]), and
+/// `extra_env_from` is appended to its `envFrom`. A no-op (container returned
+/// untouched) when both are empty, so instances that set neither produce byte-
+/// identical pods to before — no spurious server-side-apply diffs.
+///
+/// Apply this ONLY to containers that run the Odoo image and execute Odoo: the
+/// web and cron Deployments and the init / upgrade / neutralize job steps. The
+/// operator's own tooling containers — the `mc` backup uploader/downloader, the
+/// pg-client `clone-db` / `load-db` steps, the rsync filestore mover — must be
+/// left untouched: their env carries operator-managed credentials (e.g. the
+/// backup *destination's* `AWS_*` / `S3_*` keys) that a last-wins user override
+/// would otherwise clobber, breaking backups when the DR target is a separate
+/// account.
+pub fn apply_extra_env(mut c: Container, instance: &OdooInstance) -> Container {
+    if !instance.spec.extra_env.is_empty() {
+        let base = c.env.take().unwrap_or_default();
+        c.env = Some(merge_extra_env(&base, &instance.spec.extra_env));
+    }
+    if !instance.spec.extra_env_from.is_empty() {
+        let mut ef = c.env_from.take().unwrap_or_default();
+        ef.extend(instance.spec.extra_env_from.iter().cloned());
+        c.env_from = Some(ef);
+    }
+    c
+}
+
 /// Get the cron deployment name for an odoo instance
 pub fn cron_depl_name(instance: &OdooInstance) -> String {
     instance.name_any().to_string() + "-cron"
@@ -351,5 +396,56 @@ impl OdooJobBuilder {
             }),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_extra_env;
+    use k8s_openapi::api::core::v1::EnvVar;
+
+    fn ev(name: &str, value: &str) -> EnvVar {
+        EnvVar {
+            name: name.into(),
+            value: Some(value.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn empty_base_empty_extra() {
+        assert!(merge_extra_env(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn empty_base_returns_extra() {
+        let extra = vec![ev("A", "1"), ev("B", "2")];
+        assert_eq!(merge_extra_env(&[], &extra), extra);
+    }
+
+    #[test]
+    fn empty_extra_returns_base() {
+        let base = vec![ev("PGDATABASE", "db")];
+        assert_eq!(merge_extra_env(&base, &[]), base);
+    }
+
+    #[test]
+    fn extra_overrides_base_in_place_and_appends_new() {
+        let base = vec![ev("PGDATABASE", "db"), ev("KEEP", "k")];
+        let extra = vec![ev("PGDATABASE", "override"), ev("NEW", "n")];
+        let out = merge_extra_env(&base, &extra);
+        // Order preserved: overridden entry stays in its base slot; new appended.
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], ev("PGDATABASE", "override"));
+        assert_eq!(out[1], ev("KEEP", "k"));
+        assert_eq!(out[2], ev("NEW", "n"));
+    }
+
+    #[test]
+    fn multiple_overlaps_last_wins_preserving_order() {
+        let base = vec![ev("A", "1"), ev("B", "2"), ev("C", "3")];
+        let extra = vec![ev("B", "B2"), ev("A", "A2")];
+        let out = merge_extra_env(&base, &extra);
+        assert_eq!(out, vec![ev("A", "A2"), ev("B", "B2"), ev("C", "3")]);
     }
 }

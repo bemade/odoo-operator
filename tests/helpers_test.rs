@@ -159,6 +159,8 @@ fn make_instance(uid: Option<&str>, db_name: Option<&str>) -> OdooInstance {
             affinity: None,
             tolerations: vec![],
             read_only_sql_access: None,
+            extra_env: vec![],
+            extra_env_from: vec![],
         },
         status: None,
     }

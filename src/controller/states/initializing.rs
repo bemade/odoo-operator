@@ -13,7 +13,9 @@ use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::FIELD_MANAGER;
 use crate::controller::state_machine::scale_deployment;
 
-use crate::controller::helpers::{cron_depl_name, odoo_volume_mounts, OdooJobBuilder};
+use crate::controller::helpers::{
+    apply_extra_env, cron_depl_name, odoo_volume_mounts, OdooJobBuilder,
+};
 
 /// Initializing: init job is running, deployment must be scaled down.
 /// On entry: scale to 0, create the K8s Job if the CRD hasn't started one
@@ -118,14 +120,17 @@ pub fn build_init_job(
                     odoo_args,
                 )
             };
-            Container {
-                name: "init".to_string(),
-                image: Some(image.to_string()),
-                command: Some(command),
-                args: Some(args),
-                volume_mounts: Some(odoo_volume_mounts()),
-                ..Default::default()
-            }
+            apply_extra_env(
+                Container {
+                    name: "init".to_string(),
+                    image: Some(image.to_string()),
+                    command: Some(command),
+                    args: Some(args),
+                    volume_mounts: Some(odoo_volume_mounts()),
+                    ..Default::default()
+                },
+                instance,
+            )
         }])
         .build()
 }

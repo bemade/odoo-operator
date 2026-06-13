@@ -48,6 +48,8 @@ fn make_instance_with_ro(ro_enabled: bool, connection_limit: i32) -> OdooInstanc
                 enabled: ro_enabled,
                 connection_limit,
             }),
+            extra_env: vec![],
+            extra_env_from: vec![],
         },
         status: None,
     }
@@ -86,6 +88,8 @@ fn make_instance_no_ro() -> OdooInstance {
             affinity: None,
             tolerations: vec![],
             read_only_sql_access: None,
+            extra_env: vec![],
+            extra_env_from: vec![],
         },
         status: None,
     }

@@ -24,8 +24,8 @@ use crate::{controller::child_resources, crd::odoo_instance::OdooInstance};
 
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{
-    cm_env, controller_owner_ref, cron_depl_name, env, odoo_volume_mounts, pg_tools_image,
-    staging_mail_env_vars, OdooJobBuilder, FIELD_MANAGER,
+    apply_extra_env, cm_env, controller_owner_ref, cron_depl_name, env, odoo_volume_mounts,
+    pg_tools_image, staging_mail_env_vars, OdooJobBuilder, FIELD_MANAGER,
 };
 use crate::controller::state_machine::scale_deployment;
 use crate::helpers::sha256_hex;
@@ -814,18 +814,23 @@ fn build_neutralize_job(
         // exits) — that's the spec-drift retry path's responsibility, gated
         // on `neutralizeJobImageHash`.
         .backoff_limit(5)
-        .containers(vec![Container {
-            name: "neutralize".into(),
-            image: Some(image.into()),
-            command: Some(vec![
-                "/bin/bash".into(),
-                "-c".into(),
-                NEUTRALIZE_SCRIPT.into(),
-            ]),
-            env: Some(envs),
-            volume_mounts: Some(odoo_volume_mounts()),
-            ..Default::default()
-        }])
+        // Neutralize runs the Odoo image; the db/filestore clone steps (pg-client
+        // and rsync tooling) deliberately do not get the instance's extra env.
+        .containers(vec![apply_extra_env(
+            Container {
+                name: "neutralize".into(),
+                image: Some(image.into()),
+                command: Some(vec![
+                    "/bin/bash".into(),
+                    "-c".into(),
+                    NEUTRALIZE_SCRIPT.into(),
+                ]),
+                env: Some(envs),
+                volume_mounts: Some(odoo_volume_mounts()),
+                ..Default::default()
+            },
+            instance,
+        )])
         .build()
 }
 

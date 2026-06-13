@@ -44,6 +44,8 @@ fn make_instance(name: &str, ro: Option<ReadOnlySqlAccessSpec>) -> OdooInstance 
             affinity: None,
             tolerations: vec![],
             read_only_sql_access: ro,
+            extra_env: vec![],
+            extra_env_from: vec![],
         },
         status: None,
     }

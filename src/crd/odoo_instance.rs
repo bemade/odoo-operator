@@ -1,4 +1,6 @@
-use k8s_openapi::api::core::v1::{Affinity, ResourceRequirements, Toleration};
+use k8s_openapi::api::core::v1::{
+    Affinity, EnvFromSource, EnvVar, ResourceRequirements, Toleration,
+};
 use kube::{CELSchema, CustomResource};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -376,6 +378,29 @@ pub struct OdooInstanceSpec {
     /// Default is absent / disabled — existing instances are unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_sql_access: Option<ReadOnlySqlAccessSpec>,
+
+    /// Extra environment variables injected into the instance's Odoo containers
+    /// (web, cron) and the Odoo steps of its jobs (init, upgrade, neutralize).
+    /// Use a plain `value`, or `valueFrom.secretKeyRef` / `configMapKeyRef` /
+    /// `fieldRef` to source from a Secret/ConfigMap without putting the value in
+    /// the DB. Merged after the operator's own env (last-wins by `name`), so a
+    /// user entry overrides an operator default of the same name — avoid the
+    /// operator's own names (`PGDATABASE`, `ODOO_RC`, …). Operator tooling
+    /// containers (the `mc` backup uploader, pg-client clone/restore steps) are
+    /// deliberately NOT touched, so this can't clobber a backup destination's
+    /// own credentials.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_env: Vec<EnvVar>,
+
+    /// Extra `envFrom` sources (`secretRef` / `configMapRef`) injected into the
+    /// same Odoo containers as `extraEnv`. Note this has the *opposite*
+    /// override behavior from `extra_env`: Kubernetes always lets explicit
+    /// container `env` (the operator's own vars and anything in `extra_env`) win
+    /// over `envFrom` on a name collision, regardless of order. So
+    /// `extra_env_from` can add new keys or override *other* `envFrom` sources,
+    /// but it cannot override an operator env var — use `extra_env` for that.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_env_from: Vec<EnvFromSource>,
 }
 
 fn default_replicas() -> i32 {

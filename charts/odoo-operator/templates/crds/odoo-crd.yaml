@@ -621,6 +621,118 @@ spec:
                 - Staging
                 - Production
                 type: string
+              extraEnv:
+                description: Extra environment variables injected into the instance's Odoo containers (web, cron) and the Odoo steps of its jobs (init, upgrade, neutralize). Use a plain `value`, or `valueFrom.secretKeyRef` / `configMapKeyRef` / `fieldRef` to source from a Secret/ConfigMap without putting the value in the DB. Merged after the operator's own env (last-wins by `name`), so a user entry overrides an operator default of the same name — avoid the operator's own names (`PGDATABASE`, `ODOO_RC`, …). Operator tooling containers (the `mc` backup uploader, pg-client clone/restore steps) are deliberately NOT touched, so this can't clobber a backup destination's own credentials.
+                items:
+                  description: EnvVar represents an environment variable present in a Container.
+                  properties:
+                    name:
+                      description: Name of the environment variable. Must be a C_IDENTIFIER.
+                      type: string
+                    value:
+                      description: 'Variable references $(VAR_NAME) are expanded using the previously defined environment variables in the container and any service environment variables. If a variable cannot be resolved, the reference in the input string will be unchanged. Double $$ are reduced to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e. "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)". Escaped references will never be expanded, regardless of whether the variable exists or not. Defaults to "".'
+                      type: string
+                    valueFrom:
+                      description: Source for the environment variable's value. Cannot be used if value is not empty.
+                      properties:
+                        configMapKeyRef:
+                          description: Selects a key of a ConfigMap.
+                          properties:
+                            key:
+                              description: The key to select.
+                              type: string
+                            name:
+                              description: 'Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                              type: string
+                            optional:
+                              description: Specify whether the ConfigMap or its key must be defined
+                              type: boolean
+                          required:
+                          - key
+                          - name
+                          type: object
+                        fieldRef:
+                          description: 'Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels[''<KEY>'']`, `metadata.annotations[''<KEY>'']`, spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.'
+                          properties:
+                            apiVersion:
+                              description: Version of the schema the FieldPath is written in terms of, defaults to "v1".
+                              type: string
+                            fieldPath:
+                              description: Path of the field to select in the specified API version.
+                              type: string
+                          required:
+                          - fieldPath
+                          type: object
+                        resourceFieldRef:
+                          description: 'Selects a resource of the container: only resources limits and requests (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.'
+                          properties:
+                            containerName:
+                              description: 'Container name: required for volumes, optional for env vars'
+                              type: string
+                            divisor:
+                              description: Specifies the output format of the exposed resources, defaults to "1"
+                              type: string
+                            resource:
+                              description: 'Required: resource to select'
+                              type: string
+                          required:
+                          - resource
+                          type: object
+                        secretKeyRef:
+                          description: Selects a key of a secret in the pod's namespace
+                          properties:
+                            key:
+                              description: The key of the secret to select from.  Must be a valid secret key.
+                              type: string
+                            name:
+                              description: 'Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                              type: string
+                            optional:
+                              description: Specify whether the Secret or its key must be defined
+                              type: boolean
+                          required:
+                          - key
+                          - name
+                          type: object
+                      type: object
+                  required:
+                  - name
+                  type: object
+                type: array
+              extraEnvFrom:
+                description: 'Extra `envFrom` sources (`secretRef` / `configMapRef`) injected into the same Odoo containers as `extraEnv`. Note this has the *opposite* override behavior from `extra_env`: Kubernetes always lets explicit container `env` (the operator''s own vars and anything in `extra_env`) win over `envFrom` on a name collision, regardless of order. So `extra_env_from` can add new keys or override *other* `envFrom` sources, but it cannot override an operator env var — use `extra_env` for that.'
+                items:
+                  description: EnvFromSource represents the source of a set of ConfigMaps
+                  properties:
+                    configMapRef:
+                      description: The ConfigMap to select from
+                      properties:
+                        name:
+                          description: 'Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                          type: string
+                        optional:
+                          description: Specify whether the ConfigMap must be defined
+                          type: boolean
+                      required:
+                      - name
+                      type: object
+                    prefix:
+                      description: An optional identifier to prepend to each key in the ConfigMap. Must be a C_IDENTIFIER.
+                      type: string
+                    secretRef:
+                      description: The Secret to select from
+                      properties:
+                        name:
+                          description: 'Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                          type: string
+                        optional:
+                          description: Specify whether the Secret must be defined
+                          type: boolean
+                      required:
+                      - name
+                      type: object
+                  type: object
+                type: array
               filestore:
                 description: FilestoreSpec defines persistent storage for the Odoo filestore.
                 nullable: true
@@ -742,6 +854,20 @@ spec:
                     type: string
                 required:
                 - name
+                type: object
+              readOnlySqlAccess:
+                description: Opt in to a read-only Postgres role for this instance. When enabled the operator provisions `<pg_user>_ro` with SELECT-only privileges on the tenant DB, stores the password in a k8s Secret, and tears everything down on disable or instance deletion. Default is absent / disabled — existing instances are unaffected.
+                nullable: true
+                properties:
+                  connectionLimit:
+                    default: 5
+                    description: Maximum number of simultaneous connections for the read-only role. Defaults to 5.
+                    format: int32
+                    type: integer
+                  enabled:
+                    default: false
+                    description: Enable read-only SQL access for this instance.  Defaults to `false`.
+                    type: boolean
                 type: object
               replicas:
                 default: 1

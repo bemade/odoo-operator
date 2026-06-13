@@ -41,8 +41,8 @@ use crate::helpers::{
 use crate::postgres::PostgresClusterConfig;
 
 use super::helpers::{
-    cron_depl_name, env, image_pull_secrets, odoo_security_context, odoo_volume_mounts,
-    odoo_volumes, secret_env, FIELD_MANAGER,
+    apply_extra_env, cron_depl_name, env, image_pull_secrets, odoo_security_context,
+    odoo_volume_mounts, odoo_volumes, secret_env, FIELD_MANAGER,
 };
 use super::odoo_instance::Context;
 
@@ -775,52 +775,55 @@ pub async fn ensure_deployment(
                     },
                     security_context: Some(odoo_security_context()),
                     volumes: Some(odoo_volumes(name)),
-                    containers: vec![Container {
-                        name: format!("odoo-{name}"),
-                        image: Some(image.to_string()),
-                        image_pull_policy: Some("IfNotPresent".to_string()),
-                        command: Some(vec![
-                            "/entrypoint.sh".to_string(),
-                            "odoo".to_string(),
-                            "--max-cron-threads".to_string(),
-                            "0".to_string(),
-                        ]),
-                        ports: Some(vec![
-                            ContainerPort {
-                                name: Some("http".to_string()),
-                                container_port: 8069,
-                                ..Default::default()
-                            },
-                            ContainerPort {
-                                name: Some("websocket".to_string()),
-                                container_port: 8072,
-                                ..Default::default()
-                            },
-                        ]),
-                        env: Some(pg_env),
-                        volume_mounts: Some(odoo_volume_mounts()),
-                        resources: instance.spec.resources.clone(),
-                        startup_probe: Some(Probe {
-                            initial_delay_seconds: Some(5),
-                            period_seconds: Some(10),
-                            timeout_seconds: Some(5),
-                            failure_threshold: Some(30),
-                            ..make_http_probe(probe_startup)
-                        }),
-                        liveness_probe: Some(Probe {
-                            period_seconds: Some(15),
-                            timeout_seconds: Some(5),
-                            failure_threshold: Some(3),
-                            ..make_http_probe(probe_liveness)
-                        }),
-                        readiness_probe: Some(Probe {
-                            period_seconds: Some(10),
-                            timeout_seconds: Some(5),
-                            failure_threshold: Some(3),
-                            ..make_http_probe(probe_readiness)
-                        }),
-                        ..Default::default()
-                    }],
+                    containers: vec![apply_extra_env(
+                        Container {
+                            name: format!("odoo-{name}"),
+                            image: Some(image.to_string()),
+                            image_pull_policy: Some("IfNotPresent".to_string()),
+                            command: Some(vec![
+                                "/entrypoint.sh".to_string(),
+                                "odoo".to_string(),
+                                "--max-cron-threads".to_string(),
+                                "0".to_string(),
+                            ]),
+                            ports: Some(vec![
+                                ContainerPort {
+                                    name: Some("http".to_string()),
+                                    container_port: 8069,
+                                    ..Default::default()
+                                },
+                                ContainerPort {
+                                    name: Some("websocket".to_string()),
+                                    container_port: 8072,
+                                    ..Default::default()
+                                },
+                            ]),
+                            env: Some(pg_env),
+                            volume_mounts: Some(odoo_volume_mounts()),
+                            resources: instance.spec.resources.clone(),
+                            startup_probe: Some(Probe {
+                                initial_delay_seconds: Some(5),
+                                period_seconds: Some(10),
+                                timeout_seconds: Some(5),
+                                failure_threshold: Some(30),
+                                ..make_http_probe(probe_startup)
+                            }),
+                            liveness_probe: Some(Probe {
+                                period_seconds: Some(15),
+                                timeout_seconds: Some(5),
+                                failure_threshold: Some(3),
+                                ..make_http_probe(probe_liveness)
+                            }),
+                            readiness_probe: Some(Probe {
+                                period_seconds: Some(10),
+                                timeout_seconds: Some(5),
+                                failure_threshold: Some(3),
+                                ..make_http_probe(probe_readiness)
+                            }),
+                            ..Default::default()
+                        },
+                        instance,
+                    )],
                     ..Default::default()
                 }),
             },
@@ -1065,42 +1068,45 @@ pub async fn ensure_cron_deployment(
                             include_str!("../../scripts/cron_liveness_probe.py").to_string(),
                         ];
 
-                        Container {
-                            name: format!("odoo-cron-{name}"),
-                            image: Some(image.to_string()),
-                            image_pull_policy: Some("IfNotPresent".to_string()),
-                            command: Some(vec![
-                                "/entrypoint.sh".to_string(),
-                                "odoo".to_string(),
-                                "--workers".to_string(),
-                                "0".to_string(),
-                                "--no-http".to_string(),
-                            ]),
-                            env: Some(pg_env),
-                            volume_mounts: Some(odoo_volume_mounts()),
-                            resources: instance.spec.cron.resources.clone(),
-                            startup_probe: Some(Probe {
-                                initial_delay_seconds: Some(5),
-                                period_seconds: Some(10),
-                                timeout_seconds: Some(5),
-                                failure_threshold: Some(30),
-                                exec: Some(ExecAction {
-                                    command: Some(startup_cmd),
+                        apply_extra_env(
+                            Container {
+                                name: format!("odoo-cron-{name}"),
+                                image: Some(image.to_string()),
+                                image_pull_policy: Some("IfNotPresent".to_string()),
+                                command: Some(vec![
+                                    "/entrypoint.sh".to_string(),
+                                    "odoo".to_string(),
+                                    "--workers".to_string(),
+                                    "0".to_string(),
+                                    "--no-http".to_string(),
+                                ]),
+                                env: Some(pg_env),
+                                volume_mounts: Some(odoo_volume_mounts()),
+                                resources: instance.spec.cron.resources.clone(),
+                                startup_probe: Some(Probe {
+                                    initial_delay_seconds: Some(5),
+                                    period_seconds: Some(10),
+                                    timeout_seconds: Some(5),
+                                    failure_threshold: Some(30),
+                                    exec: Some(ExecAction {
+                                        command: Some(startup_cmd),
+                                    }),
+                                    ..Default::default()
+                                }),
+                                liveness_probe: Some(Probe {
+                                    initial_delay_seconds: Some(300),
+                                    period_seconds: Some(30),
+                                    timeout_seconds: Some(5),
+                                    failure_threshold: Some(3),
+                                    exec: Some(ExecAction {
+                                        command: Some(liveness_cmd),
+                                    }),
+                                    ..Default::default()
                                 }),
                                 ..Default::default()
-                            }),
-                            liveness_probe: Some(Probe {
-                                initial_delay_seconds: Some(300),
-                                period_seconds: Some(30),
-                                timeout_seconds: Some(5),
-                                failure_threshold: Some(3),
-                                exec: Some(ExecAction {
-                                    command: Some(liveness_cmd),
-                                }),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }
+                            },
+                            instance,
+                        )
                     }],
                     ..Default::default()
                 }),
