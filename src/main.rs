@@ -217,6 +217,9 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let webhook_addr = std::net::SocketAddr::from(([0, 0, 0, 0], args.webhook_port));
+    let webhook_listener = tokio::net::TcpListener::bind(webhook_addr)
+        .await
+        .expect("failed to bind webhook listener");
     let tls_cert = args.webhook_tls_cert;
     let tls_key = args.webhook_tls_key;
 
@@ -243,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
     // logic via the state machine), webhook server, and health probes.
     tokio::select! {
         _ = controller::odoo_instance::run(ctx.clone()) => {},
-        _ = webhook::run(webhook_addr, &tls_cert, &tls_key) => {},
+        _ = webhook::run(webhook_listener, &tls_cert, &tls_key) => {},
         _ = warp::serve(health_routes).run(health_addr) => {},
     }
 
