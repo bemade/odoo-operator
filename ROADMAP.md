@@ -78,6 +78,14 @@ On detected post-upgrade failures (readiness probe failures, high error rate in 
 - Resource quotas per namespace
 - Cross-cluster backup restore
 
+### Plugin Architecture for Per-Instance Dependencies
+
+Out-of-process plugins (separate controllers) that provision and configure
+per-instance dependencies — per-tenant mail capture, per-instance/namespace
+CNPG, S3 filestores — without baking them into core. Design proposal:
+[PLUGIN_ARCHITECTURE.md](PLUGIN_ARCHITECTURE.md). Phase 0 (SSA-safe `extraEnv`,
+#144) is independent groundwork.
+
 ### Grafana Dashboards
 
 Pre-built dashboards for OdooInstance health, upgrade history, backup status.
