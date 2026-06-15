@@ -47,9 +47,20 @@ jobs:
       tag_name: ${{ steps.pick.outputs.tag_name }}
     steps:
       - id: pick
+        # `inputs.tag` is carried via an env var (never inline `${{ }}` in the
+        # script text) and validated against a strict semver tag shape before
+        # use. This closes the script-injection vector (#136): a value that
+        # passes the regex contains no shell metacharacters, which also makes
+        # the downstream `${{ needs.resolve-ref.outputs.tag_name }}` uses safe.
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag_name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            if [[ ! "$DISPATCH_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::invalid tag format: '$DISPATCH_TAG' (expected vMAJOR.MINOR.PATCH, e.g. v1.10.6)"
+              exit 1
+            fi
+            echo "tag_name=$DISPATCH_TAG" >> "$GITHUB_OUTPUT"
           else
             echo "tag_name=${{ needs.release-please.outputs.tag_name }}" >> "$GITHUB_OUTPUT"
           fi
