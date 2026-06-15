@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.4.0](https://github.com/bemade/odoo-operator/compare/v2.3.0...v2.4.0) (2026-06-15)
+
+
+### Features
+
+* inject spec.extraEnv / spec.extraEnvFrom into instance Odoo containers ([#127](https://github.com/bemade/odoo-operator/issues/127)) ([541b769](https://github.com/bemade/odoo-operator/commit/541b769a2841cf54b57392887d5b86f0e0b4de15))
+
+
+### Bug Fixes
+
+* **ci:** sanitize workflow_dispatch tag input in release workflow ([#136](https://github.com/bemade/odoo-operator/issues/136)) ([#142](https://github.com/bemade/odoo-operator/issues/142)) ([de9dd89](https://github.com/bemade/odoo-operator/commit/de9dd89d4fa91d40f1e39f61202e3b2b9f878c7a))
+* **webhook:** hot-reload TLS serving cert on rotation ([#143](https://github.com/bemade/odoo-operator/issues/143)) ([59d1f73](https://github.com/bemade/odoo-operator/commit/59d1f73516c54cfe667f424ebcf441d6e3d8d69d))
+
 ## [2.3.0](https://github.com/bemade/odoo-operator/compare/v2.2.0...v2.3.0) (2026-06-12)
 
 
