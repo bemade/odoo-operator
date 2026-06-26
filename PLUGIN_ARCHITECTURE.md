@@ -157,7 +157,7 @@ Per-instance (1:1) dependencies (a CNPG `Cluster`, an S3 bucket) are simpler:
 the plugin can `ownerReference` them to the `OdooInstance` so Kubernetes
 garbage-collects them on delete.
 
-### 5.2 Registration CR + claims + validating webhook
+### 5.2 Registration CR + admission webhook (uniqueness + readiness gate)
 
 A plugin ships a **registration CR** (working name `OdooOperatorPlugin`) that
 declares:
@@ -167,47 +167,92 @@ declares:
 - the **spec field(s) it claims** (the structured fields it will author),
 - its readiness contract.
 
-The operator **watches** these registrations, so for any new instance it knows
-the applicable plugin set *before* it starts reconciling (this avoids a
-bootstrap race where the operator races ahead of a plugin's first watch event).
+Registration exists for **two guarantees SSA cannot provide on its own** — it is
+deliberately *not* a runtime ownership ledger (runtime ownership lives in
+`managedFields`, §5.3):
 
-Claims are validated at **install time** by the operator's existing **validating
-webhook**: registering a plugin whose claim conflicts with an already-registered
-plugin is **rejected before the plugin can run**. This converts conflict from a
-silent *runtime* problem into an explicit *admission* one.
+1. **No collision between registered plugins.** At **install time** the
+   operator's existing **validating webhook** rejects a plugin whose declared
+   field overlaps one an already-registered plugin owns. SSA has no notion of
+   *"this field may have only one owner,"* so two providers fighting over
+   `spec.mail.outgoing` would otherwise flap (if both `.force()`) or resolve
+   nondeterministically (first writer wins) — admission turns that into a loud,
+   install-time failure.
+2. **No start until every declared plugin is ready.** Because the operator
+   **watches** registrations, it knows the applicable plugin set for an instance
+   *before* reconciling, so it can block in `AwaitingPlugins` (§5.4) until each
+   reports `ready` — avoiding the bootstrap race where it would default
+   `spec.database` and initialize against the wrong DB before the `cnpg` plugin
+   has acted.
 
-"What is up for grabs" has three categories:
+Everything about *runtime* field ownership and the operator ceding a field is
+handled by SSA (§5.3), not by consulting this registry.
 
-| Category | Examples | Claimable? |
+"What is up for grabs" is best understood along **four orthogonal axes**. An
+early draft collapsed them into a single "claimable?" column, which wrongly
+implied some spec fields are permanently operator-owned. Grounding the question
+in the code told the opposite story: the operator only ever *reads*
+`spec.replicas` and renders the child Deployment from it — it never writes the
+field back. **The operator reacts to spec and at most *defaults* it; it manages
+no spec field outright.** (This refinement came out of @pimzand's observation on
+[#132](https://github.com/bemade/odoo-operator/issues/132) that an HPA ceding
+`spec.replicas` is "the same shape of move as a plugin claim.")
+
+| Axis | Question | Examples |
 |---|---|---|
-| **Claimable / dependency fields** | `spec.database`, `spec.mail.outgoing`, `spec.filestore`, future `spec.notifications` | Yes — at most one plugin each |
-| **Operator-structural fields** | `replicas`, `image`, `adminPassword`, ingress hosts | No — claim rejected |
-| **Granular escape hatch** | `config_options` (map) | No claim needed — safely shared per-key (§6.4) |
+| **Cedeable** | May a registered writer (plugin, human, or a core controller like an HPA) author this field? | Effectively every spec field, by design |
+| **Operator-defaulted** | Does the operator supply a value when absent, then withdraw it once claimed? | `spec.database` (uid-derived name), `replicas` (→1), generate-if-empty `adminPassword` |
+| **Phase-scoped override** | Does a lifecycle phase force a *rendered* value regardless of spec — at the **child** layer, never by seizing spec? | `replicas`→0 during Initializing / Restoring / Stopped / MigratingFilestore |
+| **Immutable-after-create** | Is the field frozen post-create for *everyone*, the operator included? | `spec.database.name` and other identity-bearing fields |
+
+`config_options` (a map) sits outside this: it needs no claim at all — SSA tracks
+ownership per key, so plugins safely co-own different keys (§6.4).
+
+These axes are independent: a field can be cedeable *and* operator-defaulted
+*and* phase-overridden (`replicas` is all three). "Claimable" in the plugin
+sense means **cedeable + operator-defaulted** — the operator owns the default
+until a plugin claims authorship, then yields. There is no "non-claimable"
+category of spec field; what earlier looked like one was the **phase-scoped
+override** (which lives at the child-resource layer, so it never contends with a
+spec author) plus **immutability** (a mutation-admission concern, below).
 
 Claiming a claimable field is an **authority handoff, not a conflict**: the
 operator defaults `spec.database` *until* a `cnpg` plugin claims it, at which
 point the operator cedes its default and waits for the plugin. This is what
 preserves *"Postgres is just a provider, and the old built-in mode still works."*
 
-Webhook logic: *claimable + unclaimed* → grant (operator yields its default);
-*claimable + already-claimed* → reject; *not claimable* → reject. Plus two cheap
-guards: the claimed path must **exist in the current `OdooInstance` schema**, and
-**prefix overlap** is a conflict (`spec.database` vs `spec.database.host`).
+**What a plugin may claim** is the curated set of *operator-defaulted dependency
+fields* — `spec.database`, `spec.mail.outgoing`, `spec.filestore`, future
+`spec.notifications` — those for which a plugin provisions a backing resource.
+The webhook's job on a registration is **uniqueness + validity only**: *declared
+field already owned by another registered plugin* → reject; *field not in the
+dependency set* → reject; otherwise admit. Two cheap guards beyond uniqueness:
+the declared path must **exist in the current `OdooInstance` schema**, and
+**prefix overlap** counts as collision (`spec.database` vs `spec.database.host`).
+The operator's *runtime* yield of its default to the plugin is **not** the
+webhook's concern — that happens via SSA (§5.3).
 
-**Human writes are governed by the same claims — at two layers.** Managed
-*child* resources (Deployments, Services, the Mailpit/CNPG resources a plugin
-spawns) are never admission-guarded; they're protected by **reconvergence** —
-the owning controller rebuilds them from spec each cycle. The shared
-`OdooInstance` CR is different: it's protected by **SSA + the validating
-webhook**. SSA conflict detection already rejects a non-owner *apply* of a
-claimed field for free; the webhook covers the *edit/patch* path SSA ownership
-doesn't block. On `UPDATE` the webhook receives both `oldObject` and `object`
-plus `request.userInfo`, so it diffs the claimed paths and **denies if a claimed
-field changed and the requester isn't its registered owner** (simplest v1:
-claimed fields are editable only by registered controller ServiceAccounts;
-humans are directed to the plugin's own CR). This extends a choice the operator
-already made — see the Decision Log entry *"Validating webhook over
-reconcile-loop revert"* in `ROADMAP.md` — to plugin-claimed fields.
+This is deliberately narrower than "cedeable." A core controller such as an HPA
+cedes `spec.replicas` with **no registration CR at all** — it authors the field
+via the scale subresource under SSA, and the operator simply stops re-asserting
+it (see #132). Plugin registration governs *dependency provisioning*; SSA governs
+*any* co-authorship. So rejecting a plugin's claim on `replicas` means "that is
+not a provisionable dependency," not "that field is operator-owned."
+
+**Non-plugin writers are best-effort, by design.** A human or a foreign
+controller editing the `OdooInstance` is caught by SSA's apply-conflict — a
+non-owner *apply* of a plugin-owned field 409s — *unless* they pass `.force()`
+or use a non-apply update (`kubectl edit`/`patch`), which take ownership
+silently with no conflict. We accept this: policing every human edit isn't worth
+the machinery, and the failure mode is self-healing (the plugin re-asserts its
+field on its next reconcile). It's documented caller-beware, not guarded.
+(Managed *child* resources — Deployments, Services, the resources a plugin spawns
+— are unaffected: their owning controller rebuilds them from spec each cycle
+regardless.) If stronger protection is ever wanted, the existing validating
+webhook can be extended to diff plugin-owned paths on `UPDATE` and deny
+non-owner edits — noted as **optional hardening**, not part of the baseline.
+That would extend the Decision Log entry *"Validating webhook over
+reconcile-loop revert"* (`ROADMAP.md`) to plugin-owned fields.
 
 ### 5.3 Field ownership via Server-Side Apply (SSA)
 
@@ -217,6 +262,39 @@ API server records per-field ownership in `metadata.managedFields` and rejects
 conflicting writes. The operator already applies all child resources via SSA
 under `FIELD_MANAGER = "odoo-operator"`, so this is an extension of the existing
 apply discipline, not a new mechanism.
+
+**The operator cedes without a hand-maintained ownership ledger** — it combines
+the **registration claim-set** (policy: which fields a plugin *may* own, from the
+registration watch it already keeps for the gate) with SSA's live `managedFields`
+(runtime: who *actually* owns what). Two layers:
+
+1. **Pre-clean keys on ownership, not value.** The operator suppresses its
+   default for any field an applicable registered plugin **claims** —
+   independent of whether the plugin filled it, set it explicitly empty, or
+   abstained (after `ready`, §5.5's ownership trichotomy decides value / off /
+   fallback). For *unclaimed* fields, `set_defaults` stays *absent-gated* (writes
+   a field only when unset). Absent-gating is a sound proxy **only** where
+   "deliberately empty" has a non-null representation — e.g. `mail.outgoing: []`
+   deserializes to `Some([])`, which it correctly skips. A plugin must therefore
+   **never signal "off" with `null`**: `null` deserializes to `None`,
+   indistinguishable from an absent field, so the operator would default over it.
+   Distinguishing *owned-but-empty* from *untouched* for such fields is done by
+   SSA ownership (the registration claim-set, or a `managedFields` read), per
+   §5.5 — never by the field value alone.
+2. **409 back-off** — if an apply still conflicts (a race, or a non-plugin
+   writer grabbing a field between read and write), the operator reads the
+   conflicting paths out of the 409's `StatusDetails.causes`, strips them from
+   the patch, and re-applies the narrower set. It never `.force()`s the
+   `OdooInstance` spec.
+
+> **Prerequisite:** `set_defaults` currently writes spec via a JSON
+> **merge-patch** (`Patch::Merge`), which does *not* participate in
+> `managedFields` or conflict detection. For the pre-clean and 409 back-off to
+> work, those spec writes must move to a real **server-side apply**
+> (`Patch::Apply`, no force, contested fields omitted). The operator's `.force()`
+> applies on *child* resources (Deployments, Services, …) stay as-is — cede
+> discipline is scoped to the `OdooInstance` spec, not to resources the operator
+> solely owns.
 
 This works cleanly only if list/map merge semantics are declared correctly:
 
@@ -358,12 +436,16 @@ not a free-form drop-in. `config_options` softens this for simple conf-key cases
 
 1. **Phase 0 — SSA prerequisite (independent):** make `spec.extraEnv`
    merge-keyed (#144). Backward-compatible, ships on its own.
-2. **Phase 1 — structured mail field:** add a merge-keyed `spec.mail.outgoing`;
-   teach the operator to read it; keep the global SMTP flag as the default when
-   no mail plugin is present.
+2. **Phase 1 — structured mail field + SSA-correct spec writes:** add a
+   merge-keyed `spec.mail.outgoing` and teach the operator to read it; keep the
+   global SMTP flag as the default when no mail plugin is present. Move
+   `set_defaults` from `Patch::Merge` to a real `Patch::Apply` (no force) so spec
+   writes participate in `managedFields` — the prerequisite for cede-by-409
+   (§5.3).
 3. **Phase 2 — extension plumbing:** the `OdooOperatorPlugin` registration CR,
-   webhook claim validation (incl. human-edit governance), and the
-   `AwaitingPlugins` stage.
+   admission webhook (uniqueness + dependency-set validation), and the
+   `AwaitingPlugins` stage. Human-edit governance is **optional hardening**
+   (§5.2), not required for the baseline.
 4. **Phase 3 — pilot plugin: Mailpit.** Chosen as the first plugin because it is
    the live need, exercises the shared-namespace GC that only the
    separate-process model handles, and is low-blast-radius (staging mail capture
@@ -380,6 +462,14 @@ not a free-form drop-in. `config_options` softens this for simple conf-key cases
   Staging vs Production) only if a concrete need appears. §5.5 (conditional fill)
   is one such need — selector-scoped claims turn many "applicable-but-empty"
   cases into clean "not applicable."
+- **Non-plugin claimants (HPA / KEDA).** `spec.replicas` ceding to an autoscaler
+  ([#132](https://github.com/bemade/odoo-operator/issues/132)) is the first
+  *non-plugin* validator of the cede model: the operator stops re-asserting the
+  field in steady state and keeps only the phase-scoped child override. It
+  confirms cedeability is a property of *spec itself*, not a privilege the plugin
+  registration mechanism grants. Concretely it needs `labelSelectorPath` +
+  `status.selector` on the scale subresource, and dropping the `Starting`
+  `.max(1)` floor.
 - **Eager vs lazy repoint** of running instances (§7).
 - **Uninstall semantics** — gate vs revert (§7).
 - **Spec-vs-status authorship.** This design has plugins author *spec* (for
