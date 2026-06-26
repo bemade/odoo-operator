@@ -50,6 +50,68 @@ async fn backup_job_lifecycle() {
     ready_handle.abort();
 }
 
+/// A backup requested while the instance is Stopped must run and then return
+/// to Stopped — without needing to scale the instance back up first.
+/// Regression: there was no `Stopped → BackingUp` transition, so backup jobs
+/// created while stopped were ignored until the instance was scaled up.
+#[tokio::test]
+async fn backup_while_stopped() {
+    let ctx = TestContext::new("test-backup-stopped").await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+
+    let ready_handle = fast_track_to_running(&ctx, "test-backup-stopped-init").await;
+    assert!(
+        wait_for_phase(c, ns, "test-backup-stopped", OdooInstancePhase::Running).await,
+        "expected Running before stopping"
+    );
+
+    // Stop the instance: scale to 0 → Stopped.  Stop faking readiness first so
+    // the scaled-down deployment isn't continuously re-marked ready.
+    ready_handle.abort();
+    patch_instance_spec(c, ns, "test-backup-stopped", json!({ "replicas": 0 })).await;
+    fake_deployment_ready(c, ns, "test-backup-stopped", 0).await;
+    assert!(
+        wait_for_phase(c, ns, "test-backup-stopped", OdooInstancePhase::Stopped).await,
+        "expected Stopped after scaling to 0"
+    );
+
+    // Request a backup while stopped.
+    let backup_api: Api<OdooBackupJob> = Api::namespaced(c.clone(), ns);
+    let backup_job: OdooBackupJob = serde_json::from_value(json!({
+        "apiVersion": "bemade.org/v1alpha1",
+        "kind": "OdooBackupJob",
+        "metadata": { "name": "test-backup-stopped-job", "namespace": ns },
+        "spec": {
+            "odooInstanceRef": { "name": "test-backup-stopped" },
+            "destination": {
+                "bucket": "test-bucket",
+                "objectKey": "test-key",
+                "endpoint": "http://localhost:9000",
+            },
+        }
+    }))
+    .unwrap();
+    backup_api
+        .create(&PostParams::default(), &backup_job)
+        .await
+        .expect("failed to create OdooBackupJob");
+
+    // The operator must pick the backup up directly from Stopped.
+    assert!(
+        wait_for_phase(c, ns, "test-backup-stopped", OdooInstancePhase::BackingUp).await,
+        "expected BackingUp after backup job created while stopped"
+    );
+
+    let k8s_job = wait_for_k8s_job_name::<OdooBackupJob>(c, ns, "test-backup-stopped-job").await;
+    fake_job_succeeded(c, ns, &k8s_job).await;
+
+    // After the backup completes it must return to Stopped, not boot up.
+    assert!(
+        wait_for_phase(c, ns, "test-backup-stopped", OdooInstancePhase::Stopped).await,
+        "expected Stopped again after backup completed (must not scale up)"
+    );
+}
+
 /// Two OdooBackupJobs queued at nearly the same time must not cause the
 /// OdooInstance phase to flap BackingUp → Running → BackingUp as the first
 /// one completes and the reconciler picks up the second.  Regression test

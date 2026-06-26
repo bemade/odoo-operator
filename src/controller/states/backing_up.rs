@@ -178,11 +178,10 @@ impl State for BackingUp {
 
         info!(%crd_name, %dump_image, server_major = %major, "selected pg client image for backup dump");
 
-        let job = OdooJobBuilder::new(&format!("{crd_name}-"), &ns, backup_job, instance)
+        let mut builder = OdooJobBuilder::new(&format!("{crd_name}-"), &ns, backup_job, instance)
             .active_deadline(5400)
             .without_standard_volumes()
             .extra_volumes(vec![workspace_vol, filestore_vol])
-            .affinity(pod_affinity)
             .init_containers(vec![
                 Container {
                     name: "dump".into(),
@@ -209,8 +208,18 @@ impl State for BackingUp {
                 env: Some(upload_env),
                 volume_mounts: Some(vec![workspace_mount]),
                 ..Default::default()
-            }])
-            .build();
+            }]);
+
+        // Co-locate the backup pod with a running Odoo web pod so a node-bound
+        // (RWO) filestore PVC, already mounted there, can also be mounted
+        // read-only here.  When the instance is stopped there are no Odoo pods
+        // and the PVC is unattached, so the backup pod can bind it on any node;
+        // applying the required affinity would instead leave it Pending forever.
+        if snap.ready_replicas > 0 {
+            builder = builder.affinity(pod_affinity);
+        }
+
+        let job = builder.build();
 
         let jobs_api: Api<Job> = Api::namespaced(client.clone(), &ns);
         let created = jobs_api.create(&PostParams::default(), &job).await?;

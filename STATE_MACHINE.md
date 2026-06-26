@@ -80,6 +80,7 @@ stateDiagram-v2
     Stopped --> Restoring : [restore_job present]
     Stopped --> CloningFromSource : [refresh_job present]
     Stopped --> Upgrading : [upgrade_job ready]
+    Stopped --> BackingUp : [backup_job present]
     Stopped --> Starting : [replicas > 0]
 
     MigratingFilestore --> FinalizingFilestoreMigration : [migration_job succeeded] / CompleteFilestoreMigration
