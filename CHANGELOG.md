@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.2](https://github.com/bemade/odoo-operator/compare/v2.4.1...v2.4.2) (2026-06-26)
+
+
+### Bug Fixes
+
+* **backup:** allow backups while the instance is Stopped ([#151](https://github.com/bemade/odoo-operator/issues/151)) ([2107cd1](https://github.com/bemade/odoo-operator/commit/2107cd12c453cf5cf73d7010663b57c15ab9785d))
+
 ## [2.4.1](https://github.com/bemade/odoo-operator/compare/v2.4.0...v2.4.1) (2026-06-26)
 
 
