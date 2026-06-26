@@ -48,6 +48,14 @@ case "$BACKUP_FORMAT" in
         # robust against any future multi-line variant.  Also strips
         # `SET transaction_timeout = 0` from pg_dump 17+ which earlier
         # servers reject as an unrecognized parameter.
+        #
+        # `COMMENT ON EXTENSION` is dropped because the cluster pre-seeds
+        # extensions (e.g. `vector`) into template1 owned by the `postgres`
+        # superuser; createdb clones template1, so the fresh DB inherits them
+        # owned by postgres.  CREATE EXTENSION IF NOT EXISTS is then a no-op,
+        # but the following COMMENT ON EXTENSION fails with "must be owner of
+        # extension <name>" under the non-superuser restore role.  The comment
+        # is pure metadata, so dropping it is harmless.
         echo "=== Loading plain SQL dump ==="
         sed -E \
             -e '/^SET transaction_timeout /d' \
@@ -55,6 +63,7 @@ case "$BACKUP_FORMAT" in
             -e '/^GRANT [^;]*;$/d' \
             -e '/^REVOKE [^;]*;$/d' \
             -e '/^REASSIGN OWNED BY [^;]*;$/d' \
+            -e '/^COMMENT ON EXTENSION [^;]*;$/d' \
             /workspace/dump.sql | \
             psql -h "$HOST" -p "$PORT" -U "$USER" -d "$DB_NAME" \
                 -v ON_ERROR_STOP=1 --quiet
