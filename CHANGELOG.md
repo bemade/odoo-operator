@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.1](https://github.com/bemade/odoo-operator/compare/v2.4.0...v2.4.1) (2026-06-26)
+
+
+### Bug Fixes
+
+* **restore:** strip COMMENT ON EXTENSION from plain SQL load ([#149](https://github.com/bemade/odoo-operator/issues/149)) ([ac6be2a](https://github.com/bemade/odoo-operator/commit/ac6be2a28a33cc20bc0061db2ab3ae63dadb2ce2))
+
 ## [2.4.0](https://github.com/bemade/odoo-operator/compare/v2.3.0...v2.4.0) (2026-06-15)
 
 
