@@ -1583,6 +1583,18 @@ pub static TRANSITIONS: &[Transition] = &[
         guard_name: "upgrade_job ready",
         actions: &[],
     },
+    // Back up a stopped instance.  The DB cluster and filestore PVC are
+    // independent of the (scaled-to-0) Odoo deployments, so a backup runs
+    // fine while stopped.  The `replicas == 0` clause keeps this exclusive
+    // with the `Stopped → Starting` edge below if a scale-up races a backup;
+    // the matching `BackingUp → Stopped` exit edges return here afterwards.
+    Transition {
+        from: Stopped,
+        to: BackingUp,
+        guard: |i, s| s.backup_job.is_present() && i.spec.replicas == 0,
+        guard_name: "backup_job present",
+        actions: &[],
+    },
     Transition {
         from: Stopped,
         to: Starting,
