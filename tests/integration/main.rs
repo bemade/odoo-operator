@@ -17,6 +17,7 @@ mod degraded;
 mod environment_labels;
 mod finalizer;
 mod finalizer_postgres_cleanup_failure;
+mod finalizer_scale_down;
 mod init_job;
 mod migrate_database;
 mod migrate_filestore;
