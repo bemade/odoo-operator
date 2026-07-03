@@ -40,7 +40,8 @@ use crate::helpers::{odoo_username, OperatorDefaults};
 use crate::postgres::{PostgresClusterConfig, PostgresManager};
 
 use super::child_resources;
-use super::helpers::{controller_owner_ref, FIELD_MANAGER};
+use super::helpers::{controller_owner_ref, cron_depl_name, FIELD_MANAGER};
+use super::state_machine::scale_deployment;
 
 const FINALIZER: &str = "bemade.org/postgres-cleanup";
 const KOPF_FINALIZER: &str = "kopf.zalando.org/KopfFinalizerMarker";
@@ -592,6 +593,23 @@ async fn cleanup_instance(instance: &OdooInstance, ctx: &Context) -> Result<Acti
         Some("Deleting postgres role".to_string()),
     )
     .await;
+
+    // Scale the web and cron Deployments to 0 before dropping the database.
+    // A running instance keeps live psycopg2 connections open for the lifetime
+    // of its worker processes, so `DROP DATABASE` fails with "database is being
+    // accessed by other users" and the finalizer would be retained forever —
+    // the pods only stop once the owner is fully deleted (past this finalizer),
+    // but the finalizer can't complete until the pods stop.  Scaling down here
+    // breaks that deadlock regardless of how deletion was triggered (issue #153).
+    //
+    // Best-effort: a scale error (e.g. the Deployment is already gone, 404) must
+    // not block role cleanup.  If pods are genuinely still up when we reach the
+    // DROP below, `delete_role` fails and the finalizer retries on the next tick.
+    for depl in [name.clone(), cron_depl_name(instance)] {
+        if let Err(e) = scale_deployment(&ctx.client, &depl, &ns, 0).await {
+            warn!(%name, %depl, %e, "failed to scale down deployment during cleanup (non-fatal)");
+        }
+    }
 
     let username = odoo_username(&ns, &name);
     if let Ok((cluster_name, pg_cluster)) = load_postgres_cluster(ctx, instance).await {
