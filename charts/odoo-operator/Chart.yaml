@@ -2,8 +2,8 @@ apiVersion: v2
 name: odoo-operator
 description: A Kubernetes operator for managing Odoo instances
 type: application
-version: 2.4.1
-appVersion: 2.4.1
+version: 2.4.2
+appVersion: 2.4.2
 keywords:
   - odoo
   - operator
