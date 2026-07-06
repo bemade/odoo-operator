@@ -497,6 +497,12 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
             .and_then(|s| s.active_cluster.as_deref())
             != Some(&cluster_name);
 
+    // Scale-subresource selector: the web Deployment's pod selector is a fixed,
+    // immutable `app=<name>` (see child_resources::ensure_deployment), so this
+    // is static per instance. Surfaced via `.status.selector` so an HPA can
+    // resolve the target pods through the `scale` subresource.
+    let selector = format!("app={name}");
+
     let cur = instance.status.as_ref();
     let status_changed = active_cluster_changed
         || !cur.is_some_and(|s| {
@@ -505,6 +511,7 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
                 && s.url == url
                 && s.target_replicas == Some(instance.spec.replicas)
                 && s.db_initialized == snapshot.db_initialized
+                && s.selector.as_deref() == Some(selector.as_str())
         });
 
     let api: Api<OdooInstance> = Api::namespaced(client.clone(), &ns);
@@ -517,6 +524,7 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
             "url": url,
             "targetReplicas": instance.spec.replicas,
             "dbInitialized": snapshot.db_initialized,
+            "selector": selector,
             "conditions": conditions,
         });
         if active_cluster_changed {
