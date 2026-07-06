@@ -69,8 +69,22 @@ async fn restore_job_lifecycle() -> anyhow::Result<()> {
         wait_for_phase(c, ns, "test-restore", OdooInstancePhase::Starting).await,
         "expected Starting after restore completed"
     );
-    check_deployment_scale(c, ns, "test-restore", 1).await?;
-    check_deployment_scale(c, ns, "test-restore-cron", 1).await?;
+    // Reaching Starting only patches the phase and requeues; the Deployment is
+    // scaled back up from 0 (Restoring's ensure) to spec.replicas on the next
+    // reconcile's ensure(Starting). Poll for the eventual scale rather than
+    // asserting it synchronously against that window.
+    assert!(
+        wait_for(TIMEOUT, POLL, || async move {
+            check_deployment_scale(c, ns, "test-restore", 1)
+                .await
+                .is_ok()
+                && check_deployment_scale(c, ns, "test-restore-cron", 1)
+                    .await
+                    .is_ok()
+        })
+        .await,
+        "expected both deployments to scale to 1 after restore completed"
+    );
 
     let ready_handle = keep_deployment_ready(c.clone(), ns.into(), "test-restore".into(), 1);
 
