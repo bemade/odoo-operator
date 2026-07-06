@@ -32,7 +32,12 @@ impl State for Starting {
     ) -> Result<()> {
         let ns = instance.namespace().unwrap_or_default();
         let name = instance.name_any();
-        let replicas = instance.spec.replicas.max(1);
+        // Honor spec.replicas verbatim — it is the authoritative replica count
+        // owned by whoever writes the `scale` subresource (a human or an HPA).
+        // No `.max(1)` floor: replicas == 0 is a valid request and is handled by
+        // the Starting → Stopped transition (guard `replicas == 0`), so a floor
+        // here would only transiently override an external autoscaler.
+        let replicas = instance.spec.replicas;
         let cron_replicas = instance.spec.cron.replicas;
         scale_deployment(&ctx.client, &name, &ns, replicas).await?;
         scale_deployment(

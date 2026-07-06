@@ -301,7 +301,7 @@ fn default_init_modules() -> Vec<String> {
     shortname = "odoo",
     namespaced,
     status = "OdooInstanceStatus",
-    scale = r#"{"specReplicasPath": ".spec.replicas", "statusReplicasPath": ".status.readyReplicas"}"#,
+    scale = r#"{"specReplicasPath": ".spec.replicas", "statusReplicasPath": ".status.readyReplicas", "labelSelectorPath": ".status.selector"}"#,
     printcolumn = r#"{"name": "Image", "type": "string", "jsonPath": ".spec.image"}"#,
     printcolumn = r#"{"name": "Replicas", "type": "string", "jsonPath": ".status.readyReplicas"}"#,
     printcolumn = r#"{"name": "Phase", "type": "string", "jsonPath": ".status.phase"}"#,
@@ -483,6 +483,13 @@ pub struct OdooInstanceStatus {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_replicas: Option<i32>,
+
+    /// Label selector for the pods this instance manages, as a serialized
+    /// selector string (e.g. `app=<name>`). Surfaced through the `scale`
+    /// subresource via `labelSelectorPath`, so a HorizontalPodAutoscaler can
+    /// discover the target pods. Populated by the controller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition>,

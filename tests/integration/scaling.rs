@@ -1,7 +1,9 @@
 use serde_json::json;
 
+use kube::api::{Api, Patch, PatchParams};
+
 use super::common::*;
-use odoo_operator::crd::odoo_instance::OdooInstancePhase;
+use odoo_operator::crd::odoo_instance::{OdooInstance, OdooInstancePhase};
 
 /// While Running, changing spec.replicas should update the Deployment's replica
 /// count without requiring a phase transition.
@@ -61,6 +63,78 @@ async fn scale_down_and_up() -> anyhow::Result<()> {
     assert!(
         wait_for_phase(c, ns, "test-scale", OdooInstancePhase::Starting).await,
         "expected Starting after scale to 1"
+    );
+    Ok(())
+}
+
+/// The `scale` subresource must expose a label selector so a HorizontalPodAutoscaler
+/// can discover the managed pods. The controller writes `status.selector =
+/// "app=<name>"`, and the apiserver surfaces it on the `/scale` subresource via
+/// the CRD's `labelSelectorPath`.
+#[tokio::test]
+async fn status_selector_is_populated_and_exposed_on_scale() -> anyhow::Result<()> {
+    let ctx = TestContext::new("test-sel").await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+
+    let ready_handle = fast_track_to_running(&ctx, "test-sel-init").await;
+
+    // The controller sets status.selector during reconcile.
+    assert!(
+        wait_for(TIMEOUT, POLL, || async move {
+            let api: Api<OdooInstance> = Api::namespaced(c.clone(), ns);
+            api.get("test-sel")
+                .await
+                .ok()
+                .and_then(|i| i.status)
+                .and_then(|s| s.selector)
+                == Some("app=test-sel".to_string())
+        })
+        .await,
+        "expected status.selector to be set to app=test-sel"
+    );
+
+    // The apiserver exposes it on the /scale subresource (what an HPA reads).
+    let instances: Api<OdooInstance> = Api::namespaced(c.clone(), ns);
+    let scale = instances.get_scale("test-sel").await?;
+    assert_eq!(
+        scale.status.and_then(|s| s.selector),
+        Some("app=test-sel".to_string()),
+        "scale subresource should report the label selector"
+    );
+
+    ready_handle.abort();
+    Ok(())
+}
+
+/// An autoscaler scales by writing the `/scale` subresource, not the full spec.
+/// A replica count written there must flow through `.spec.replicas` to the
+/// Deployment — and without the old `.max(1)` floor, the count is honored
+/// verbatim.
+#[tokio::test]
+async fn scale_subresource_write_updates_deployment() -> anyhow::Result<()> {
+    let ctx = TestContext::new("test-hpa").await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+
+    let ready_handle = fast_track_to_running(&ctx, "test-hpa-init").await;
+    check_deployment_scale(c, ns, "test-hpa", 1).await?;
+
+    // Simulate an HPA: write replicas via the scale subresource (not spec).
+    ready_handle.abort();
+    let instances: Api<OdooInstance> = Api::namespaced(c.clone(), ns);
+    instances
+        .patch_scale(
+            "test-hpa",
+            &PatchParams::default(),
+            &Patch::Merge(json!({ "spec": { "replicas": 4 } })),
+        )
+        .await?;
+
+    assert!(
+        wait_for(TIMEOUT, POLL, || async move {
+            check_deployment_scale(c, ns, "test-hpa", 4).await.is_ok()
+        })
+        .await,
+        "expected Deployment to scale to 4 after a /scale subresource write"
     );
     Ok(())
 }
