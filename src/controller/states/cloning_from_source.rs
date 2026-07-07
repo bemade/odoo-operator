@@ -32,6 +32,7 @@ use crate::helpers::sha256_hex;
 
 const CLONE_DB_SCRIPT: &str = include_str!("../../../scripts/clone-db.sh");
 const CLONE_FILESTORE_SCRIPT: &str = include_str!("../../../scripts/clone-filestore.sh");
+const RENAME_FILESTORE_SCRIPT: &str = include_str!("../../../scripts/rename-filestore.sh");
 const NEUTRALIZE_SCRIPT: &str = include_str!("../../../scripts/neutralize.sh");
 
 /// Number of hex characters of the image's sha256 we persist in the refresh
@@ -508,14 +509,18 @@ impl State for CloningFromSource {
                 .and_then(|s| s.filestore_phase.as_ref()),
             Some(Phase::Running)
         ) {
-            let terminal = if refresh
+            if refresh
                 .status
                 .as_ref()
                 .and_then(|s| s.filestore_job_name.as_deref())
                 .is_some()
             {
-                // Copy path: mirror Job's recorded terminal phase.
-                match refresh
+                // A filestore Job is in flight — the Copy path's clone Job,
+                // or the Snapshot path's post-clone rename Job (launched in
+                // the `else` branch below once its name is recorded).  Either
+                // way, mirror the Job's recorded terminal phase onto
+                // `filestore_phase`.
+                let terminal = match refresh
                     .status
                     .as_ref()
                     .and_then(|s| s.filestore_job_phase.as_ref())
@@ -523,32 +528,66 @@ impl State for CloningFromSource {
                     Some(Phase::Completed) => Some(Phase::Completed),
                     Some(Phase::Failed) => Some(Phase::Failed),
                     _ => None,
+                };
+                if let Some(p) = terminal {
+                    patch_refresh_status(
+                        &ctx.client,
+                        &ns,
+                        &refresh.name_any(),
+                        &json!({"status": {"filestorePhase": p}}),
+                    )
+                    .await?;
                 }
             } else {
-                // Snapshot path: new PVC bound ⇒ Completed.  Defensively
-                // require no `deletionTimestamp` so a still-terminating
-                // old PVC can't masquerade as the recreated one.
+                // Snapshot path: the dest PVC was recreated from the source
+                // VolumeSnapshot but no rename Job exists yet.  The clone is
+                // byte-for-byte, so the filestore landed under the *source*
+                // DB name — Odoo on the target resolves
+                // `filestore/<target_db>` and would find nothing (every
+                // ir.attachment 500s).  Once the new PVC is Bound (so it can
+                // be mounted) launch a Job that renames
+                // `filestore/<src_db>` → `filestore/<tgt_db>` in place.
+                // Recording its name routes subsequent ticks through the
+                // mirror branch above, which settles `filestore_phase` when
+                // the rename Job terminates.  Require no `deletionTimestamp`
+                // so a still-terminating old PVC can't masquerade as the
+                // recreated one, and wait for Bound so the Job's pod doesn't
+                // sit Pending on an absent volume.
                 let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), &ns);
                 let target_pvc = format!("{inst_name}-filestore-pvc");
-                match pvcs.get(target_pvc.as_str()).await {
+                let bound = matches!(
+                    pvcs.get(target_pvc.as_str()).await,
                     Ok(pvc)
                         if pvc.metadata.deletion_timestamp.is_none()
                             && pvc.status.as_ref().and_then(|s| s.phase.as_deref())
-                                == Some("Bound") =>
-                    {
-                        Some(Phase::Completed)
-                    }
-                    _ => None,
+                                == Some("Bound")
+                );
+                if bound {
+                    let job = build_filestore_rename_job(
+                        &refresh.name_any(),
+                        &ns,
+                        image,
+                        instance,
+                        refresh,
+                        &source_db,
+                        &target_db,
+                    );
+                    let jobs_api: Api<Job> = Api::namespaced(ctx.client.clone(), &ns);
+                    let created = jobs_api.create(&PostParams::default(), &job).await?;
+                    let k8s_job_name = created.name_any();
+                    info!(
+                        crd_name = %refresh.name_any(),
+                        %k8s_job_name,
+                        "created filestore rename job (snapshot path)"
+                    );
+                    patch_refresh_status(
+                        &ctx.client,
+                        &ns,
+                        &refresh.name_any(),
+                        &json!({"status": {"filestoreJobName": &k8s_job_name}}),
+                    )
+                    .await?;
                 }
-            };
-            if let Some(p) = terminal {
-                patch_refresh_status(
-                    &ctx.client,
-                    &ns,
-                    &refresh.name_any(),
-                    &json!({"status": {"filestorePhase": p}}),
-                )
-                .await?;
             }
         }
 
@@ -775,6 +814,48 @@ fn build_filestore_clone_job(
             ]),
             env: Some(envs),
             volume_mounts: Some(mounts),
+            ..Default::default()
+        }])
+        .build()
+}
+
+/// Snapshot-path filestore reconcile: rename `filestore/<src_db>` →
+/// `filestore/<tgt_db>` in place on the recreated dest PVC.
+///
+/// The snapshot clone (`dataSourceRef → VolumeSnapshot`) copies the source
+/// filestore PVC byte-for-byte, so the filestore lands under the source DB
+/// name.  Only the target PVC is mounted (the standard `/var/lib/odoo`
+/// mount via `odoo_volume_mounts()`) — the rename is within that one
+/// volume, so no source PVC is needed.  This is the snapshot-path
+/// equivalent of `build_filestore_clone_job`, which maps SRC_DB → TGT_DB at
+/// copy time; the snapshot path can't map at copy time (the CSI clone is
+/// opaque), so it reconciles the directory name afterward.
+fn build_filestore_rename_job(
+    crd_name: &str,
+    ns: &str,
+    image: &str,
+    instance: &OdooInstance,
+    refresh: &OdooStagingRefreshJob,
+    source_db: &str,
+    target_db: &str,
+) -> Job {
+    let envs = vec![
+        env("SRC_DB", source_db),
+        env("TGT_DB", target_db),
+        env("FILESTORE", "/var/lib/odoo"),
+    ];
+    OdooJobBuilder::new(&format!("{crd_name}-fsrename-"), ns, refresh, instance)
+        .active_deadline(7200)
+        .containers(vec![Container {
+            name: "rename-filestore".into(),
+            image: Some(image.into()),
+            command: Some(vec![
+                "/bin/bash".into(),
+                "-c".into(),
+                RENAME_FILESTORE_SCRIPT.into(),
+            ]),
+            env: Some(envs),
+            volume_mounts: Some(odoo_volume_mounts()),
             ..Default::default()
         }])
         .build()

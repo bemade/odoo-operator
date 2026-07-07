@@ -285,13 +285,14 @@ impl ReconcileSnapshot {
                                 )
                                 .await,
                                 // Filestore step is mode-agnostic: prefer the
-                                // explicit `filestore_phase` field when set
-                                // (covers the snapshot path, which has no
-                                // underlying Job).  On the Copy path, fall
-                                // back to the Job-based observer so that
-                                // `filestore_job_phase` keeps being recorded
-                                // for GC durability.  skipFilestore short-
-                                // circuits to Succeeded.
+                                // explicit `filestore_phase` field when set,
+                                // else fall back to the Job-based observer via
+                                // `filestore_job_name` so `filestore_job_phase`
+                                // keeps being recorded for GC durability.  Both
+                                // modes run a Job now — the Copy path's clone
+                                // Job and the Snapshot path's post-clone rename
+                                // Job — so the observer applies to either.
+                                // skipFilestore short-circuits to Succeeded.
                                 if job.spec.skip_filestore {
                                     JobStatus::Succeeded
                                 } else {

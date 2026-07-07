@@ -436,12 +436,15 @@ async fn fake_volume_snapshot_ready(client: &kube::Client, ns: &str, name: &str)
 }
 
 /// Snapshot path: when source and target share a StorageClass and
-/// `filestoreMethod: snapshot` is requested, the operator must NOT spawn a
-/// filestore Job.  Instead, it deletes the staging PVC, recreates it (which
-/// would clone from the source PVC in a real cluster), and waits for the
-/// new PVC to bind.  The settle block then patches `filestore_phase: Completed`
-/// — which is the gate that lets neutralize spawn.  Regression for the
-/// "fs_done never trips" stall in the snapshot path.
+/// `filestoreMethod: snapshot` is requested, the operator deletes the staging
+/// PVC and recreates it (which would clone from the source VolumeSnapshot in a
+/// real cluster).  Once the new PVC is Bound, it launches a filestore *rename*
+/// Job — the byte-for-byte snapshot clone lands the filestore under the
+/// *source* DB name, so it must be renamed to the target DB name before Odoo
+/// can resolve `filestore/<db_name>` (otherwise every ir.attachment 500s).
+/// `filestore_phase` settles Completed when the rename Job succeeds, which is
+/// the gate that lets neutralize spawn.  Regression for both the "fs_done never
+/// trips" stall and the missing-rename attachment-404 bug.
 #[tokio::test]
 async fn staging_refresh_snapshot_path_completes_via_pvc_bound() -> anyhow::Result<()> {
     let ctx = TestContext::new("src-snap").await;
@@ -517,7 +520,8 @@ async fn staging_refresh_snapshot_path_completes_via_pvc_bound() -> anyhow::Resu
     // status (PVC delete + ensure_filestore_pvc complete).
     wait_for_filestore_phase(c, ns, "tgt-snap-refresh", Phase::Running).await;
 
-    // No filestore Job exists on the snapshot path.
+    // No filestore Job exists until the recreated PVC is Bound — the rename
+    // Job mounts that PVC, so it can't be launched before the volume is ready.
     let after = refreshes.get("tgt-snap-refresh").await?;
     assert!(
         after
@@ -525,12 +529,23 @@ async fn staging_refresh_snapshot_path_completes_via_pvc_bound() -> anyhow::Resu
             .as_ref()
             .and_then(|s| s.filestore_job_name.as_deref())
             .is_none(),
-        "snapshot path must not create a filestore Job"
+        "no filestore rename Job before the recreated PVC is Bound"
     );
 
-    // Fake the recreated staging PVC into Bound; the settle block on the
-    // next reconcile flips filestorePhase to Completed.
+    // Fake the recreated staging PVC into Bound; the operator then launches
+    // the filestore rename Job (renames filestore/<src_db> → filestore/<tgt_db>
+    // so the byte-for-byte snapshot clone lines up with the freshly-cloned DB).
     fake_pvc_bound(c, ns, "tgt-snap-filestore-pvc").await;
+    let fs_job = wait_for_refresh_sub_job(c, ns, "tgt-snap-refresh", "filestoreJobName").await;
+
+    // filestorePhase stays Running until the rename Job terminates; faking it
+    // Succeeded lets the settle block mirror the phase forward to Completed.
+    jobs.patch_status(
+        &fs_job,
+        &PatchParams::apply("odoo-operator-test"),
+        &Patch::Merge(&json!({ "status": { "succeeded": 1 } })),
+    )
+    .await?;
     wait_for_filestore_phase(c, ns, "tgt-snap-refresh", Phase::Completed).await;
 
     // Neutralize spawns once both DB and filestore are Completed.
