@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.5.0](https://github.com/bemade/odoo-operator/compare/v2.4.2...v2.5.0) (2026-07-09)
+
+
+### Features
+
+* **gc:** garbage-collect finished job CRs to bound reconcile cost ([8c8f121](https://github.com/bemade/odoo-operator/commit/8c8f121c8f1a24b42dcb29ce6989e5cb0d9489c7))
+* **scaling:** expose the pod selector via the scale subresource ([abbb5dd](https://github.com/bemade/odoo-operator/commit/abbb5ddebe7a46fc0646f3044e7dc76279278c70))
+
+
+### Bug Fixes
+
+* **refresh:** rename filestore to target db name on snapshot path ([e21d562](https://github.com/bemade/odoo-operator/commit/e21d562780890308d4e1dcae61b60a6527772c3f))
+
+
+### Performance Improvements
+
+* **reconcile:** server-side filter job-CR lists via selectableFields ([da92c38](https://github.com/bemade/odoo-operator/commit/da92c388e894ef7fa08e7beafed9bbde98a2493d))
+
 ## [2.4.2](https://github.com/bemade/odoo-operator/compare/v2.4.1...v2.4.2) (2026-07-03)
 
 
