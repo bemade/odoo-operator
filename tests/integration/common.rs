@@ -277,7 +277,7 @@ impl TestContext {
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_instance_json(name: &str, ns: &str, replicas: i32) -> serde_json::Value {
+pub fn test_instance_json(name: &str, ns: &str, replicas: i32) -> serde_json::Value {
     json!({
         "apiVersion": "bemade.org/v1alpha1",
         "kind": "OdooInstance",
@@ -324,6 +324,13 @@ fn test_defaults() -> OperatorDefaults {
 }
 
 fn test_context(client: Client) -> Arc<Context> {
+    test_context_with_limit(client, 10)
+}
+
+/// Build a test Context with an explicit job-CR history limit. Used by the
+/// garbage-collection test so it can exercise pruning with a small limit
+/// instead of creating a large number of CRs.
+pub fn test_context_with_limit(client: Client, job_history_limit: usize) -> Arc<Context> {
     Arc::new(Context {
         client,
         defaults: test_defaults(),
@@ -335,6 +342,7 @@ fn test_context(client: Client) -> Arc<Context> {
             controller: "odoo-operator-test".into(),
             instance: None,
         },
+        job_history_limit,
     })
 }
 

@@ -17,6 +17,10 @@ operator:
   # Node placement
   affinity: {}
   tolerations: []
+  # Max terminal (Completed/Failed) job CRs retained per instance per type.
+  # Older ones are garbage-collected each reconcile so gather()'s CR list stays
+  # cheap. Set to 0 to disable garbage collection.
+  jobHistoryLimit: 10
 
 # Image pull secrets for private registries
 imagePullSecrets:
