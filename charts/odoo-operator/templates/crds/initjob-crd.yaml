@@ -145,6 +145,9 @@ spec:
         - spec
         title: OdooInitJob
         type: object
+    selectableFields:
+    - jsonPath: .spec.odooInstanceRef.name
+    - jsonPath: .status.phase
     served: true
     storage: true
     subresources:

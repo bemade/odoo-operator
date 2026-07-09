@@ -29,6 +29,8 @@ pub struct BackupDestination {
     shortname = "backupjob",
     namespaced,
     status = "OdooBackupJobStatus",
+    selectable = ".spec.odooInstanceRef.name",
+    selectable = ".status.phase",
     printcolumn = r#"{"name": "Target", "type": "string", "jsonPath": ".spec.odooInstanceRef.name"}"#,
     printcolumn = r#"{"name": "Format", "type": "string", "jsonPath": ".spec.format"}"#,
     printcolumn = r#"{"name": "Phase", "type": "string", "jsonPath": ".status.phase"}"#,
