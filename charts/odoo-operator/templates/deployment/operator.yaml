@@ -55,6 +55,7 @@ spec:
             - --default-staging-smtp-port={{ .Values.defaults.mail.stagingSmtpPort | default 1025 }}
             - --default-staging-smtp-encryption={{ .Values.defaults.mail.stagingSmtpEncryption | default "none" }}
             {{- end }}
+            - --job-history-limit={{ .Values.operator.jobHistoryLimit | default 10 }}
           resources:
             {{- toYaml .Values.operator.resources | nindent 12 }}
           env:

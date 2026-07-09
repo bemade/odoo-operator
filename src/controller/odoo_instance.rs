@@ -98,6 +98,9 @@ pub struct Context {
     pub postgres: Arc<dyn PostgresManager>,
     pub http_client: reqwest::Client,
     pub reporter: Reporter,
+    /// Max number of terminal (Completed/Failed) job CRs to retain per instance
+    /// per type. Older ones are garbage-collected each reconcile. 0 disables GC.
+    pub job_history_limit: usize,
 }
 
 // ── Controller entry point ────────────────────────────────────────────────────
@@ -380,6 +383,12 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
         &cluster_name,
     )
     .await?;
+
+    // Bound finished-job-CR history so gather()'s unfiltered lists stay cheap.
+    // Non-fatal — a GC hiccup must never block reconciliation.
+    if let Err(e) = super::gc::garbage_collect_job_crs(instance, ctx).await {
+        warn!(%name, %ns, %e, "job CR garbage collection failed (non-fatal)");
+    }
 
     // Reality-check that the per-instance database still exists. If it was
     // dropped out-of-band, react per spec.database.missingPolicy.

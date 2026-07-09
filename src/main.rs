@@ -149,6 +149,11 @@ struct Args {
     /// Log format: "text" for human-readable, "json" for structured.
     #[arg(long, default_value = "text", env = "LOG_FORMAT")]
     log_format: String,
+
+    /// Max terminal (Completed/Failed) job CRs to retain per instance per type.
+    /// Older ones are garbage-collected each reconcile. 0 disables GC.
+    #[arg(long, default_value = "10", env = "JOB_HISTORY_LIMIT")]
+    job_history_limit: usize,
 }
 
 #[tokio::main]
@@ -214,6 +219,7 @@ async fn main() -> anyhow::Result<()> {
             controller: "odoo-operator".into(),
             instance: std::env::var("POD_NAME").ok(),
         },
+        job_history_limit: args.job_history_limit,
     });
 
     let webhook_addr = std::net::SocketAddr::from(([0, 0, 0, 0], args.webhook_port));
