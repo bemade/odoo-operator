@@ -127,3 +127,38 @@ async fn gc_disabled_when_limit_zero() {
 
     assert_eq!(backup_names(&api).await.len(), 3, "GC ran despite limit 0");
 }
+
+/// End-to-end proof that the CRD's selectableFields are declared correctly and
+/// the API server filters server-side: the reconcile loop's "active CRs for
+/// this instance" query must return exactly the non-terminal CRs owned by the
+/// target instance — including a just-created CR with no status yet (phase "").
+#[tokio::test]
+async fn server_side_selector_filters_by_owner_and_phase() {
+    let tc = TestContext::new_ns().await;
+    let (client, ns) = (tc.client.clone(), tc.ns.clone());
+    let api: Api<OdooBackupJob> = Api::namespaced(client.clone(), &ns);
+
+    make_backup(&api, "a-running", "inst-a", Some(Phase::Running)).await;
+    make_backup(&api, "a-done", "inst-a", Some(Phase::Completed)).await;
+    make_backup(&api, "a-nostatus", "inst-a", None).await;
+    make_backup(&api, "b-running", "inst-b", Some(Phase::Running)).await;
+
+    // Same selector gather() builds for the active-CR list.
+    let selector = "spec.odooInstanceRef.name=inst-a,status.phase!=Completed,status.phase!=Failed";
+    let mut got: Vec<String> = api
+        .list(&ListParams::default().fields(selector))
+        .await
+        .expect("field-selector list must be accepted (selectableFields declared)")
+        .items
+        .into_iter()
+        .map(|o| o.metadata.name.unwrap())
+        .collect();
+    got.sort();
+
+    assert_eq!(
+        got,
+        vec!["a-nostatus".to_string(), "a-running".to_string()],
+        "server-side selector should return inst-a's non-terminal CRs only \
+         (excl. a-done by phase, b-running by owner)"
+    );
+}

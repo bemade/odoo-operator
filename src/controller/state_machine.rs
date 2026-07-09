@@ -151,6 +151,17 @@ impl ReconcileSnapshot {
             .map(|s| s.db_initialized)
             .unwrap_or(false);
 
+        // Server-side filter every job-CR list to this instance's *active*
+        // (non-terminal) CRs via selectableFields, instead of pulling every CR
+        // in the namespace and filtering in memory. The loops below still
+        // filter client-side, so a fallback to an unfiltered list (older CRD
+        // without selectableFields, mid-rollout) stays correct. An unset phase
+        // reads as "" and correctly matches `!=Completed,!=Failed`, so
+        // just-created CRs are still observed.
+        let active_selector = format!(
+            "spec.odooInstanceRef.name={instance_name},status.phase!=Completed,status.phase!=Failed"
+        );
+
         // Deployment replicas (spec + ready).
         let (deployment_replicas, ready_replicas) = {
             let deps: Api<Deployment> = Api::namespaced(client.clone(), ns);
@@ -190,7 +201,7 @@ impl ReconcileSnapshot {
         let db_init_from_jobs = db_initialized;
         {
             let inits: Api<OdooInitJob> = Api::namespaced(client.clone(), ns);
-            for job in inits.list(&ListParams::default()).await?.items {
+            for job in super::gc::list_by_field_selector(&inits, &active_selector).await? {
                 if job.spec.odoo_instance_ref.name != instance_name {
                     continue;
                 }
@@ -213,7 +224,7 @@ impl ReconcileSnapshot {
         let mut restore_job_active = false;
         {
             let restores: Api<OdooRestoreJob> = Api::namespaced(client.clone(), ns);
-            for job in restores.list(&ListParams::default()).await?.items {
+            for job in super::gc::list_by_field_selector(&restores, &active_selector).await? {
                 if job.spec.odoo_instance_ref.name != instance_name {
                     continue;
                 }
@@ -235,7 +246,7 @@ impl ReconcileSnapshot {
         let mut upgrade_job_active = false;
         {
             let upgrades: Api<OdooUpgradeJob> = Api::namespaced(client.clone(), ns);
-            for job in upgrades.list(&ListParams::default()).await?.items {
+            for job in super::gc::list_by_field_selector(&upgrades, &active_selector).await? {
                 if job.spec.odoo_instance_ref.name != instance_name {
                     continue;
                 }
@@ -263,7 +274,7 @@ impl ReconcileSnapshot {
         let mut refresh_job = JobStatus::Absent;
         {
             let refreshes: Api<OdooStagingRefreshJob> = Api::namespaced(client.clone(), ns);
-            for job in refreshes.list(&ListParams::default()).await?.items {
+            for job in super::gc::list_by_field_selector(&refreshes, &active_selector).await? {
                 if job.spec.odoo_instance_ref.name != instance_name {
                     continue;
                 }
@@ -350,7 +361,7 @@ impl ReconcileSnapshot {
         let mut pending_backup_jobs: usize = 0;
         {
             let backups: Api<OdooBackupJob> = Api::namespaced(client.clone(), ns);
-            for job in backups.list(&ListParams::default()).await?.items {
+            for job in super::gc::list_by_field_selector(&backups, &active_selector).await? {
                 if job.spec.odoo_instance_ref.name != instance_name {
                     continue;
                 }

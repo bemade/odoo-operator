@@ -13,6 +13,8 @@ use super::shared::{OdooInstanceRef, Phase, WebhookConfig};
     shortname = "upgradejob",
     namespaced,
     status = "OdooUpgradeJobStatus",
+    selectable = ".spec.odooInstanceRef.name",
+    selectable = ".status.phase",
     printcolumn = r#"{"name": "Target", "type": "string", "jsonPath": ".spec.odooInstanceRef.name"}"#,
     printcolumn = r#"{"name": "Phase", "type": "string", "jsonPath": ".status.phase"}"#,
     printcolumn = r#"{"name": "Age", "type": "date", "jsonPath": ".metadata.creationTimestamp"}"#

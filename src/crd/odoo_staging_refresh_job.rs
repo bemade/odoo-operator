@@ -43,6 +43,8 @@ pub struct StagingSource {
     shortname = "staging-refresh",
     namespaced,
     status = "OdooStagingRefreshJobStatus",
+    selectable = ".spec.odooInstanceRef.name",
+    selectable = ".status.phase",
     printcolumn = r#"{"name": "Target", "type": "string", "jsonPath": ".spec.odooInstanceRef.name"}"#,
     printcolumn = r#"{"name": "Source", "type": "string", "jsonPath": ".spec.source.instanceName"}"#,
     printcolumn = r#"{"name": "Phase", "type": "string", "jsonPath": ".status.phase"}"#,

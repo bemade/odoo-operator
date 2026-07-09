@@ -31,6 +31,36 @@ use crate::error::Result;
 
 use super::odoo_instance::Context;
 
+/// List CRs of type `K` in `ns` server-side-filtered by `field_selector`
+/// (a `selectableFields` selector). Falls back to an unfiltered list if the API
+/// server rejects the selector — e.g. during a rollout where the CRD hasn't yet
+/// been updated with its `selectableFields`. Callers must still filter
+/// client-side, so the fallback is correct, just less efficient.
+pub(crate) async fn list_by_field_selector<K>(api: &Api<K>, field_selector: &str) -> Result<Vec<K>>
+where
+    K: Resource<DynamicType = (), Scope = NamespaceResourceScope>
+        + Clone
+        + DeserializeOwned
+        + Debug,
+{
+    match api
+        .list(&ListParams::default().fields(field_selector))
+        .await
+    {
+        Ok(list) => Ok(list.items),
+        // 400/422: unknown field selector (CRD without selectableFields yet).
+        Err(kube::Error::Api(e)) if e.code == 400 || e.code == 422 => {
+            warn!(
+                selector = field_selector,
+                code = e.code,
+                "field-selector list rejected; falling back to unfiltered list"
+            );
+            Ok(api.list(&ListParams::default()).await?.items)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Prune terminal job CRs of type `K` for one instance, keeping the newest
 /// `limit` by creation timestamp and deleting the rest. Returns the number of
 /// CRs deleted. Deletion is best-effort: an already-gone CR (404) is not an
@@ -51,10 +81,12 @@ where
         + Debug,
 {
     let api: Api<K> = Api::namespaced(client.clone(), ns);
-    let mut terminal: Vec<K> = api
-        .list(&ListParams::default())
+    // Ownership is filtered server-side; the terminal-phase check stays
+    // client-side because an unset phase must NOT be treated as terminal
+    // (a field selector `status.phase!=Running` would wrongly match it).
+    let selector = format!("spec.odooInstanceRef.name={instance_name}");
+    let mut terminal: Vec<K> = list_by_field_selector(&api, &selector)
         .await?
-        .items
         .into_iter()
         .filter(|o| ref_name(o) == Some(instance_name))
         .filter(|o| matches!(phase_of(o), Some(Phase::Completed) | Some(Phase::Failed)))
