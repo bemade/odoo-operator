@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use tokio_postgres::NoTls;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::Result;
 
@@ -55,6 +55,35 @@ pub trait PostgresManager: Send + Sync {
         password: &str,
         db_name: &str,
         report_url: &str,
+    ) -> Result<()>;
+
+    /// Ensure the PostgreSQL extensions Odoo relies on exist in the tenant
+    /// database.
+    ///
+    /// Odoo creates `pg_trgm` unconditionally, and `unaccent` only when the
+    /// `--unaccent` flag is set, in `_initialize_db` — i.e. only for databases
+    /// Odoo itself creates. Databases that arrive by restore or clone (see
+    /// `scripts/restore-load-db.sh`, which uses `createdb` + `pg_restore`) never
+    /// run that path, so either extension can be missing.
+    ///
+    /// Without `unaccent`, `registry.has_unaccent` is false and Odoo silently
+    /// loses accent-insensitive search and deduplication across the whole
+    /// database. Reconciling it here rather than in the odoo.conf template is
+    /// what covers the restore and clone paths, and lets existing instances
+    /// self-heal.
+    ///
+    /// Both are trusted extensions on PG13+, so the tenant owner may create
+    /// them. Marking `unaccent` IMMUTABLE requires *ownership* of the function,
+    /// which a trusted-extension install leaves with the bootstrap superuser —
+    /// so that step uses the admin connection and is best-effort. Without it
+    /// Odoo reports the function PRESENT rather than INDEXABLE: fully
+    /// functional for search, but unusable as the basis of a trigram index.
+    async fn ensure_extensions(
+        &self,
+        pg: &PostgresClusterConfig,
+        username: &str,
+        password: &str,
+        db_name: &str,
     ) -> Result<()>;
 
     /// Query the running PostgreSQL server for its major version (e.g. 16, 17, 18).
@@ -182,6 +211,101 @@ impl PostgresManager for PgPostgresManager {
             info!(%db_name, %report_url, "set report.url system parameter");
         }
 
+        Ok(())
+    }
+
+    async fn ensure_extensions(
+        &self,
+        pg: &PostgresClusterConfig,
+        username: &str,
+        password: &str,
+        db_name: &str,
+    ) -> Result<()> {
+        // Tenant owner, not admin: the owner has CREATE on its own database,
+        // and both extensions are trusted, so no elevated connection is needed
+        // to install them.
+        let connstr = format!(
+            "host={} port={} user={} password={} dbname={}",
+            pg.host, pg.port, username, password, db_name
+        );
+        let (client, connection) = tokio_postgres::connect(&connstr, NoTls).await?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                warn!("postgres connection error: {e}");
+            }
+        });
+
+        // Check before creating so that the common case (both present) issues
+        // no DDL and logs nothing — this runs on every reconcile.
+        let rows = client
+            .query(
+                "SELECT extname FROM pg_extension WHERE extname IN ('pg_trgm', 'unaccent')",
+                &[],
+            )
+            .await?;
+        let present: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+
+        for ext in ["pg_trgm", "unaccent"] {
+            if present.iter().any(|e| e == ext) {
+                continue;
+            }
+            // Extension names here are hardcoded literals, not user input.
+            match client
+                .execute(&format!("CREATE EXTENSION IF NOT EXISTS {ext}"), &[])
+                .await
+            {
+                Ok(_) => info!(%db_name, %ext, "created postgres extension"),
+                Err(e) => {
+                    // Non-fatal: a missing extension degrades Odoo's search,
+                    // it does not stop the instance from serving.
+                    warn!(%db_name, %ext, %e, "failed to create postgres extension");
+                }
+            }
+        }
+
+        // `unaccent` must be IMMUTABLE to be indexable. provolatile is 'i' when
+        // immutable, 's' (stable) as shipped.
+        let volatility = client
+            .query_opt(
+                "SELECT provolatile FROM pg_proc \
+                 WHERE proname = 'unaccent' AND pronargs = 1 \
+                   AND pronamespace = current_schema::regnamespace",
+                &[],
+            )
+            .await?
+            .map(|r| r.get::<_, i8>(0));
+        if volatility == Some(b'i' as i8) {
+            return Ok(());
+        }
+
+        // Needs function ownership, which the tenant role does not have.
+        let admin_connstr = format!(
+            "host={} port={} user={} password={} dbname={}",
+            pg.host, pg.port, pg.admin_user, pg.admin_password, db_name
+        );
+        let (admin, admin_conn) = match tokio_postgres::connect(&admin_connstr, NoTls).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                debug!(%db_name, %e, "no admin connection for unaccent IMMUTABLE; leaving it stable");
+                return Ok(());
+            }
+        };
+        tokio::spawn(async move {
+            if let Err(e) = admin_conn.await {
+                warn!("postgres admin connection error: {e}");
+            }
+        });
+        match admin
+            .execute("ALTER FUNCTION unaccent(text) IMMUTABLE", &[])
+            .await
+        {
+            Ok(_) => info!(%db_name, "marked unaccent() IMMUTABLE"),
+            // Purely an optimisation: without it Odoo still uses unaccent for
+            // search, it just cannot build trigram indexes over it. Logged at
+            // debug so a cluster whose admin lacks the privilege does not warn
+            // on every reconcile.
+            Err(e) => debug!(%db_name, %e, "could not mark unaccent() IMMUTABLE"),
+        }
         Ok(())
     }
 
@@ -543,6 +667,15 @@ impl PostgresManager for NoopPostgresManager {
         &self,
         _: &PostgresClusterConfig,
         _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn ensure_extensions(
+        &self,
+        _: &PostgresClusterConfig,
         _: &str,
         _: &str,
         _: &str,
