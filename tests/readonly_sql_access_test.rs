@@ -35,6 +35,7 @@ fn make_instance_with_ro(ro_enabled: bool, connection_limit: i32) -> OdooInstanc
                 cluster: None,
                 name: Some("odoo_ae819407_a467_4155_b2b2_8f38c400fb1f".to_string()),
                 missing_policy: Default::default(),
+                unaccent: true,
             }),
             init: Default::default(),
             environment: Default::default(),

@@ -20,6 +20,12 @@
 //! 5. A database that already has the extensions is left alone and reports
 //!    success — the common path, run on every reconcile.
 //!
+//! 6. When the instance opts out (`spec.database.unaccent: false`), `unaccent`
+//!    is NOT created, but `pg_trgm` still is — Odoo creates pg_trgm
+//!    unconditionally itself, so the operator matches that rather than
+//!    inventing a difference. Opting out must not be a way to end up with a
+//!    database Odoo would not have produced on its own.
+//!
 //! NON-CRITERIA
 //!
 //! The behaviour when the admin cannot ALTER the function (a non-superuser
@@ -102,7 +108,7 @@ async fn creates_both_extensions_in_a_bare_tenant_db() -> anyhow::Result<()> {
     );
 
     pg_manager()
-        .ensure_extensions(&cluster_config(), owner, OWNER_PW, db)
+        .ensure_extensions(&cluster_config(), owner, OWNER_PW, db, true)
         .await?;
 
     // Criteria 1 and 2: created, over a NOSUPERUSER owner connection.
@@ -129,10 +135,10 @@ async fn is_idempotent_and_leaves_existing_extensions_alone() -> anyhow::Result<
     setup_tenant(owner, db).await;
 
     let mgr = pg_manager();
-    mgr.ensure_extensions(&cluster_config(), owner, OWNER_PW, db)
+    mgr.ensure_extensions(&cluster_config(), owner, OWNER_PW, db, true)
         .await?;
     // Criteria 4 and 5: the every-reconcile path.
-    mgr.ensure_extensions(&cluster_config(), owner, OWNER_PW, db)
+    mgr.ensure_extensions(&cluster_config(), owner, OWNER_PW, db, true)
         .await?;
 
     assert_eq!(
@@ -173,6 +179,28 @@ async fn tenant_owner_alone_cannot_make_unaccent_immutable() -> anyhow::Result<(
         message.contains("must be owner of function"),
         "unexpected failure mode: {message}"
     );
+
+    cleanup(owner, db).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn skips_unaccent_when_the_instance_opts_out() -> anyhow::Result<()> {
+    let owner = "odoo_ext_owner_optout";
+    let db = "odoo_test_ext_optout";
+    setup_tenant(owner, db).await;
+
+    pg_manager()
+        .ensure_extensions(&cluster_config(), owner, OWNER_PW, db, false)
+        .await?;
+
+    // Criterion 6: pg_trgm yes, unaccent no.
+    assert_eq!(
+        installed_extensions(owner, db).await,
+        vec!["pg_trgm".to_string()],
+        "opting out of unaccent must not also skip pg_trgm"
+    );
+    assert_eq!(unaccent_volatility(owner, db).await, None);
 
     cleanup(owner, db).await;
     Ok(())

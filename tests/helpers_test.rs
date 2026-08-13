@@ -149,6 +149,7 @@ fn make_instance(uid: Option<&str>, db_name: Option<&str>) -> OdooInstance {
                 cluster: None,
                 name: Some(n.to_string()),
                 missing_policy: Default::default(),
+                unaccent: true,
             }),
             init: Default::default(),
             environment: Default::default(),
