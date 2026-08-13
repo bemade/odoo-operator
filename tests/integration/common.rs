@@ -433,6 +433,16 @@ impl PostgresManager for MockPostgresManager {
         Ok(())
     }
 
+    async fn ensure_extensions(
+        &self,
+        _: &PostgresClusterConfig,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> PgResult<()> {
+        Ok(())
+    }
+
     async fn detect_server_major_version(&self, _: &PostgresClusterConfig) -> PgResult<u32> {
         Ok(18)
     }

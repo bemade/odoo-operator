@@ -452,7 +452,9 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
     }
 
     // Ensure report.url points to the in-cluster web service so cron workers
-    // can reach the report rendering endpoint (wkhtmltopdf via HTTP).
+    // can reach the report rendering endpoint (wkhtmltopdf via HTTP), and that
+    // the PostgreSQL extensions Odoo expects are present. Both read the same
+    // credentials, so they share one lookup.
     if snapshot.db_initialized {
         let report_url = format!("http://{name}:8069");
         let (odoo_user, odoo_pass) =
@@ -464,6 +466,17 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
             .await
         {
             warn!(%name, %e, "failed to set report.url — will retry next reconcile");
+        }
+        // Non-fatal: a missing extension degrades Odoo's search behaviour but
+        // does not stop the instance serving, so it must never block a
+        // reconcile. Note the running workers only pick up a newly created
+        // unaccent at registry load, i.e. on their next restart.
+        if let Err(e) = ctx
+            .postgres
+            .ensure_extensions(&pg_cluster, &odoo_user, &odoo_pass, &db)
+            .await
+        {
+            warn!(%name, %e, "failed to ensure postgres extensions — will retry next reconcile");
         }
     }
 
