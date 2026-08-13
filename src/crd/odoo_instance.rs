@@ -68,6 +68,26 @@ pub struct DatabaseSpec {
     /// See `DatabaseMissingPolicy`. Default `Ignore`.
     #[serde(default)]
     pub missing_policy: DatabaseMissingPolicy,
+    /// Whether to ensure the `unaccent` PostgreSQL extension exists in this
+    /// instance's database.
+    ///
+    /// Odoo treats unaccent as opt-in (the `--unaccent` startup flag, which
+    /// defaults off) because it changes search semantics database-wide:
+    /// with it, `ilike` matching folds accents, so "Montreal" matches
+    /// "Montréal". Most deployments want that, so this defaults to `true` —
+    /// but it is a behavioural change, not purely an optimisation, and an
+    /// operator should be able to decline it per instance.
+    ///
+    /// Setting this to `false` does not *remove* an already-installed
+    /// extension; it only stops the operator from creating one. Dropping it
+    /// is deliberately left as a manual action, since other objects may
+    /// already depend on it.
+    ///
+    /// `pg_trgm` is not configurable here: Odoo creates it unconditionally in
+    /// `_initialize_db`, so the operator matches that rather than inventing a
+    /// difference.
+    #[serde(default = "default_true")]
+    pub unaccent: bool,
 }
 
 /// Environment tags an OdooInstance as production or staging.  Used by:

@@ -439,6 +439,7 @@ impl PostgresManager for MockPostgresManager {
         _: &str,
         _: &str,
         _: &str,
+        _: bool,
     ) -> PgResult<()> {
         Ok(())
     }

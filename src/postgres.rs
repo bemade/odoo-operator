@@ -84,6 +84,7 @@ pub trait PostgresManager: Send + Sync {
         username: &str,
         password: &str,
         db_name: &str,
+        with_unaccent: bool,
     ) -> Result<()>;
 
     /// Query the running PostgreSQL server for its major version (e.g. 16, 17, 18).
@@ -220,6 +221,7 @@ impl PostgresManager for PgPostgresManager {
         username: &str,
         password: &str,
         db_name: &str,
+        with_unaccent: bool,
     ) -> Result<()> {
         // Tenant owner, not admin: the owner has CREATE on its own database,
         // and both extensions are trusted, so no elevated connection is needed
@@ -245,7 +247,14 @@ impl PostgresManager for PgPostgresManager {
             .await?;
         let present: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
 
-        for ext in ["pg_trgm", "unaccent"] {
+        // pg_trgm unconditionally, matching Odoo's own _initialize_db;
+        // unaccent only when the instance opts in.
+        let wanted: &[&str] = if with_unaccent {
+            &["pg_trgm", "unaccent"]
+        } else {
+            &["pg_trgm"]
+        };
+        for ext in wanted.iter().copied() {
             if present.iter().any(|e| e == ext) {
                 continue;
             }
@@ -261,6 +270,10 @@ impl PostgresManager for PgPostgresManager {
                     warn!(%db_name, %ext, %e, "failed to create postgres extension");
                 }
             }
+        }
+
+        if !with_unaccent {
+            return Ok(());
         }
 
         // `unaccent` must be IMMUTABLE to be indexable. provolatile is 'i' when
@@ -679,6 +692,7 @@ impl PostgresManager for NoopPostgresManager {
         _: &str,
         _: &str,
         _: &str,
+        _: bool,
     ) -> Result<()> {
         Ok(())
     }
