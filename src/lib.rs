@@ -6,3 +6,4 @@ pub mod notify;
 pub mod postgres;
 pub mod tls;
 pub mod webhook;
+pub mod webhook_cert_repair;
