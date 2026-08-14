@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.6.0](https://github.com/bemade/odoo-operator/compare/v2.5.0...v2.6.0) (2026-08-14)
+
+
+### Features
+
+* **crd:** make unaccent opt-out via spec.database.unaccent ([2e77bb9](https://github.com/bemade/odoo-operator/commit/2e77bb9e3439e92cd1a566f321583af104a697cb))
+* **postgres:** ensure pg_trgm and unaccent exist in tenant databases ([aa65c2d](https://github.com/bemade/odoo-operator/commit/aa65c2d188ef3d489b58a9f1f47850771161bb41))
+
 ## [2.5.0](https://github.com/bemade/odoo-operator/compare/v2.4.2...v2.5.0) (2026-07-09)
 
 
