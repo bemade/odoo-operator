@@ -16,6 +16,7 @@ use odoo_operator::controller;
 use odoo_operator::helpers::OperatorDefaults;
 use odoo_operator::postgres::PgPostgresManager;
 use odoo_operator::webhook;
+use odoo_operator::webhook_cert_repair;
 
 /// Parse a JSON-encoded string into `Option<T>`. Empty / `{}` / `null` → `None`.
 fn parse_json_opt<T: serde::de::DeserializeOwned>(
@@ -123,6 +124,15 @@ struct Args {
     operator_namespace: String,
 
     /// Port for the validating webhook HTTPS server.
+    /// Secret holding the webhook CA whose public half is injected into the
+    /// ValidatingWebhookConfiguration's caBundle.
+    #[arg(long, default_value = "", env = "WEBHOOK_CA_SECRET")]
+    webhook_ca_secret: String,
+
+    /// Secret holding the webhook serving certificate.
+    #[arg(long, default_value = "", env = "WEBHOOK_CERT_SECRET")]
+    webhook_cert_secret: String,
+
     #[arg(long, default_value = "9443", env = "WEBHOOK_PORT")]
     webhook_port: u16,
 
@@ -209,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
             affinity: default_affinity,
             tolerations: default_tolerations,
         },
-        operator_namespace: args.operator_namespace,
+        operator_namespace: args.operator_namespace.clone(),
         postgres_clusters_secret: args.postgres_clusters_secret,
         postgres: Arc::new(PgPostgresManager),
         http_client: reqwest::Client::builder()
@@ -228,6 +238,9 @@ async fn main() -> anyhow::Result<()> {
         .expect("failed to bind webhook listener");
     let tls_cert = args.webhook_tls_cert;
     let tls_key = args.webhook_tls_key;
+    let cert_repair_ns = args.operator_namespace.clone();
+    let webhook_ca_secret = args.webhook_ca_secret.clone();
+    let webhook_cert_secret = args.webhook_cert_secret.clone();
 
     // Parse health probe bind address (e.g. ":8081" or "0.0.0.0:8081").
     let health_addr: std::net::SocketAddr = args
@@ -250,10 +263,29 @@ async fn main() -> anyhow::Result<()> {
 
     // Run the OdooInstance controller (which now absorbs all job lifecycle
     // logic via the state machine), webhook server, and health probes.
+    // The certificate checker only runs when both secret names are supplied;
+    // an operator deployed without them keeps the previous behaviour rather
+    // than guessing at resource names it might delete.
+    let cert_repair = async {
+        if webhook_ca_secret.is_empty() || webhook_cert_secret.is_empty() {
+            info!("webhook cert secret names not configured; consistency checker disabled");
+            std::future::pending::<()>().await;
+        } else {
+            webhook_cert_repair::run(
+                client.clone(),
+                cert_repair_ns,
+                webhook_ca_secret,
+                webhook_cert_secret,
+            )
+            .await;
+        }
+    };
+
     tokio::select! {
         _ = controller::odoo_instance::run(ctx.clone()) => {},
         _ = webhook::run(webhook_listener, &tls_cert, &tls_key) => {},
         _ = warp::serve(health_routes).run(health_addr) => {},
+        _ = cert_repair => {},
     }
 
     Ok(())
