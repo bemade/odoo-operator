@@ -15,6 +15,25 @@ spec:
   isCA: true
   commonName: {{ .Release.Name }}-webhook-ca
   secretName: {{ .Release.Name }}-webhook-ca
+  # Long-lived on purpose. With cert-manager's defaults (90d duration, 30d
+  # renewBefore) this CA and the serving certificate it signs share an
+  # identical renewalTime, so they renew in the same instant. When that
+  # happens the leaf can be signed by the outgoing CA while cainjector
+  # publishes the incoming one into the webhook's caBundle, and every
+  # admission request then fails with:
+  #
+  #   x509: certificate signed by unknown authority
+  #     (candidate authority certificate "<release>-webhook-ca")
+  #
+  # That blocks *all* OdooInstance writes cluster-wide until the leaf is
+  # re-issued. Observed 2026-08-14. Giving the CA a 5-year life takes it out
+  # of the leaf's renewal cycle entirely.
+  #
+  # NB cert-manager does not re-issue leaves when the CA rotates, so the
+  # eventual CA renewal still needs the serving certificate re-issued
+  # alongside it -- once every 5 years rather than every 60 days.
+  duration: 43800h # 5y
+  renewBefore: 720h # 30d
   issuerRef:
     kind: Issuer
     name: {{ .Release.Name }}-selfsigned-issuer
