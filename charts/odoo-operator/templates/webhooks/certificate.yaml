@@ -11,3 +11,7 @@ spec:
     kind: Issuer
     name: {{ .Release.Name }}-ca-issuer
   secretName: {{ .Release.Name }}-webhook-cert
+  # Explicit rather than relying on defaults, so the relationship to the CA's
+  # much longer lifetime is visible at a glance.
+  duration: 2160h # 90d
+  renewBefore: 720h # 30d
