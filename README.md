@@ -108,6 +108,7 @@ module. To skip auto-init (e.g. when restoring from a backup), set
 | `productionInstanceRef.namespace` | same as target | Reserved for a future cross-namespace phase; must equal (or omit) the target's namespace in v1 |
 | `filestore.storageSize` | `2Gi` | PVC size. Can only be increased, not decreased |
 | `filestore.storageClass` | operator default | StorageClass for the filestore PVC. Immutable after creation |
+| `filestore.emptyDir` | `false` | Run the filestore on a per-pod `emptyDir` instead of a PVC, for instances whose attachments live in external object storage and whose sessions live in a non-filesystem store. No PVC is created; an existing one is retained (never deleted), so the flip is reversible. Backups become database-only; restore and staging-refresh skip the filestore step. Mutually exclusive with `storageSize`/`storageClass` |
 | `resources` | operator default | CPU/memory requests and limits for web pods |
 | `cron.replicas` | `1` | Number of cron pods (see [Web/Cron Split](#webcron-split) below) |
 | `cron.resources` | same as `resources` | CPU/memory requests and limits for cron pods |
@@ -220,6 +221,14 @@ The validating webhook rejects:
 - `spec.filestore.storageSize` decreases
 - `spec.filestore.storageClass` changes after initial set
 - `spec.database.cluster` changes after initial set
+- `spec.filestore.storageSize`/`storageClass` set or changed together with
+  `emptyDir: true` (values left over from before a flip to `emptyDir` are
+  tolerated with a warning and removed by the operator's defaulting pass)
+
+A transition to `filestore.emptyDir: true` is allowed but returns an
+admission warning spelling out the contract: the existing PVC is retained
+but no longer mounted, and the instance is expected to keep attachments in
+external storage and sessions in a non-filesystem store.
 
 ### Operator flags
 
