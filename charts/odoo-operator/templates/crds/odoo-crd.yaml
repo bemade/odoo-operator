@@ -748,6 +748,17 @@ spec:
                 description: FilestoreSpec defines persistent storage for the Odoo filestore.
                 nullable: true
                 properties:
+                  emptyDir:
+                    default: false
+                    description: |-
+                      Run the filestore on a per-pod `emptyDir` instead of a PersistentVolumeClaim.
+
+                      Setting this is declaring that the filestore holds nothing worth preserving: attachments live in external object storage (e.g. an OCA `fs_attachment` S3 backend) and sessions in a non-filesystem store, so what remains on disk is regenerable (asset caches, temp files). It is the operator user's responsibility to have moved attachments and sessions out first — the operator does not inspect the database.
+
+                      Semantics when true: - no filestore PVC is created; an existing one is RETAINED, never deleted, so flipping back to persistent storage is lossless and a premature flip orphans data recoverably instead of destroying it; - `storageSize` / `storageClass` must not be set (webhook-rejected); - backup jobs run database-only (`withFilestore` is forced off); - restore and staging-refresh jobs skip the filestore step.
+
+                      The field is mutable in both directions.
+                    type: boolean
                   storageClass:
                     nullable: true
                     type: string

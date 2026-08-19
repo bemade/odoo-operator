@@ -121,7 +121,7 @@ fn test_odoo_security_context_values() {
 
 #[test]
 fn test_odoo_volumes_names_and_sources() {
-    let vols = odoo_volumes("my-odoo");
+    let vols = odoo_volumes("my-odoo", false);
     assert_eq!(vols.len(), 2);
 
     // Filestore PVC volume
@@ -133,6 +133,43 @@ fn test_odoo_volumes_names_and_sources() {
     assert_eq!(vols[1].name, "odoo-conf");
     let cm = vols[1].config_map.as_ref().unwrap();
     assert_eq!(cm.name, "my-odoo-odoo-conf");
+}
+
+#[test]
+fn test_is_ephemeral_predicate() {
+    use odoo_operator::crd::odoo_instance::FilestoreSpec;
+
+    let mut inst = test_instance("pred", None);
+    assert!(!is_ephemeral(&inst), "no filestore spec → persistent");
+
+    inst.spec.filestore = Some(FilestoreSpec {
+        storage_size: Some("2Gi".into()),
+        storage_class: None,
+        empty_dir: false,
+    });
+    assert!(!is_ephemeral(&inst), "emptyDir absent/false → persistent");
+
+    inst.spec.filestore = Some(FilestoreSpec {
+        storage_size: None,
+        storage_class: None,
+        empty_dir: true,
+    });
+    assert!(is_ephemeral(&inst));
+}
+
+#[test]
+fn test_odoo_volumes_ephemeral_filestore() {
+    let vols = odoo_volumes("my-odoo", true);
+    assert_eq!(vols.len(), 2);
+
+    // Filestore is an emptyDir — same volume name, so every mount in the
+    // pod templates keeps working unchanged; no PVC reference anywhere.
+    assert_eq!(vols[0].name, "filestore");
+    assert!(vols[0].empty_dir.is_some());
+    assert!(vols[0].persistent_volume_claim.is_none());
+
+    // ConfigMap volume unaffected
+    assert_eq!(vols[1].name, "odoo-conf");
 }
 
 // ── odoo_volume_mounts ──────────────────────────────────────────────────────

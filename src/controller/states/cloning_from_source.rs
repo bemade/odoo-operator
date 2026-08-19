@@ -24,8 +24,8 @@ use crate::{controller::child_resources, crd::odoo_instance::OdooInstance};
 
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{
-    apply_extra_env, cm_env, controller_owner_ref, cron_depl_name, env, odoo_volume_mounts,
-    pg_tools_image, staging_mail_env_vars, OdooJobBuilder, FIELD_MANAGER,
+    apply_extra_env, cm_env, controller_owner_ref, cron_depl_name, env, is_ephemeral,
+    odoo_volume_mounts, pg_tools_image, staging_mail_env_vars, OdooJobBuilder, FIELD_MANAGER,
 };
 use crate::controller::state_machine::scale_deployment;
 use crate::helpers::sha256_hex;
@@ -355,7 +355,15 @@ impl State for CloningFromSource {
         // Mode-agnostic gate: the start guard and completion check both
         // ride on `filestore_phase`, set to Running once kickoff succeeds
         // and Completed/Failed when the underlying work terminates.
-        if !refresh.spec.skip_filestore
+        //
+        // An ephemeral filestore on either end skips the step entirely, like
+        // `skipFilestore`: an emptyDir source has no PVC to snapshot or copy
+        // from, and an emptyDir target has no PVC to copy into (its filestore
+        // is declared regenerable, so there is nothing the clone would need
+        // to carry over).
+        let filestore_skipped =
+            refresh.spec.skip_filestore || is_ephemeral(instance) || is_ephemeral(&source_instance);
+        if !filestore_skipped
             && refresh
                 .status
                 .as_ref()
@@ -605,7 +613,7 @@ impl State for CloningFromSource {
                 .and_then(|s| s.db_job_phase.as_ref()),
         )
         .await;
-        let fs_done = refresh.spec.skip_filestore
+        let fs_done = filestore_skipped
             || matches!(
                 refresh
                     .status

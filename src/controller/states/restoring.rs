@@ -268,13 +268,25 @@ impl State for Restoring {
             empty_dir: Some(Default::default()),
             ..Default::default()
         };
-        let filestore_vol = Volume {
-            name: "filestore".into(),
-            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                claim_name: format!("{instance_name}-filestore-pvc"),
-                read_only: Some(false),
-            }),
-            ..Default::default()
+        // With an ephemeral filestore there is no PVC to restore into: mount
+        // a job-local emptyDir so a zip that carries a filestore still
+        // restores (database applied, filestore payload discarded with the
+        // job) — the DB-only-on-principle counterpart to the backup side.
+        let filestore_vol = if crate::controller::helpers::is_ephemeral(instance) {
+            Volume {
+                name: "filestore".into(),
+                empty_dir: Some(Default::default()),
+                ..Default::default()
+            }
+        } else {
+            Volume {
+                name: "filestore".into(),
+                persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                    claim_name: format!("{instance_name}-filestore-pvc"),
+                    read_only: Some(false),
+                }),
+                ..Default::default()
+            }
         };
 
         let job = OdooJobBuilder::new(&format!("{crd_name}-"), &ns, restore_job, instance)

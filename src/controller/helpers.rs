@@ -101,9 +101,17 @@ pub fn odoo_security_context() -> PodSecurityContext {
 }
 
 /// Standard volumes shared by the instance Deployment and every job pod:
-/// the filestore PVC and the odoo-conf ConfigMap.
-pub fn odoo_volumes(instance_name: &str) -> Vec<Volume> {
-    vec![
+/// the filestore (PVC, or a per-pod emptyDir when `ephemeral`) and the
+/// odoo-conf ConfigMap. This is the single seam where the filestore volume
+/// source is chosen — every pod the operator creates goes through it.
+pub fn odoo_volumes(instance_name: &str, ephemeral: bool) -> Vec<Volume> {
+    let filestore = if ephemeral {
+        Volume {
+            name: "filestore".to_string(),
+            empty_dir: Some(Default::default()),
+            ..Default::default()
+        }
+    } else {
         Volume {
             name: "filestore".to_string(),
             persistent_volume_claim: Some(
@@ -113,7 +121,10 @@ pub fn odoo_volumes(instance_name: &str) -> Vec<Volume> {
                 },
             ),
             ..Default::default()
-        },
+        }
+    };
+    vec![
+        filestore,
         Volume {
             name: "odoo-conf".to_string(),
             config_map: Some(k8s_openapi::api::core::v1::ConfigMapVolumeSource {
@@ -243,6 +254,17 @@ pub fn cron_depl_name(instance: &OdooInstance) -> String {
     instance.name_any().to_string() + "-cron"
 }
 
+/// True when the instance's filestore is declared ephemeral
+/// (`spec.filestore.emptyDir`). See [`FilestoreSpec::empty_dir`] for the
+/// contract this implies.
+pub fn is_ephemeral(instance: &OdooInstance) -> bool {
+    instance
+        .spec
+        .filestore
+        .as_ref()
+        .is_some_and(|f| f.empty_dir)
+}
+
 /// Image carrying pg client tools (`psql`, `pg_dump`, `pg_restore`, `createdb`)
 /// that match a server major version. pg_dump/pg_restore must be ≥ the server
 /// major on both ends of a pipe, so callers should pass `max(src_major, dst_major)`.
@@ -298,7 +320,7 @@ impl OdooJobBuilder {
             namespace: ns.to_string(),
             owner_ref: controller_owner_ref(owner),
             pull_secrets: image_pull_secrets(instance),
-            volumes: odoo_volumes(&instance_name),
+            volumes: odoo_volumes(&instance_name, is_ephemeral(instance)),
             containers: vec![],
             init_containers: None,
             active_deadline: None,
