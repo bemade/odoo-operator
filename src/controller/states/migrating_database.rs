@@ -11,6 +11,7 @@ use k8s_openapi::api::{
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams, ResourceExt};
 use serde_json::json;
+use std::collections::BTreeMap;
 use tracing::{info, warn};
 
 use crate::crd::odoo_instance::OdooInstance;
@@ -18,13 +19,23 @@ use crate::error::Result;
 use crate::postgres::PostgresClusterConfig;
 
 use super::super::helpers::{
-    cron_depl_name, env, image_pull_secrets, odoo_security_context, pg_tools_image, FIELD_MANAGER,
+    cron_depl_name, delete_job_credentials_secret, ensure_job_credentials_secret, env,
+    image_pull_secrets, odoo_security_context, pg_tools_image, secret_env, FIELD_MANAGER,
 };
 use super::super::odoo_instance::{load_postgres_cluster_by_name, Context};
 use super::super::state_machine::{scale_deployment, ReconcileSnapshot};
 use super::State;
 
 const MIGRATE_SCRIPT: &str = include_str!("../../../scripts/migrate-database.sh");
+
+/// Name of the short-lived Secret holding the two cluster admin passwords the
+/// migration Job needs.  The tenant namespace cannot `secretKeyRef` the
+/// operator-namespace `postgres-clusters` Secret (secretKeyRef is
+/// namespace-local), so the operator materialises the two values it needs here
+/// and removes the Secret once the migration settles.
+pub fn migration_creds_secret_name(inst_name: &str) -> String {
+    format!("{inst_name}-migrate-db-creds")
+}
 
 pub struct MigratingDatabase;
 
@@ -77,7 +88,29 @@ pub async fn begin_database_migration(instance: &OdooInstance, ctx: &Context) ->
     let odoo_conf_name = format!("{inst_name}-odoo-conf");
     let db = crate::helpers::db_name(instance);
 
-    let migration_env = build_migration_env(&old_pg, &new_pg, &odoo_conf_name, &db);
+    // Materialise the cluster admin passwords into a short-lived Secret in the
+    // tenant namespace so the Job can reference them rather than carrying them
+    // as literal env values in its own manifest.
+    let creds_secret = migration_creds_secret_name(&inst_name);
+    ensure_job_credentials_secret(
+        client,
+        &ns,
+        &creds_secret,
+        instance,
+        BTreeMap::from([
+            (
+                "SRC_ADMIN_PASSWORD".to_string(),
+                old_pg.admin_password.clone(),
+            ),
+            (
+                "DST_ADMIN_PASSWORD".to_string(),
+                new_pg.admin_password.clone(),
+            ),
+        ]),
+    )
+    .await?;
+
+    let migration_env = build_migration_env(&old_pg, &new_pg, &odoo_conf_name, &db, &creds_secret);
 
     // Detect server major versions on both clusters and pick an image whose
     // pg client tools satisfy `pg_dump/pg_restore >= server_major` on both ends.
@@ -142,6 +175,10 @@ pub async fn rollback_database_migration(instance: &OdooInstance, ctx: &Context)
         let _ = jobs.delete(job_name, &DeleteParams::background()).await;
     }
 
+    // Drop the short-lived admin-credential Secret along with the Job.
+    let _ =
+        delete_job_credentials_secret(client, &ns, &migration_creds_secret_name(&inst_name)).await;
+
     // Revert spec.database.cluster to previous value.
     let api: Api<OdooInstance> = Api::namespaced(client.clone(), &ns);
     if prev_cluster != "unknown" {
@@ -177,19 +214,20 @@ fn build_migration_env(
     new_pg: &PostgresClusterConfig,
     odoo_conf_name: &str,
     db_name: &str,
+    creds_secret: &str,
 ) -> Vec<EnvVar> {
     use super::super::helpers::cm_env;
     vec![
-        // Source cluster (admin creds injected directly).
+        // Source cluster (admin password via secretKeyRef, never a literal).
         env("SRC_HOST", &old_pg.host),
         env("SRC_PORT", old_pg.port.to_string()),
         env("SRC_ADMIN_USER", &old_pg.admin_user),
-        env("SRC_ADMIN_PASSWORD", &old_pg.admin_password),
-        // Destination cluster (admin creds injected directly).
+        secret_env("SRC_ADMIN_PASSWORD", creds_secret, "SRC_ADMIN_PASSWORD"),
+        // Destination cluster (admin password via secretKeyRef, never a literal).
         env("DST_HOST", &new_pg.host),
         env("DST_PORT", new_pg.port.to_string()),
         env("DST_ADMIN_USER", &new_pg.admin_user),
-        env("DST_ADMIN_PASSWORD", &new_pg.admin_password),
+        secret_env("DST_ADMIN_PASSWORD", creds_secret, "DST_ADMIN_PASSWORD"),
         // Odoo role credentials (from ConfigMap, which has already been
         // updated to point to the new cluster — but user/password are the same).
         cm_env("DB_USER", odoo_conf_name, "db_user"),

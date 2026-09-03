@@ -8,7 +8,9 @@
 #   BACKUP_FORMAT              — "zip" | "sql" | "dump"
 #                                (zip and sql produce dump.sql; dump produces dump.dump)
 
-set -ex
+# Do NOT add -x here: the shell trace expands secrets held in env into the
+# container log, which ships to the cluster log aggregator.
+set -e
 export PGPASSWORD=$PASSWORD
 echo "=== pg_dump $DB_NAME from $HOST:$PORT (format=$BACKUP_FORMAT) ==="
 

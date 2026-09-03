@@ -20,7 +20,10 @@ use crate::error::Result;
 use crate::notify;
 
 use super::{Context, ReconcileSnapshot, State};
-use crate::controller::helpers::{cm_env, env, pg_tools_image, OdooJobBuilder, FIELD_MANAGER};
+use crate::controller::helpers::{
+    cm_env, ensure_job_credentials_secret, env, pg_tools_image, secret_env, OdooJobBuilder,
+    FIELD_MANAGER,
+};
 
 const DUMP_SCRIPT: &str = include_str!("../../../scripts/backup-dump.sh");
 const PACKAGE_SCRIPT: &str = include_str!("../../../scripts/backup-package.sh");
@@ -117,13 +120,36 @@ impl State for BackingUp {
             env("MC_CONFIG_DIR", "/tmp/.mc"),
         ];
 
+        // S3 credentials reach the upload container as a secretKeyRef, never as
+        // a literal env value: a literal is readable by anyone who can `get` the
+        // Job and is recorded in the audit log and etcd.  When the referenced
+        // Secret already lives in this namespace we point straight at it;
+        // otherwise (secretKeyRef is namespace-local) the operator copies the
+        // two keys into a short-lived Secret owned by the instance.
         if let Some(ref secret_ref) = dest.s3_credentials_secret_ref {
             let secret_ns = secret_ref.namespace.as_deref().unwrap_or(&ns);
             let secret_name = secret_ref.name.as_deref().unwrap_or_default();
-            if let Ok((ak, sk)) = notify::read_s3_credentials(client, secret_name, secret_ns).await
+            if secret_ns == ns {
+                upload_env.push(secret_env("AWS_ACCESS_KEY_ID", secret_name, "accessKey"));
+                upload_env.push(secret_env(
+                    "AWS_SECRET_ACCESS_KEY",
+                    secret_name,
+                    "secretKey",
+                ));
+            } else if let Ok((ak, sk)) =
+                notify::read_s3_credentials(client, secret_name, secret_ns).await
             {
-                upload_env.push(env("AWS_ACCESS_KEY_ID", ak));
-                upload_env.push(env("AWS_SECRET_ACCESS_KEY", sk));
+                let local = format!("{instance_name}-backup-s3-creds");
+                ensure_job_credentials_secret(
+                    client,
+                    &ns,
+                    &local,
+                    instance,
+                    BTreeMap::from([("accessKey".to_string(), ak), ("secretKey".to_string(), sk)]),
+                )
+                .await?;
+                upload_env.push(secret_env("AWS_ACCESS_KEY_ID", &local, "accessKey"));
+                upload_env.push(secret_env("AWS_SECRET_ACCESS_KEY", &local, "secretKey"));
             }
         }
 

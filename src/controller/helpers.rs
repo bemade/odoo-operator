@@ -5,18 +5,22 @@
 //! Pure utility functions (naming, crypto, config generation) live in
 //! `crate::helpers` instead.
 
+use std::collections::BTreeMap;
+
 use k8s_openapi::api::{
     batch::v1::{Job, JobSpec},
     core::v1::{
         Affinity, ConfigMapKeySelector, Container, EnvVar, EnvVarSource, LocalObjectReference,
-        PodSecurityContext, PodSpec, PodTemplateSpec, SecretKeySelector, Volume, VolumeMount,
+        PodSecurityContext, PodSpec, PodTemplateSpec, Secret, SecretKeySelector, Volume,
+        VolumeMount,
     },
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::api::ObjectMeta;
-use kube::{Resource, ResourceExt};
+use kube::api::{Api, DeleteParams, ObjectMeta, Patch, PatchParams};
+use kube::{Client, Resource, ResourceExt};
 
 use crate::crd::odoo_instance::OdooInstance;
+use crate::error::Result;
 
 /// Field manager name used for server-side apply patches.
 pub const FIELD_MANAGER: &str = "odoo-operator";
@@ -190,6 +194,66 @@ pub fn secret_env(env_name: &str, secret_name: &str, key: &str) -> EnvVar {
             ..Default::default()
         }),
         ..Default::default()
+    }
+}
+
+/// Materialise a short-lived Secret in `ns` holding credentials that a Job
+/// needs, so they can be injected with `secret_env` instead of as literal
+/// `EnvVar.value`s.
+///
+/// A literal value is readable by anyone who can `get` the Job (no Secret RBAC
+/// required), is recorded verbatim in the API-server audit log, and persists in
+/// etcd and etcd backups.  A `secretKeyRef` is none of those things.
+///
+/// The Secret is owned by `owner` so it is garbage-collected when the owner is
+/// deleted; callers should still remove it explicitly via
+/// [`delete_job_credentials_secret`] once the Job has finished with it.
+pub async fn ensure_job_credentials_secret<K>(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    owner: &K,
+    data: BTreeMap<String, String>,
+) -> Result<()>
+where
+    K: Resource<DynamicType = ()>,
+{
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
+    let secret = Secret {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(ns.to_string()),
+            owner_references: Some(vec![controller_owner_ref(owner)]),
+            labels: Some(BTreeMap::from([(
+                "app.kubernetes.io/managed-by".to_string(),
+                FIELD_MANAGER.to_string(),
+            )])),
+            ..Default::default()
+        },
+        string_data: Some(data),
+        type_: Some("Opaque".to_string()),
+        ..Default::default()
+    };
+    secrets
+        .patch(
+            name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(&secret),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Delete a Secret created by [`ensure_job_credentials_secret`].
+///
+/// A missing Secret is not an error: the owner reference may already have
+/// collected it, or a previous pass may have deleted it.
+pub async fn delete_job_credentials_secret(client: &Client, ns: &str, name: &str) -> Result<()> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
+    match secrets.delete(name, &DeleteParams::default()).await {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(()),
+        Err(e) => Err(e.into()),
     }
 }
 

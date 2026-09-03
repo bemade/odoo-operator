@@ -8,7 +8,9 @@
 #   BACKUP_FORMAT   — "zip" or "dump"
 #   OUTPUT_FILE     — target path, e.g. /mnt/backup/backup.zip
 
-set -ex
+# Do NOT add -x here: the shell trace expands secrets held in env into the
+# container log, which ships to the cluster log aggregator.
+set -e
 echo "=== Downloading backup from Odoo instance ==="
 echo "URL: $ODOO_URL  DB: $SOURCE_DB"
 
