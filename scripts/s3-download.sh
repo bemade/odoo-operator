@@ -10,7 +10,9 @@
 #   S3_INSECURE  — set to "true" to skip TLS verification
 #   MC_CONFIG_DIR — defaults to /tmp/.mc
 
-set -ex
+# Do NOT add -x here: the shell trace expands secrets held in env into the
+# container log, which ships to the cluster log aggregator.
+set -e
 echo "=== Downloading backup from S3 ==="
 echo "Endpoint: $S3_ENDPOINT  Bucket: $S3_BUCKET  Key: $S3_KEY"
 

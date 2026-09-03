@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use k8s_openapi::api::{
     batch::v1::Job,
@@ -18,8 +20,8 @@ use crate::notify;
 
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{
-    apply_extra_env, cm_env, cron_depl_name, env, pg_tools_image, staging_mail_env_vars,
-    OdooJobBuilder, FIELD_MANAGER,
+    apply_extra_env, cm_env, cron_depl_name, ensure_job_credentials_secret, env, pg_tools_image,
+    secret_env, staging_mail_env_vars, OdooJobBuilder, FIELD_MANAGER,
 };
 use crate::controller::state_machine::scale_deployment;
 
@@ -28,6 +30,18 @@ const ODOO_DOWNLOAD_SCRIPT: &str = include_str!("../../../scripts/odoo-download.
 const EXTRACT_SCRIPT: &str = include_str!("../../../scripts/restore-extract.sh");
 const LOAD_DB_SCRIPT: &str = include_str!("../../../scripts/restore-load-db.sh");
 const NEUTRALIZE_SCRIPT: &str = include_str!("../../../scripts/restore-neutralize.sh");
+
+/// Name of the short-lived Secret holding whichever source credential the
+/// restore Job needs (S3 keys, or the source instance's master password).
+///
+/// Owned by the OdooRestoreJob, so it is garbage-collected with it.  Unlike the
+/// migration credentials — which are cluster-wide superuser passwords and so
+/// are deleted explicitly the moment the Job is done — these are no broader
+/// than the OdooRestoreJob that already carries them, so the owner reference is
+/// a sufficient lifetime.
+pub fn restore_creds_secret_name(crd_name: &str) -> String {
+    format!("{crd_name}-restore-creds")
+}
 
 /// Restoring: restore job running, deployment must be down.
 ///
@@ -123,14 +137,35 @@ impl State for Restoring {
                         env("OUTPUT_FILE", output_file),
                         env("MC_CONFIG_DIR", "/tmp/.mc"),
                     ];
+                    // Injected by reference, never as a literal env value —
+                    // see the equivalent note in `backing_up.rs`.
                     if let Some(ref secret_ref) = s3.s3_credentials_secret_ref {
                         let secret_ns = secret_ref.namespace.as_deref().unwrap_or(&ns);
                         let secret_name = secret_ref.name.as_deref().unwrap_or_default();
-                        if let Ok((ak, sk)) =
+                        if secret_ns == ns {
+                            dl_env.push(secret_env("AWS_ACCESS_KEY_ID", secret_name, "accessKey"));
+                            dl_env.push(secret_env(
+                                "AWS_SECRET_ACCESS_KEY",
+                                secret_name,
+                                "secretKey",
+                            ));
+                        } else if let Ok((ak, sk)) =
                             notify::read_s3_credentials(client, secret_name, secret_ns).await
                         {
-                            dl_env.push(env("AWS_ACCESS_KEY_ID", ak));
-                            dl_env.push(env("AWS_SECRET_ACCESS_KEY", sk));
+                            let local = restore_creds_secret_name(&crd_name);
+                            ensure_job_credentials_secret(
+                                client,
+                                &ns,
+                                &local,
+                                restore_job,
+                                BTreeMap::from([
+                                    ("accessKey".to_string(), ak),
+                                    ("secretKey".to_string(), sk),
+                                ]),
+                            )
+                            .await?;
+                            dl_env.push(secret_env("AWS_ACCESS_KEY_ID", &local, "accessKey"));
+                            dl_env.push(secret_env("AWS_SECRET_ACCESS_KEY", &local, "secretKey"));
                         }
                     }
                     init_containers.push(Container {
@@ -156,16 +191,29 @@ impl State for Restoring {
                     } else {
                         "zip"
                     };
+                    // The master password comes off the CRD spec, but it must
+                    // not be copied into the Job manifest as a literal value —
+                    // that widens it from OdooRestoreJob readers to anyone who
+                    // can `get jobs`, and writes it to the audit log.
+                    let creds = restore_creds_secret_name(&crd_name);
+                    ensure_job_credentials_secret(
+                        client,
+                        &ns,
+                        &creds,
+                        restore_job,
+                        BTreeMap::from([(
+                            "masterPassword".to_string(),
+                            odoo_src.master_password.clone().unwrap_or_default(),
+                        )]),
+                    )
+                    .await?;
                     let dl_env = vec![
                         env("ODOO_URL", odoo_src.url.clone()),
                         env(
                             "SOURCE_DB",
                             odoo_src.source_database.clone().unwrap_or_default(),
                         ),
-                        env(
-                            "MASTER_PASSWORD",
-                            odoo_src.master_password.clone().unwrap_or_default(),
-                        ),
+                        secret_env("MASTER_PASSWORD", &creds, "masterPassword"),
                         env("BACKUP_FORMAT", backup_format),
                         env("OUTPUT_FILE", output_file),
                     ];

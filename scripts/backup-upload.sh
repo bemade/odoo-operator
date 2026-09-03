@@ -12,7 +12,9 @@
 # Reads ARTIFACT and FILENAME from /workspace/.artifact-meta written by the
 # package init container.
 
-set -ex
+# Do NOT add -x here: the shell trace expands secrets held in env into the
+# container log, which ships to the cluster log aggregator.
+set -e
 MC_CONFIG_DIR="${MC_CONFIG_DIR:-/tmp/.mc}"
 mkdir -p "$MC_CONFIG_DIR"
 

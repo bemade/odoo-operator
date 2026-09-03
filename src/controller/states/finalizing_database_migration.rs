@@ -14,7 +14,7 @@ use crate::crd::odoo_instance::OdooInstance;
 use crate::error::Result;
 use crate::helpers::odoo_username;
 
-use super::super::helpers::{cron_depl_name, FIELD_MANAGER};
+use super::super::helpers::{cron_depl_name, delete_job_credentials_secret, FIELD_MANAGER};
 use super::super::odoo_instance::{load_postgres_cluster_by_name, Context};
 use super::super::state_machine::{scale_deployment, ReconcileSnapshot};
 use super::State;
@@ -61,7 +61,15 @@ pub async fn complete_database_migration(instance: &OdooInstance, ctx: &Context)
         }
     }
 
-    // 2. Clean up old role/database on the source cluster (best-effort).
+    // 2. Drop the short-lived Secret that held the two cluster admin passwords.
+    //    Its owner reference would collect it eventually, but the credentials
+    //    should not outlive the Job that needed them.
+    let creds_secret = super::migrating_database::migration_creds_secret_name(&inst_name);
+    if let Err(e) = delete_job_credentials_secret(client, &ns, &creds_secret).await {
+        warn!(%inst_name, %creds_secret, %e, "failed to delete migration credentials secret");
+    }
+
+    // 3. Clean up old role/database on the source cluster (best-effort).
     if let Some(ref old_cluster_name) = instance
         .status
         .as_ref()
@@ -88,7 +96,7 @@ pub async fn complete_database_migration(instance: &OdooInstance, ctx: &Context)
         }
     }
 
-    // 3. Update activeCluster to the new cluster.
+    // 4. Update activeCluster to the new cluster.
     let (new_cluster_name, _) =
         super::super::odoo_instance::load_postgres_cluster(ctx, instance).await?;
     let api: Api<OdooInstance> = Api::namespaced(client.clone(), &ns);

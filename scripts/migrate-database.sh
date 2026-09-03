@@ -10,7 +10,9 @@
 #   DB_USER, DB_PASSWORD — Odoo database role credentials
 #   DB_NAME              — database name to migrate
 
-set -ex
+# Do NOT add -x here: the shell trace expands secrets held in env into the
+# container log, which ships to the cluster log aggregator.
+set -e
 
 echo "=== Starting database cluster migration ==="
 echo "Source:      $SRC_HOST:$SRC_PORT"
