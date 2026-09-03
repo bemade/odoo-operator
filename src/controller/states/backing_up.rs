@@ -81,9 +81,21 @@ impl State for BackingUp {
             format!("{instance_name}-backup")
         };
 
-        let with_filestore = if backup_job.spec.with_filestore {
+        // An ephemeral filestore is declared regenerable, so backups of such
+        // instances are database-only on principle: `withFilestore` is forced
+        // off rather than packaging asset caches that the next pod rebuilds
+        // anyway (and there is no PVC whose contents could be meant).
+        let with_filestore = if backup_job.spec.with_filestore
+            && !crate::controller::helpers::is_ephemeral(instance)
+        {
             "true"
         } else {
+            if backup_job.spec.with_filestore {
+                info!(
+                    crd_name = %backup_job.name_any(),
+                    "withFilestore requested but the instance filestore is emptyDir; running a database-only backup"
+                );
+            }
             "false"
         };
 
