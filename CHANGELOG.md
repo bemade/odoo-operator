@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.7.0](https://github.com/bemade/odoo-operator/compare/v2.6.0...v2.7.0) (2026-09-03)
+
+
+### Features
+
+* **webhook:** re-issue the serving certificate when it no longer chains to the CA ([4c01553](https://github.com/bemade/odoo-operator/commit/4c01553efc7a42a617c263782f2eb48a5a1a0bcf))
+
+
+### Bug Fixes
+
+* **jobs:** stop credentials reaching job logs and job manifests ([0846721](https://github.com/bemade/odoo-operator/commit/0846721ce7867ec6eeff0e89972c497406566488))
+* **webhook:** stop the CA and its leaf certificate renewing in lockstep ([8add085](https://github.com/bemade/odoo-operator/commit/8add085a5db8f8ee0d4d45d8832194eaae4c4557))
+
 ## [2.6.0](https://github.com/bemade/odoo-operator/compare/v2.5.0...v2.6.0) (2026-08-14)
 
 
