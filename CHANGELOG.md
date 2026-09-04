@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.7.1](https://github.com/bemade/odoo-operator/compare/v2.7.0...v2.7.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* **database-migration:** stop the migration racing the instance's own pods ([#175](https://github.com/bemade/odoo-operator/issues/175)) ([19958b8](https://github.com/bemade/odoo-operator/commit/19958b81ad19350c35357ea02f95fd27077222ad)), closes [#172](https://github.com/bemade/odoo-operator/issues/172)
+
 ## [2.7.0](https://github.com/bemade/odoo-operator/compare/v2.6.0...v2.7.0) (2026-09-03)
 
 
