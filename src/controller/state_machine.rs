@@ -1837,6 +1837,69 @@ pub async fn scale_deployment(client: &Client, name: &str, ns: &str, replicas: i
     Ok(())
 }
 
+/// Block until no live pods remain for the given `app` label values.
+///
+/// [`scale_deployment`] returns as soon as the API server has accepted
+/// `replicas: 0` — it says nothing about the pods.  Odoo shuts down
+/// gracefully, so a web or cron pod keeps its psycopg2 pool open for several
+/// seconds after that patch lands.  Anything that touches the database in that
+/// window races those connections, and `DROP DATABASE` loses the race with
+/// `database "..." is being accessed by other users` (issue #172).
+///
+/// Pods in a terminal phase (`Succeeded`/`Failed`) hold nothing open and are
+/// ignored; a pod that is merely `Terminating` still counts, because its
+/// connections are exactly the problem.
+///
+/// Returns a `Reconcile` error once `timeout` elapses so the caller aborts
+/// rather than proceeding into the race — the reconcile is retried later.
+pub async fn wait_for_pods_gone(
+    client: &Client,
+    ns: &str,
+    apps: &[&str],
+    timeout: Duration,
+) -> Result<()> {
+    const POLL: Duration = Duration::from_secs(1);
+
+    let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
+    let lp = ListParams::default().labels(&format!("app in ({})", apps.join(",")));
+    let deadline = std::time::Instant::now() + timeout;
+
+    loop {
+        let live: Vec<String> = pods
+            .list(&lp)
+            .await?
+            .items
+            .into_iter()
+            .filter(|p| {
+                !matches!(
+                    p.status.as_ref().and_then(|s| s.phase.as_deref()),
+                    Some("Succeeded") | Some("Failed")
+                )
+            })
+            .map(|p| p.name_any())
+            .collect();
+
+        if live.is_empty() {
+            return Ok(());
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return Err(crate::error::Error::reconcile(format!(
+                "timed out after {}s waiting for pods to terminate in {ns}: {}",
+                timeout.as_secs(),
+                live.join(", ")
+            )));
+        }
+
+        tracing::info!(
+            %ns,
+            pods = %live.join(", "),
+            "waiting for pods to terminate before touching the database"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
+
 // ── Filestore migration actions ───────────────────────────────────────────
 
 use super::states::finalizing_filestore_migration::complete_filestore_migration;

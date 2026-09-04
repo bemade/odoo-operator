@@ -317,7 +317,30 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
     }
 
     // Load postgres cluster config.
-    let (cluster_name, pg_cluster) = load_postgres_cluster(ctx, instance).await?;
+    //
+    // Two different clusters matter here and they are not interchangeable:
+    //
+    //   `cluster_name` — what the spec *asks for*.  This is what the database
+    //     cluster-mismatch guard compares against, so it must stay the spec's
+    //     value or migrations would never trigger.
+    //
+    //   `pg_cluster` — where the database *actually is* right now.  Every child
+    //     resource (odoo.conf, roles, extensions) has to point here.  Publishing
+    //     the destination before the migration has succeeded is what let a cron
+    //     pod open a session on the very database the migration Job was about to
+    //     drop, and left behind a bogus `base`-initialised database when it did
+    //     (issue #172).
+    let (cluster_name, desired_pg) = load_postgres_cluster(ctx, instance).await?;
+    let data_cluster_name = database_host_cluster(instance, &cluster_name);
+    let pg_cluster = if data_cluster_name == cluster_name {
+        desired_pg
+    } else {
+        info!(
+            %name, desired = %cluster_name, actual = %data_cluster_name,
+            "database cluster migration pending — child resources stay on the source cluster"
+        );
+        load_postgres_cluster_by_name(ctx, &data_cluster_name).await?
+    };
 
     // Ensure all child resources (phase-independent infrastructure).
     let oref = controller_owner_ref(instance);
@@ -342,10 +365,12 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
         current_phase_ref,
         Some(&OdooInstancePhase::CloningFromSource)
     );
-    // Database migration doesn't need to skip child resource creation —
-    // the state's ensure() handles scaling deployments to 0, and
-    // ensure_deployment/ensure_config_map preserve current replicas and
-    // update connection details (which is desirable for the switchover).
+    // Database migration doesn't skip child resource creation — the state's
+    // ensure() scales the deployments to 0, and ensure_deployment /
+    // ensure_config_map preserve the current replica count.  The connection
+    // details they write are pinned to the source cluster for the duration
+    // (see `database_host_cluster`); the switchover happens by itself once
+    // `status.activeCluster` moves.
     if !is_migrating_filestore && !is_cloning_filestore {
         child_resources::ensure_filestore_pvc(client, &ns, &name, instance, ctx, &oref, None)
             .await?;
@@ -502,7 +527,13 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
         .and_then(|s| s.phase.clone())
         .unwrap_or(OdooInstancePhase::Provisioning);
 
-    // Track active cluster — only update when not in a database migration phase.
+    // Track active cluster.  `activeCluster` records where the database *is*,
+    // so it may only advance once the data has actually moved — which is
+    // `complete_database_migration`'s job, not this loop's.  Updating it here
+    // the moment the spec changed would declare the migration done before it
+    // started, and (with the pinning above) hand every pod the destination
+    // connection details mid-migration.  Skip it whenever the two disagree,
+    // and during the migration phases themselves.
     let is_db_migrating = matches!(
         current_phase_ref,
         Some(
@@ -510,6 +541,7 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
         )
     );
     let active_cluster_changed = !is_db_migrating
+        && data_cluster_name == cluster_name
         && instance
             .status
             .as_ref()
@@ -831,6 +863,40 @@ pub async fn load_postgres_cluster(
     Err(Error::config(format!(
         "no default postgres cluster configured in {secret_name} secret"
     )))
+}
+
+/// Name of the cluster that currently holds this instance's database.
+///
+/// Usually that is simply the cluster the spec asks for.  It differs while a
+/// database cluster migration is pending or in flight: the spec already names
+/// the *destination*, but the data — and therefore everything Odoo is allowed
+/// to connect to — is still on the source until the migration Job has succeeded
+/// and `complete_database_migration` has moved `status.activeCluster` across.
+///
+/// Before the database exists there is nothing to move, so an uninitialised
+/// instance always follows the spec.
+pub fn database_host_cluster(instance: &OdooInstance, desired_cluster: &str) -> String {
+    let status = instance.status.as_ref();
+
+    // Mid-migration the source is recorded explicitly; `activeCluster` may
+    // already have been advanced by an older operator version.
+    if matches!(
+        status.and_then(|s| s.phase.as_ref()),
+        Some(&OdooInstancePhase::MigratingDatabase)
+    ) {
+        if let Some(prev) = status.and_then(|s| s.migration_previous_cluster.as_deref()) {
+            return prev.to_string();
+        }
+    }
+
+    if !status.is_some_and(|s| s.db_initialized) {
+        return desired_cluster.to_string();
+    }
+
+    match status.and_then(|s| s.active_cluster.as_deref()) {
+        Some(active) if active != desired_cluster => active.to_string(),
+        _ => desired_cluster.to_string(),
+    }
 }
 
 /// Load a specific postgres cluster by name (for migration actions that need

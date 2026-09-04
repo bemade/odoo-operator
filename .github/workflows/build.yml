@@ -41,7 +41,7 @@ jobs:
           echo "KUBEBUILDER_ASSETS=${ASSETS}" >> "$GITHUB_ENV"
 
       - name: Run unit tests
-        run: cargo test --lib --test controller_helpers_test --test helpers_test --test webhook_test
+        run: cargo test --lib --test controller_helpers_test --test helpers_test --test webhook_test --test database_host_cluster_test
 
       - name: Run integration tests
         run: cargo test --test integration -- --test-threads=1

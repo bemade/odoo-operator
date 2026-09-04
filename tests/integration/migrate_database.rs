@@ -295,3 +295,155 @@ async fn migrate_database_not_triggered_during_init() {
         "migration should not trigger during Initializing"
     );
 }
+
+// ─── Test 5: odoo.conf stays on the source cluster until the data moves ─────
+
+/// Read `db_host` out of the instance's odoo-conf ConfigMap.
+async fn conf_db_host(client: &kube::Client, ns: &str, name: &str) -> String {
+    let cms: Api<k8s_openapi::api::core::v1::ConfigMap> = Api::namespaced(client.clone(), ns);
+    let cm = cms.get(&format!("{name}-odoo-conf")).await.unwrap();
+    cm.data
+        .as_ref()
+        .and_then(|d| d.get("db_host"))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The destination cluster's connection details must not be published while the
+/// migration is in flight.  A pod that starts in that window — including one
+/// rolled by the ConfigMap change itself — connects to the database the
+/// migration Job is about to drop, which is how #172 failed.
+#[tokio::test]
+async fn migrate_database_conf_stays_on_source_until_switchover() {
+    let name = "test-dbmig-conf";
+    let ctx = TestContext::new(name).await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+
+    ensure_secondary_cluster(c).await;
+
+    let ready_handle = fast_track_to_running(&ctx, &format!("{name}-init")).await;
+    ready_handle.abort();
+
+    assert_eq!(
+        conf_db_host(c, ns, name).await,
+        "localhost",
+        "odoo.conf should start on the source cluster"
+    );
+
+    patch_instance_spec(c, ns, name, json!({"database": {"cluster": "secondary"}})).await;
+
+    assert!(
+        wait_for_phase(c, ns, name, OdooInstancePhase::MigratingDatabase).await,
+        "expected MigratingDatabase phase"
+    );
+
+    // Let a few more reconciles run — the ConfigMap is rewritten on every one.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        conf_db_host(c, ns, name).await,
+        "localhost",
+        "odoo.conf must still point at the source cluster during the migration"
+    );
+
+    // activeCluster records where the data is, so it must not have moved either.
+    let api: Api<OdooInstance> = Api::namespaced(c.clone(), ns);
+    let inst = api.get_status(name).await.unwrap();
+    assert_eq!(
+        inst.status
+            .as_ref()
+            .and_then(|s| s.active_cluster.as_deref()),
+        Some("default"),
+        "activeCluster must not advance before the migration succeeds"
+    );
+
+    // Now let the migration succeed — the switchover happens by itself.
+    fake_deployment_ready(c, ns, name, 0).await;
+    fake_deployment_ready(c, ns, &format!("{name}-cron"), 0).await;
+    let job_name = wait_for_db_migration_job(c, ns, &format!("{name}-migrate-db-")).await;
+    fake_job_succeeded(c, ns, &job_name).await;
+
+    assert!(
+        wait_for_phase(c, ns, name, OdooInstancePhase::Starting).await,
+        "expected Starting phase after migration"
+    );
+    assert!(
+        wait_for(TIMEOUT, POLL, || {
+            let (c, ns, name) = (c.clone(), ns.to_string(), name.to_string());
+            async move { conf_db_host(&c, &ns, &name).await == "secondary.local" }
+        })
+        .await,
+        "odoo.conf should point at the destination once the migration completed"
+    );
+}
+
+// ─── Test 6: the Job waits for the instance's pods to actually terminate ────
+
+/// Scaling to zero only patches `replicas`; the pods drain asynchronously and
+/// keep their connections open meanwhile.  The migration Job must not be
+/// created until they are gone, or its `DROP DATABASE` races them (#172).
+#[tokio::test]
+async fn migrate_database_waits_for_pods_to_terminate() {
+    use k8s_openapi::api::core::v1::Pod;
+    use kube::api::DeleteParams;
+
+    let name = "test-dbmig-pods";
+    let ctx = TestContext::new(name).await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+
+    ensure_secondary_cluster(c).await;
+
+    let ready_handle = fast_track_to_running(&ctx, &format!("{name}-init")).await;
+    ready_handle.abort();
+
+    // A cron pod that has not finished shutting down yet.
+    let pods: Api<Pod> = Api::namespaced(c.clone(), ns);
+    let lingering: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": format!("{name}-cron-draining"),
+            "namespace": ns,
+            "labels": { "app": format!("{name}-cron") }
+        },
+        "spec": {
+            "containers": [{ "name": "odoo", "image": "busybox" }]
+        }
+    }))
+    .unwrap();
+    pods.create(&PostParams::default(), &lingering)
+        .await
+        .unwrap();
+
+    patch_instance_spec(c, ns, name, json!({"database": {"cluster": "secondary"}})).await;
+
+    // The migration cannot start while that pod is alive.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let jobs: Api<Job> = Api::namespaced(c.clone(), ns);
+    let job_names: Vec<String> = jobs
+        .list(&ListParams::default())
+        .await
+        .unwrap()
+        .items
+        .iter()
+        .filter_map(|j| j.metadata.name.clone())
+        .filter(|n| n.starts_with(&format!("{name}-migrate-db-")))
+        .collect();
+    assert!(
+        job_names.is_empty(),
+        "migration job must not be created while pods are still running, got {job_names:?}"
+    );
+
+    // Once it finally goes away the migration proceeds on its own.
+    pods.delete(
+        &format!("{name}-cron-draining"),
+        &DeleteParams::default().grace_period(0),
+    )
+    .await
+    .unwrap();
+
+    let job_name = wait_for_db_migration_job(c, ns, &format!("{name}-migrate-db-")).await;
+    assert!(
+        wait_for_phase(c, ns, name, OdooInstancePhase::MigratingDatabase).await,
+        "expected MigratingDatabase once the pod terminated (job {job_name})"
+    );
+}
