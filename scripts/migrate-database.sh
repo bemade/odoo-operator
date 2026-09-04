@@ -27,10 +27,19 @@ PGPASSWORD=$DST_ADMIN_PASSWORD psql \
   -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$DB_USER') THEN CREATE ROLE \"$DB_USER\" WITH PASSWORD '$DB_PASSWORD' CREATEDB LOGIN; END IF; END \$\$;"
 
 # 2. Drop target database on destination if exists (idempotent).
+#
+#    WITH (FORCE) terminates any backend still attached to the database
+#    (PostgreSQL 13+).  Nothing should be connected to the destination during a
+#    migration, but a stray session used to block the drop and surface one line
+#    later as a misleading "already exists" from createdb (issue #172).
+#
+#    The failure is NOT masked with `|| true`: if the drop cannot happen, the
+#    createdb below cannot succeed either, and the drop's error message is the
+#    one that says why.
 echo "=== Dropping existing database on destination (if any) ==="
 PGPASSWORD=$DST_ADMIN_PASSWORD psql \
   -h "$DST_HOST" -p "$DST_PORT" -U "$DST_ADMIN_USER" -d postgres \
-  -c "DROP DATABASE IF EXISTS \"$DB_NAME\"" || true
+  -c "DROP DATABASE IF EXISTS \"$DB_NAME\" WITH (FORCE)"
 
 # 3. Create empty database on destination owned by the role.
 echo "=== Creating database on destination ==="
@@ -58,7 +67,7 @@ if [ "$TABLE_COUNT" -lt 3 ]; then
     echo "Cleaning up failed database on destination..."
     PGPASSWORD=$DST_ADMIN_PASSWORD psql \
       -h "$DST_HOST" -p "$DST_PORT" -U "$DST_ADMIN_USER" -d postgres \
-      -c "DROP DATABASE IF EXISTS \"$DB_NAME\"" || true
+      -c "DROP DATABASE IF EXISTS \"$DB_NAME\" WITH (FORCE)" || true
     exit 1
 fi
 echo "Verification passed: $TABLE_COUNT/3 core tables found"

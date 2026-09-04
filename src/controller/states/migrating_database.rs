@@ -23,10 +23,15 @@ use super::super::helpers::{
     image_pull_secrets, odoo_security_context, pg_tools_image, secret_env, FIELD_MANAGER,
 };
 use super::super::odoo_instance::{load_postgres_cluster_by_name, Context};
-use super::super::state_machine::{scale_deployment, ReconcileSnapshot};
+use super::super::state_machine::{scale_deployment, wait_for_pods_gone, ReconcileSnapshot};
 use super::State;
 
 const MIGRATE_SCRIPT: &str = include_str!("../../../scripts/migrate-database.sh");
+
+/// How long to wait for the web and cron pods to terminate before giving up on
+/// starting the migration.  Generous: an Odoo worker with long-running requests
+/// can take a while to drain, and aborting is cheap — the reconcile retries.
+const POD_TERMINATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Name of the short-lived Secret holding the two cluster admin passwords the
 /// migration Job needs.  The tenant namespace cannot `secretKeyRef` the
@@ -66,9 +71,21 @@ pub async fn begin_database_migration(instance: &OdooInstance, ctx: &Context) ->
     let inst_name = instance.name_any();
     let client = &ctx.client;
 
-    // Scale down both deployments.
+    // Scale down both deployments, then wait for the pods to actually go away.
+    // Scaling only patches `replicas: 0`; Odoo shuts down gracefully and keeps
+    // its connection pool open for several seconds afterwards.  Creating the
+    // Job before that has finished lets a still-live pod block the Job's
+    // `DROP DATABASE` (issue #172).
+    let cron_name = cron_depl_name(instance);
     scale_deployment(client, &inst_name, &ns, 0).await?;
-    scale_deployment(client, &cron_depl_name(instance), &ns, 0).await?;
+    scale_deployment(client, &cron_name, &ns, 0).await?;
+    wait_for_pods_gone(
+        client,
+        &ns,
+        &[&inst_name, &cron_name],
+        POD_TERMINATION_TIMEOUT,
+    )
+    .await?;
 
     // Load old cluster config (from status.activeCluster).
     let old_cluster_name = instance
@@ -228,8 +245,10 @@ fn build_migration_env(
         env("DST_PORT", new_pg.port.to_string()),
         env("DST_ADMIN_USER", &new_pg.admin_user),
         secret_env("DST_ADMIN_PASSWORD", creds_secret, "DST_ADMIN_PASSWORD"),
-        // Odoo role credentials (from ConfigMap, which has already been
-        // updated to point to the new cluster — but user/password are the same).
+        // Odoo role credentials.  The ConfigMap deliberately still points at
+        // the *source* cluster for the duration of the migration (see
+        // `database_host_cluster`), but the role name and password are the same
+        // on both ends, so it remains the right place to read them from.
         cm_env("DB_USER", odoo_conf_name, "db_user"),
         cm_env("DB_PASSWORD", odoo_conf_name, "db_password"),
         // Database name.
