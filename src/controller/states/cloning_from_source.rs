@@ -569,6 +569,7 @@ impl State for CloningFromSource {
                         image,
                         instance,
                         refresh,
+                        &target_conf,
                         &source_db,
                         &target_db,
                     );
@@ -836,12 +837,14 @@ fn build_filestore_clone_job(
 /// (JuiceFS CSI < v0.31.6 clones without `-p`) and kubelet skips fsGroup
 /// on that RWX mount, so as uid 100 the `mv` dies with EACCES.  The script
 /// chowns the whole mount back to 100:101 before it exits (issue #156).
+#[allow(clippy::too_many_arguments)]
 fn build_filestore_rename_job(
     crd_name: &str,
     ns: &str,
     image: &str,
     instance: &OdooInstance,
     refresh: &OdooStagingRefreshJob,
+    target_conf: &str,
     source_db: &str,
     target_db: &str,
 ) -> Job {
@@ -849,9 +852,31 @@ fn build_filestore_rename_job(
         env("SRC_DB", source_db),
         env("TGT_DB", target_db),
         env("FILESTORE", "/var/lib/odoo"),
+        // The script verifies the cloned filestore against ir_attachment
+        // before it renames anything: an absent or short file is otherwise
+        // indistinguishable from "this database has no attachments", and
+        // guessing optimistically yields a green refresh with every
+        // attachment silently missing.  The DB is the only authority.
+        env("DB_NAME", target_db),
+        cm_env("HOST", target_conf, "db_host"),
+        cm_env("PORT", target_conf, "db_port"),
+        cm_env("USER", target_conf, "db_user"),
+        cm_env("PASSWORD", target_conf, "db_password"),
     ];
     OdooJobBuilder::new(&format!("{crd_name}-fsrename-"), ns, refresh, instance)
         .active_deadline(7200)
+        // A PVC restored from a VolumeSnapshot can be Bound, mountable and
+        // EMPTY: JuiceFS CSI reports ProvisioningSucceeded once the restore is
+        // *scheduled*, then clones in a background Job (measured: ~11 min for a
+        // 67k-file filestore).  That Job rmdir()s the target subPath first, so a
+        // pod which mounted beforehand is bind-mounted to an unlinked inode and
+        // can NEVER observe the clone landing -- waiting in-pod cannot work.
+        // The only recovery is a new pod with a new mount, which is precisely
+        // what backoffLimit yields.  K8s' exponential backoff (10s, 20s, 40s,
+        // ... capped at 6 min) spans that window well inside 8 attempts.  The
+        // builder default of 0 turned a guaranteed-transient condition into a
+        // hard failure on the first attempt.
+        .backoff_limit(8)
         .containers(vec![Container {
             name: "rename-filestore".into(),
             image: Some(image.into()),
@@ -1149,6 +1174,7 @@ mod tests {
             "odoo:19",
             &inst,
             &refresh("refresh-x"),
+            "staging-odoo-conf",
             "odoo_src",
             "odoo_tgt",
         );
@@ -1163,5 +1189,45 @@ mod tests {
             Some(0),
             "rename container must override the pod's uid-100 security context"
         );
+    }
+
+    /// The rename script refuses to rename an unverified tree, and it verifies
+    /// against `ir_attachment` — so without DB connection env vars it cannot
+    /// run at all.  And because a pod that mounts mid-clone is pinned to the
+    /// pre-clone inode, its only recovery is a *fresh pod*: with the builder's
+    /// default backoffLimit of 0 the Job dies on the first attempt, every time,
+    /// whenever it loses the race.  Both are wiring the script depends on and
+    /// neither is visible from the script itself.
+    #[test]
+    fn rename_job_can_verify_and_retry() {
+        let job = build_filestore_rename_job(
+            "refresh-x",
+            "ns",
+            "odoo:19",
+            &instance("staging"),
+            &refresh("refresh-x"),
+            "staging-odoo-conf",
+            "odoo_src",
+            "odoo_tgt",
+        );
+        let spec = job.spec.unwrap();
+        assert!(
+            spec.backoff_limit.unwrap_or(0) > 0,
+            "rename Job must be retryable: a pod that mounted mid-clone can \
+             never see the data, so only a new pod can succeed"
+        );
+        let envs = spec.template.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap_or_default();
+        let names: Vec<&str> = envs.iter().map(|e| e.name.as_str()).collect();
+        for required in [
+            "SRC_DB", "TGT_DB", "DB_NAME", "HOST", "PORT", "USER", "PASSWORD",
+        ] {
+            assert!(
+                names.contains(&required),
+                "rename-filestore.sh requires ${required}; got {names:?}"
+            );
+        }
     }
 }
