@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.7.2](https://github.com/bemade/odoo-operator/compare/v2.7.1...v2.7.2) (2026-09-22)
+
+
+### Bug Fixes
+
+* **refresh:** run the snapshot-path rename Job as root and chown the mount ([#181](https://github.com/bemade/odoo-operator/issues/181)) ([b2be868](https://github.com/bemade/odoo-operator/commit/b2be86803adecb140d8f37fd7e3ab4a8b0ac8ac8)), closes [#156](https://github.com/bemade/odoo-operator/issues/156)
+
 ## [2.7.1](https://github.com/bemade/odoo-operator/compare/v2.7.0...v2.7.1) (2026-09-04)
 
 
