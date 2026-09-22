@@ -12,6 +12,8 @@
 #   2. Merge path     — target pre-exists → copytree merge + drop src
 #   3. Identical names— SRC_DB == TGT_DB → no-op, ensure tgt exists
 #   4. Source absent  — src dir missing → no-op, ensure tgt exists
+#   5. Ownership      — root-owned clone → uid 100 can write afterwards
+#                       (docker; skipped when docker is unavailable)
 
 set -euo pipefail
 
@@ -23,6 +25,10 @@ SCRIPT="$REPO_ROOT/scripts/rename-filestore.sh"
 command -v python3 >/dev/null || { echo "python3 required" >&2; exit 1; }
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
+
+# Cases 1-4 run unprivileged, so point the script's final chown at ourselves
+# (a no-op for a non-root caller).  Case 5 exercises the real 100:101 contract.
+export FILESTORE_OWNER="$(id -u):$(id -g)"
 
 # Each case gets a fresh filestore root under a temp dir.
 setup_case() {
@@ -83,5 +89,45 @@ SRC_DB=odoo_missing TGT_DB=odoo_tgt FILESTORE="$ROOT" bash "$SCRIPT" >/dev/null
 [ ! -e "$FS/odoo_missing" ] || fail "case4: phantom source dir created"
 teardown_case
 echo "ok: case4 source-absent no-op"
+
+# ── Case 5: ownership contract (docker, runs the script as root) ─────────
+# A JuiceFS CSI snapshot clone (driver < v0.31.6 runs `juicefs clone` without
+# -p) hands back the whole tree root:root, and kubelet never applies fsGroup
+# on that RWX mount (fsGroupPolicy=ReadWriteOnceWithFSType).  The Job
+# therefore runs as root, and its contract is: after it returns, uid 100
+# (odoo) can create entries both under filestore/<tgt> AND at the mount root
+# (Odoo lazily mkdirs sessions/ there — issue #156).  Case 1 already proves
+# the rename itself; this case proves the rename does not die on EACCES and
+# leaves a usable tree behind.
+if command -v docker >/dev/null 2>&1; then
+    setup_case
+    cleanup_case5() {
+        docker run --rm -u 0 -v "$ROOT:/w" alpine:3.20 \
+            sh -c "chown -R $(id -u):$(id -g) /w" 2>/dev/null || true
+        teardown_case
+    }
+    # Build the root-owned 0755 fixture the way the clone hands it to us.
+    docker run --rm -u 0 -v "$ROOT:/var/lib/odoo" alpine:3.20 sh -c '
+        mkdir -p /var/lib/odoo/filestore/odoo_src/aa &&
+        echo content-a > /var/lib/odoo/filestore/odoo_src/aa/f1 &&
+        chown -R 0:0 /var/lib/odoo && chmod -R u=rwX,go=rX /var/lib/odoo'
+    docker run --rm -u 0 \
+        -v "$ROOT:/var/lib/odoo" \
+        -v "$SCRIPT:/rename-filestore.sh:ro" \
+        -e SRC_DB=odoo_src -e TGT_DB=odoo_tgt -e FILESTORE=/var/lib/odoo \
+        alpine:3.20 sh -c 'apk add -q bash python3 && bash /rename-filestore.sh' >/dev/null \
+        || { cleanup_case5; fail "case5: script failed on a root-owned tree"; }
+    # Explicitly no fsGroup — the script's contract, not kubelet's.
+    docker run --rm -u 100:101 -v "$ROOT:/var/lib/odoo" alpine:3.20 sh -c '
+        [ "$(cat /var/lib/odoo/filestore/odoo_tgt/aa/f1)" = content-a ] || exit 10
+        touch /var/lib/odoo/filestore/odoo_tgt/aa/f2 || exit 11
+        mkdir /var/lib/odoo/sessions || exit 12
+        mkdir /var/lib/odoo/filestore/odoo_tgt/bb || exit 13' \
+        || { rc=$?; cleanup_case5; fail "case5: uid 100 cannot use the tree after rename (rc=$rc)"; }
+    cleanup_case5
+    echo "ok: case5 root-owned clone is usable by uid 100 afterwards"
+else
+    echo "skip: case5 (docker not available)"
+fi
 
 echo "PASS: all rename-filestore.sh cases"
