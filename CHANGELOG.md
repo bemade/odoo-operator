@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.7.3](https://github.com/bemade/odoo-operator/compare/v2.7.2...v2.7.3) (2026-09-22)
+
+
+### Bug Fixes
+
+* **refresh:** verify the cloned filestore before renaming it ([#183](https://github.com/bemade/odoo-operator/issues/183)) ([96297e9](https://github.com/bemade/odoo-operator/commit/96297e96a6bd34237082f6545bdddabe0b1b4e71))
+
 ## [2.7.2](https://github.com/bemade/odoo-operator/compare/v2.7.1...v2.7.2) (2026-09-22)
 
 
