@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use k8s_openapi::api::{
     batch::v1::Job,
     core::v1::{
-        Container, PersistentVolumeClaim, PersistentVolumeClaimVolumeSource, TypedObjectReference,
-        Volume, VolumeMount,
+        Container, PersistentVolumeClaim, PersistentVolumeClaimVolumeSource, SecurityContext,
+        TypedObjectReference, Volume, VolumeMount,
     },
 };
 use kube::{
@@ -830,6 +830,12 @@ fn build_filestore_clone_job(
 /// equivalent of `build_filestore_clone_job`, which maps SRC_DB → TGT_DB at
 /// copy time; the snapshot path can't map at copy time (the CSI clone is
 /// opaque), so it reconciles the directory name afterward.
+///
+/// The container runs as root, overriding the pod-level uid-100 context
+/// from `OdooJobBuilder`: the CSI clone can hand the tree back `root:root`
+/// (JuiceFS CSI < v0.31.6 clones without `-p`) and kubelet skips fsGroup
+/// on that RWX mount, so as uid 100 the `mv` dies with EACCES.  The script
+/// chowns the whole mount back to 100:101 before it exits (issue #156).
 fn build_filestore_rename_job(
     crd_name: &str,
     ns: &str,
@@ -856,6 +862,11 @@ fn build_filestore_rename_job(
             ]),
             env: Some(envs),
             volume_mounts: Some(odoo_volume_mounts()),
+            security_context: Some(SecurityContext {
+                run_as_user: Some(0),
+                run_as_group: Some(0),
+                ..Default::default()
+            }),
             ..Default::default()
         }])
         .build()
@@ -1046,4 +1057,111 @@ fn sc(instance: &OdooInstance) -> Option<&str> {
         .filestore
         .as_ref()
         .and_then(|s| s.storage_class.as_deref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crd::odoo_instance::{CronSpec, IngressSpec, OdooInstanceSpec};
+    use crate::crd::odoo_staging_refresh_job::{OdooStagingRefreshJobSpec, StagingSource};
+    use crate::crd::shared::OdooInstanceRef;
+    use kube::api::ObjectMeta;
+
+    fn instance(name: &str) -> OdooInstance {
+        OdooInstance {
+            metadata: ObjectMeta {
+                name: Some(name.into()),
+                namespace: Some("ns".into()),
+                uid: Some("inst-uid".into()),
+                ..Default::default()
+            },
+            spec: OdooInstanceSpec {
+                image: None,
+                image_pull_secret: None,
+                admin_password: "admin".into(),
+                replicas: 1,
+                cron: CronSpec {
+                    replicas: 1,
+                    resources: None,
+                },
+                ingress: IngressSpec {
+                    hosts: vec!["staging.example.com".into()],
+                    issuer: None,
+                    class: None,
+                    gateway_ref: None,
+                },
+                resources: None,
+                filestore: None,
+                config_options: None,
+                database: None,
+                init: Default::default(),
+                environment: Default::default(),
+                production_instance_ref: None,
+                strategy: None,
+                webhook: None,
+                probes: None,
+                affinity: None,
+                tolerations: vec![],
+                read_only_sql_access: None,
+                extra_env: vec![],
+                extra_env_from: vec![],
+            },
+            status: None,
+        }
+    }
+
+    fn refresh(name: &str) -> OdooStagingRefreshJob {
+        OdooStagingRefreshJob {
+            metadata: ObjectMeta {
+                name: Some(name.into()),
+                namespace: Some("ns".into()),
+                uid: Some("refresh-uid".into()),
+                ..Default::default()
+            },
+            spec: OdooStagingRefreshJobSpec {
+                odoo_instance_ref: OdooInstanceRef {
+                    name: "staging".into(),
+                    namespace: None,
+                },
+                source: StagingSource {
+                    instance_name: "prod".into(),
+                    instance_namespace: None,
+                },
+                filestore_method: FilestoreMethod::Snapshot,
+                skip_filestore: false,
+                neutralize: true,
+                webhook: None,
+            },
+            status: None,
+        }
+    }
+
+    /// The snapshot clone can hand back a root:root tree (JuiceFS CSI
+    /// < v0.31.6 clones without -p) and kubelet never applies fsGroup on
+    /// that RWX mount, so the rename container must run as root — as uid
+    /// 100 its `mv` dies with EACCES (issue #156).
+    #[test]
+    fn rename_job_container_runs_as_root() {
+        let inst = instance("staging");
+        let job = build_filestore_rename_job(
+            "refresh-x",
+            "ns",
+            "odoo:19",
+            &inst,
+            &refresh("refresh-x"),
+            "odoo_src",
+            "odoo_tgt",
+        );
+        let pod = job.spec.unwrap().template.spec.unwrap();
+        let container = &pod.containers[0];
+        assert_eq!(container.name, "rename-filestore");
+        assert_eq!(
+            container
+                .security_context
+                .as_ref()
+                .and_then(|sc| sc.run_as_user),
+            Some(0),
+            "rename container must override the pod's uid-100 security context"
+        );
+    }
 }

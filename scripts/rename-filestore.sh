@@ -12,13 +12,33 @@
 # align.  The copy path (clone-filestore.sh) already maps SRC_DB → TGT_DB at
 # copy time; this is its snapshot-path equivalent.
 #
+# Runs as root.  The CSI snapshot clone can hand the whole tree back as
+# root:root (JuiceFS CSI < v0.31.6 runs `juicefs clone` without -p), and
+# kubelet never applies fsGroup on a JuiceFS RWX mount
+# (fsGroupPolicy=ReadWriteOnceWithFSType), so as uid 100 the rename below
+# dies with EACCES and Odoo could not write the tree afterwards either.
+# Same trap restore-extract.sh documents; same remedy: chown at the end.
+#
 # Required env vars:
 #   SRC_DB, TGT_DB  — database names used as subdirectories under the PVC
 #   FILESTORE       — mount path of the filestore PVC (e.g. /var/lib/odoo)
+# Optional:
+#   FILESTORE_OWNER — uid:gid to hand the tree to (default 100:101, odoo)
 
 set -euo pipefail
 
-FS="${FILESTORE:-/var/lib/odoo}/filestore"
+MOUNT="${FILESTORE:-/var/lib/odoo}"
+FS="${MOUNT}/filestore"
+OWNER="${FILESTORE_OWNER:-100:101}"
+
+# Hand the whole mount — not just filestore/<tgt> — to the odoo uid.  Odoo
+# lazily mkdirs sessions/ at the mount root on first request, and a
+# root-owned, non-world-writable root there is the health-500 in #156.
+finish() {
+    chown -R "$OWNER" "$MOUNT"
+    echo "=== Filestore rename complete (owner $OWNER) ==="
+    du -sh "$TGT_DIR" 2>/dev/null || true
+}
 SRC_DIR="${FS}/${SRC_DB}"
 TGT_DIR="${FS}/${TGT_DB}"
 
@@ -30,6 +50,7 @@ if [ "$SRC_DB" = "$TGT_DB" ]; then
     # filestore under the right name — nothing to do.
     echo "Source and target db names identical — nothing to rename"
     mkdir -p "$TGT_DIR"
+    finish
     exit 0
 fi
 
@@ -38,6 +59,7 @@ if [ ! -d "$SRC_DIR" ]; then
     # already-renamed PVC from a retried Job).  Ensure the target exists.
     echo "Source filestore directory absent — ensuring target exists"
     mkdir -p "$TGT_DIR"
+    finish
     exit 0
 fi
 
@@ -59,5 +81,4 @@ shutil.copytree(sys.argv[1], sys.argv[2], dirs_exist_ok=True)
     rm -rf "$SRC_DIR"
 fi
 
-echo "=== Filestore rename complete ==="
-du -sh "$TGT_DIR" 2>/dev/null || true
+finish
