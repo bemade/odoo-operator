@@ -204,14 +204,33 @@ async fn staging_refresh_db_failure_goes_to_init_failed() -> anyhow::Result<()> 
     );
 
     let db_job = wait_for_refresh_sub_job(c, ns, "tgt-fail-refresh", "dbJobName").await;
+
+    // A failed pod alone is a retry, not a failed refresh: the sub-Job's
+    // backoffLimit is still running (the snapshot-path rename Job fails pods
+    // on purpose until the JuiceFS clone lands).
     let jobs: Api<Job> = Api::namespaced(c.clone(), ns);
-    let patch = json!({ "status": { "failed": 1 } });
     jobs.patch_status(
         &db_job,
         &PatchParams::apply("odoo-operator-test"),
-        &Patch::Merge(&patch),
+        &Patch::Merge(&json!({ "status": { "failed": 1 } })),
     )
     .await?;
+    // Job status changes don't wake the controller on their own; force a
+    // reconcile so the check below observes the operator's verdict.
+    touch_instance(c, ns, "tgt-fail").await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let phase = instances
+        .get("tgt-fail")
+        .await?
+        .status
+        .and_then(|s| s.phase);
+    assert_eq!(
+        phase,
+        Some(OdooInstancePhase::CloningFromSource),
+        "a failed pod with backoff remaining must not fail the refresh"
+    );
+
+    fake_job_backoff_exhausted(c, ns, &db_job).await;
 
     assert!(
         wait_for_phase(c, ns, "tgt-fail", OdooInstancePhase::InitFailed).await,
