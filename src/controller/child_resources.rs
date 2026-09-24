@@ -66,21 +66,17 @@ pub async fn apply_defaults(
         patch.insert("image".into(), json!(img));
     }
 
-    // Filestore defaults. An ephemeral filestore takes no size/class: the
-    // webhook denies setting them together with emptyDir, and any values
-    // already present from before a flip (typically injected by this very
-    // pass) are stripped here — merge-patch null removes the field — so the
-    // spec converges back to the clean shape.
+    // Filestore defaults. An ephemeral filestore gets no size/class injected
+    // (the webhook denies setting them together with emptyDir), and values
+    // left over from before a flip are deliberately left in place: they are
+    // inert while ephemeral (`ensure_filestore_pvc` returns early and the
+    // storage-class mismatch check is forced off), and they are what makes a
+    // flip back to persistent storage reuse the retained PVC as-is. Stripping
+    // them here and re-injecting the operator defaults on the way back would
+    // silently change the storage class, and start a filestore migration, as
+    // a side effect of toggling a boolean twice.
     let fs = instance.spec.filestore.as_ref();
     let mut fs_patch = serde_json::Map::new();
-    if is_ephemeral(instance) {
-        if fs.and_then(|f| f.storage_class.as_ref()).is_some() {
-            fs_patch.insert("storageClass".into(), serde_json::Value::Null);
-        }
-        if fs.and_then(|f| f.storage_size.as_ref()).is_some() {
-            fs_patch.insert("storageSize".into(), serde_json::Value::Null);
-        }
-    }
     if !is_ephemeral(instance) {
         if fs.and_then(|f| f.storage_class.as_ref()).is_none() {
             let sc = if ctx.defaults.storage_class.is_empty() {

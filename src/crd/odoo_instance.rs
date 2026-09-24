@@ -47,10 +47,14 @@ pub struct FilestoreSpec {
     /// sessions out first — the operator does not inspect the database.
     ///
     /// Semantics when true:
-    /// - no filestore PVC is created; an existing one is RETAINED, never
-    ///   deleted, so flipping back to persistent storage is lossless and a
+    /// - no filestore PVC is created; an existing one is RETAINED for as long
+    ///   as the instance exists (a flip never deletes it, but it keeps the
+    ///   instance's owner reference, so deleting the instance still deletes
+    ///   it), so flipping back to persistent storage is lossless and a
     ///   premature flip orphans data recoverably instead of destroying it;
-    /// - `storageSize` / `storageClass` must not be set (webhook-rejected);
+    /// - `storageSize` / `storageClass` must not be set or changed
+    ///   (webhook-rejected); values left over from before a flip are kept,
+    ///   inert, so that flipping back reuses the retained PVC unchanged;
     /// - backup jobs run database-only (`withFilestore` is forced off);
     /// - restore and staging-refresh jobs skip the filestore step.
     ///

@@ -112,12 +112,14 @@ fn validate(req: AdmissionRequest<OdooInstance>) -> AdmissionResponse {
     let mut warnings: Vec<String> = Vec::new();
 
     // 0. Ephemeral-filestore coherence — the one rule that also applies to
-    //    CREATE. `storageSize`/`storageClass` are meaningless on an emptyDir
+    //    CREATE. `storageSize`/`storageClass` are inert on an emptyDir
     //    filestore: deny a request that sets or changes them together with
     //    `emptyDir: true`; tolerate values that were already present before a
-    //    flip (typically injected by the operator's own defaulting pass — the
-    //    same pass strips them afterwards), but say so. A transition INTO
-    //    emptyDir additionally gets a warning spelling out the contract.
+    //    flip (typically injected by the operator's own defaulting pass; they
+    //    are kept so that flipping back reuses the retained PVC as-is), and
+    //    say so once, on the transition INTO emptyDir, which also gets a
+    //    warning spelling out the contract. Steady-state updates of an
+    //    already-ephemeral instance stay quiet.
     if let Some(new) = req.object.as_ref() {
         if let Some(new_fs) = new.spec.filestore.as_ref() {
             if new_fs.empty_dir {
@@ -136,12 +138,12 @@ fn validate(req: AdmissionRequest<OdooInstance>) -> AdmissionResponse {
                         "spec.filestore: storageSize/storageClass cannot be set together with emptyDir: true",
                     );
                 }
-                if new_size.is_some() || new_class.is_some() {
-                    warnings.push(
-                        "spec.filestore: storageSize/storageClass are ignored while emptyDir is true and will be removed by the operator".to_string(),
-                    );
-                }
                 if !old_fs.is_some_and(|f| f.empty_dir) {
+                    if new_size.is_some() || new_class.is_some() {
+                        warnings.push(
+                            "spec.filestore: storageSize/storageClass are inert while emptyDir is true; they are kept so that flipping back to persistent storage reuses the retained PVC unchanged".to_string(),
+                        );
+                    }
                     warnings.push(
                         "spec.filestore.emptyDir: the filestore is now per-pod and ephemeral; an existing filestore PVC is retained but no longer mounted. This declares that attachments live in external storage and sessions in a non-filesystem store — backups of this instance are database-only".to_string(),
                     );
@@ -656,8 +658,8 @@ mod tests {
     #[test]
     fn test_validate_allows_flip_with_leftover_defaults_and_warns() {
         // Old spec carries operator-injected size/class; the user flips
-        // emptyDir on without touching them. Must be allowed (the defaults
-        // pass strips them) with both warnings attached.
+        // emptyDir on without touching them. Must be allowed (the values stay
+        // in place, inert) with both warnings attached.
         let old = serde_json::json!({ "storageSize": "2Gi", "storageClass": "standard" });
         let new = serde_json::json!({
             "emptyDir": true, "storageSize": "2Gi", "storageClass": "standard"
@@ -696,6 +698,25 @@ mod tests {
         assert!(
             resp.warnings.is_none(),
             "an already-ephemeral instance should not warn on every update"
+        );
+    }
+
+    #[test]
+    fn test_validate_steady_ephemeral_update_with_retained_storage_is_quiet() {
+        // A flipped instance keeps its pre-flip size/class for the way back.
+        // Re-applying the same spec must neither deny nor warn.
+        let fs = serde_json::json!({
+            "emptyDir": true, "storageSize": "2Gi", "storageClass": "standard"
+        });
+        let req = make_fs_request(Some(fs.clone()), Some(fs), false);
+        let resp = validate(req);
+        assert!(
+            resp.allowed,
+            "unchanged retained size/class must be allowed"
+        );
+        assert!(
+            resp.warnings.is_none(),
+            "unchanged retained size/class must not warn on every update"
         );
     }
 }
