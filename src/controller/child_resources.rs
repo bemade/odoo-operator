@@ -41,7 +41,7 @@ use crate::helpers::{
 use crate::postgres::PostgresClusterConfig;
 
 use super::helpers::{
-    apply_extra_env, cron_depl_name, env, image_pull_secrets, odoo_security_context,
+    apply_extra_env, cron_depl_name, env, image_pull_secrets, is_ephemeral, odoo_security_context,
     odoo_volume_mounts, odoo_volumes, secret_env, FIELD_MANAGER,
 };
 use super::odoo_instance::Context;
@@ -66,24 +66,34 @@ pub async fn apply_defaults(
         patch.insert("image".into(), json!(img));
     }
 
-    // Filestore defaults.
+    // Filestore defaults. An ephemeral filestore gets no size/class injected
+    // (the webhook denies setting them together with emptyDir), and values
+    // left over from before a flip are deliberately left in place: they are
+    // inert while ephemeral (`ensure_filestore_pvc` returns early and the
+    // storage-class mismatch check is forced off), and they are what makes a
+    // flip back to persistent storage reuse the retained PVC as-is. Stripping
+    // them here and re-injecting the operator defaults on the way back would
+    // silently change the storage class, and start a filestore migration, as
+    // a side effect of toggling a boolean twice.
     let fs = instance.spec.filestore.as_ref();
     let mut fs_patch = serde_json::Map::new();
-    if fs.and_then(|f| f.storage_class.as_ref()).is_none() {
-        let sc = if ctx.defaults.storage_class.is_empty() {
-            "standard".to_string()
-        } else {
-            ctx.defaults.storage_class.clone()
-        };
-        fs_patch.insert("storageClass".into(), json!(sc));
-    }
-    if fs.and_then(|f| f.storage_size.as_ref()).is_none() {
-        let sz = if ctx.defaults.storage_size.is_empty() {
-            "2Gi".to_string()
-        } else {
-            ctx.defaults.storage_size.clone()
-        };
-        fs_patch.insert("storageSize".into(), json!(sz));
+    if !is_ephemeral(instance) {
+        if fs.and_then(|f| f.storage_class.as_ref()).is_none() {
+            let sc = if ctx.defaults.storage_class.is_empty() {
+                "standard".to_string()
+            } else {
+                ctx.defaults.storage_class.clone()
+            };
+            fs_patch.insert("storageClass".into(), json!(sc));
+        }
+        if fs.and_then(|f| f.storage_size.as_ref()).is_none() {
+            let sz = if ctx.defaults.storage_size.is_empty() {
+                "2Gi".to_string()
+            } else {
+                ctx.defaults.storage_size.clone()
+            };
+            fs_patch.insert("storageSize".into(), json!(sz));
+        }
     }
     if !fs_patch.is_empty() {
         patch.insert("filestore".into(), json!(fs_patch));
@@ -283,6 +293,15 @@ pub async fn ensure_filestore_pvc(
     oref: &OwnerReference,
     explicit_data_source: Option<TypedObjectReference>,
 ) -> Result<()> {
+    // Ephemeral filestore: no PVC is desired. Returning before any create or
+    // reconcile is also the RETENTION mechanism — an existing PVC from before
+    // a flip to emptyDir is simply left alone (owner-ref still ties its
+    // lifetime to the OdooInstance), so the flip orphans data recoverably
+    // instead of destroying it.
+    if is_ephemeral(instance) {
+        return Ok(());
+    }
+
     let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
     let pvc_name = format!("{name}-filestore-pvc");
 
@@ -774,7 +793,7 @@ pub async fn ensure_deployment(
                         Some(instance.spec.tolerations.clone())
                     },
                     security_context: Some(odoo_security_context()),
-                    volumes: Some(odoo_volumes(name)),
+                    volumes: Some(odoo_volumes(name, is_ephemeral(instance))),
                     containers: vec![apply_extra_env(
                         Container {
                             name: format!("odoo-{name}"),
@@ -1051,7 +1070,7 @@ pub async fn ensure_cron_deployment(
                         Some(instance.spec.tolerations.clone())
                     },
                     security_context: Some(odoo_security_context()),
-                    volumes: Some(odoo_volumes(name)),
+                    volumes: Some(odoo_volumes(name, is_ephemeral(instance))),
                     containers: vec![{
                         // Cron pods run --no-http so there is no HTTP endpoint
                         // for probes.  Instead we query PostgreSQL directly to

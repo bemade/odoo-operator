@@ -109,9 +109,52 @@ pub async fn run(listener: tokio::net::TcpListener, tls_cert: &str, tls_key: &st
 
 /// Validate an OdooInstance admission request.
 fn validate(req: AdmissionRequest<OdooInstance>) -> AdmissionResponse {
-    // CREATE and DELETE are always allowed.
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 0. Ephemeral-filestore coherence — the one rule that also applies to
+    //    CREATE. `storageSize`/`storageClass` are inert on an emptyDir
+    //    filestore: deny a request that sets or changes them together with
+    //    `emptyDir: true`; tolerate values that were already present before a
+    //    flip (typically injected by the operator's own defaulting pass; they
+    //    are kept so that flipping back reuses the retained PVC as-is), and
+    //    say so once, on the transition INTO emptyDir, which also gets a
+    //    warning spelling out the contract. Steady-state updates of an
+    //    already-ephemeral instance stay quiet.
+    if let Some(new) = req.object.as_ref() {
+        if let Some(new_fs) = new.spec.filestore.as_ref() {
+            if new_fs.empty_dir {
+                let old_fs = req
+                    .old_object
+                    .as_ref()
+                    .and_then(|o| o.spec.filestore.as_ref());
+                let new_size = new_fs.storage_size.as_deref();
+                let old_size = old_fs.and_then(|f| f.storage_size.as_deref());
+                let new_class = new_fs.storage_class.as_deref();
+                let old_class = old_fs.and_then(|f| f.storage_class.as_deref());
+                if (new_size.is_some() && new_size != old_size)
+                    || (new_class.is_some() && new_class != old_class)
+                {
+                    return AdmissionResponse::from(&req).deny(
+                        "spec.filestore: storageSize/storageClass cannot be set together with emptyDir: true",
+                    );
+                }
+                if !old_fs.is_some_and(|f| f.empty_dir) {
+                    if new_size.is_some() || new_class.is_some() {
+                        warnings.push(
+                            "spec.filestore: storageSize/storageClass are inert while emptyDir is true; they are kept so that flipping back to persistent storage reuses the retained PVC unchanged".to_string(),
+                        );
+                    }
+                    warnings.push(
+                        "spec.filestore.emptyDir: the filestore is now per-pod and ephemeral; an existing filestore PVC is retained but no longer mounted. This declares that attachments live in external storage and sessions in a non-filesystem store — backups of this instance are database-only".to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    // CREATE and DELETE are always allowed (beyond rule 0).
     if req.old_object.is_none() {
-        return AdmissionResponse::from(&req);
+        return with_warnings(AdmissionResponse::from(&req), warnings);
     }
 
     let old = match req.old_object {
@@ -220,7 +263,15 @@ fn validate(req: AdmissionRequest<OdooInstance>) -> AdmissionResponse {
         }
     }
 
-    AdmissionResponse::from(&req)
+    with_warnings(AdmissionResponse::from(&req), warnings)
+}
+
+/// Attach collected admission warnings to an allow response.
+fn with_warnings(mut resp: AdmissionResponse, warnings: Vec<String>) -> AdmissionResponse {
+    if !warnings.is_empty() {
+        resp.warnings = Some(warnings);
+    }
+    resp
 }
 
 /// Compare two Kubernetes quantity strings and reject if new < old.
@@ -537,6 +588,135 @@ mod tests {
         assert!(
             !resp.allowed,
             "changing to a third storageClass during migration should be rejected"
+        );
+    }
+
+    // ── emptyDir filestore coherence ────────────────────────────────────
+
+    fn make_instance_json_fs(filestore: Option<serde_json::Value>) -> serde_json::Value {
+        let mut obj = make_instance_json_full(None, None, None);
+        if let Some(fs) = filestore {
+            obj["spec"]["filestore"] = fs;
+        }
+        obj
+    }
+
+    fn make_fs_request(
+        old_fs: Option<serde_json::Value>,
+        new_fs: Option<serde_json::Value>,
+        create: bool,
+    ) -> AdmissionRequest<OdooInstance> {
+        let mut request = serde_json::json!({
+            "uid": "req-fs",
+            "kind": { "group": "bemade.org", "version": "v1alpha1", "kind": "OdooInstance" },
+            "resource": { "group": "bemade.org", "version": "v1alpha1", "resource": "odooinstances" },
+            "name": "test",
+            "namespace": "default",
+            "operation": if create { "CREATE" } else { "UPDATE" },
+            "userInfo": { "username": "test" },
+            "object": make_instance_json_fs(new_fs),
+            "dryRun": false,
+        });
+        if !create {
+            request["oldObject"] = make_instance_json_fs(old_fs);
+        }
+        let review: serde_json::Value = serde_json::json!({
+            "apiVersion": "admission.k8s.io/v1",
+            "kind": "AdmissionReview",
+            "request": request,
+        });
+        let ar: kube::core::admission::AdmissionReview<OdooInstance> =
+            serde_json::from_value(review).expect("valid AdmissionReview");
+        ar.try_into().expect("valid AdmissionRequest")
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_dir_with_storage_on_create() {
+        let req = make_fs_request(
+            None,
+            Some(serde_json::json!({ "emptyDir": true, "storageSize": "2Gi" })),
+            true,
+        );
+        let resp = validate(req);
+        assert!(
+            !resp.allowed,
+            "creating with emptyDir + storageSize should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_allows_empty_dir_create_with_contract_warning() {
+        let req = make_fs_request(None, Some(serde_json::json!({ "emptyDir": true })), true);
+        let resp = validate(req);
+        assert!(resp.allowed, "clean emptyDir create should be allowed");
+        assert!(
+            resp.warnings.as_ref().is_some_and(|w| w.len() == 1),
+            "entering emptyDir should carry exactly the contract warning"
+        );
+    }
+
+    #[test]
+    fn test_validate_allows_flip_with_leftover_defaults_and_warns() {
+        // Old spec carries operator-injected size/class; the user flips
+        // emptyDir on without touching them. Must be allowed (the values stay
+        // in place, inert) with both warnings attached.
+        let old = serde_json::json!({ "storageSize": "2Gi", "storageClass": "standard" });
+        let new = serde_json::json!({
+            "emptyDir": true, "storageSize": "2Gi", "storageClass": "standard"
+        });
+        let req = make_fs_request(Some(old), Some(new), false);
+        let resp = validate(req);
+        assert!(
+            resp.allowed,
+            "flip to emptyDir with unchanged leftover size/class should be allowed"
+        );
+        assert!(
+            resp.warnings.as_ref().is_some_and(|w| w.len() == 2),
+            "leftover-values warning + contract warning expected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_storage_change_while_ephemeral() {
+        let old = serde_json::json!({ "emptyDir": true });
+        let new = serde_json::json!({ "emptyDir": true, "storageClass": "standard" });
+        let req = make_fs_request(Some(old), Some(new), false);
+        let resp = validate(req);
+        assert!(
+            !resp.allowed,
+            "introducing storageClass while emptyDir should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_steady_ephemeral_update_is_quiet() {
+        let old = serde_json::json!({ "emptyDir": true });
+        let new = serde_json::json!({ "emptyDir": true });
+        let req = make_fs_request(Some(old), Some(new), false);
+        let resp = validate(req);
+        assert!(resp.allowed);
+        assert!(
+            resp.warnings.is_none(),
+            "an already-ephemeral instance should not warn on every update"
+        );
+    }
+
+    #[test]
+    fn test_validate_steady_ephemeral_update_with_retained_storage_is_quiet() {
+        // A flipped instance keeps its pre-flip size/class for the way back.
+        // Re-applying the same spec must neither deny nor warn.
+        let fs = serde_json::json!({
+            "emptyDir": true, "storageSize": "2Gi", "storageClass": "standard"
+        });
+        let req = make_fs_request(Some(fs.clone()), Some(fs), false);
+        let resp = validate(req);
+        assert!(
+            resp.allowed,
+            "unchanged retained size/class must be allowed"
+        );
+        assert!(
+            resp.warnings.is_none(),
+            "unchanged retained size/class must not warn on every update"
         );
     }
 }

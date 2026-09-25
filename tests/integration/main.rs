@@ -14,6 +14,7 @@ mod bootstrap;
 mod child_resources;
 mod database_missing_policy;
 mod degraded;
+mod empty_dir;
 mod environment_labels;
 mod finalizer;
 mod finalizer_postgres_cleanup_failure;

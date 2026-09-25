@@ -431,26 +431,33 @@ impl ReconcileSnapshot {
             gather_stuck_mount_pods(client, ns, instance_name, &cron_depl_name(instance)).await;
 
         // ── Filestore PVC storage-class mismatch detection ────────────
-        let (storage_class_mismatch, actual_storage_class) = {
-            let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
-            let pvc_name = format!("{instance_name}-filestore-pvc");
-            match pvcs.get(&pvc_name).await {
-                Ok(pvc) => {
-                    let actual = pvc.spec.as_ref().and_then(|s| s.storage_class_name.clone());
-                    let desired = instance
-                        .spec
-                        .filestore
-                        .as_ref()
-                        .and_then(|f| f.storage_class.clone());
-                    let mismatch = match (&actual, &desired) {
-                        (Some(a), Some(d)) => a != d,
-                        _ => false,
-                    };
-                    (mismatch, actual)
+        // An ephemeral filestore never mismatches: a PVC retained from
+        // before a flip to emptyDir is deliberately orphaned, and letting
+        // its storage class count as a mismatch would drag the instance
+        // into MigratingFilestore over a volume no pod mounts.
+        let (storage_class_mismatch, actual_storage_class) =
+            if crate::controller::helpers::is_ephemeral(instance) {
+                (false, None)
+            } else {
+                let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
+                let pvc_name = format!("{instance_name}-filestore-pvc");
+                match pvcs.get(&pvc_name).await {
+                    Ok(pvc) => {
+                        let actual = pvc.spec.as_ref().and_then(|s| s.storage_class_name.clone());
+                        let desired = instance
+                            .spec
+                            .filestore
+                            .as_ref()
+                            .and_then(|f| f.storage_class.clone());
+                        let mismatch = match (&actual, &desired) {
+                            (Some(a), Some(d)) => a != d,
+                            _ => false,
+                        };
+                        (mismatch, actual)
+                    }
+                    Err(_) => (false, None),
                 }
-                Err(_) => (false, None),
-            }
-        };
+            };
 
         // ── Migration job status ────────────────────────────────────────
         let migration_job = {

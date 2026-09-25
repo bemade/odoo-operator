@@ -81,9 +81,21 @@ impl State for BackingUp {
             format!("{instance_name}-backup")
         };
 
-        let with_filestore = if backup_job.spec.with_filestore {
+        // An ephemeral filestore is declared regenerable, so backups of such
+        // instances are database-only on principle: `withFilestore` is forced
+        // off rather than packaging asset caches that the next pod rebuilds
+        // anyway (and there is no PVC whose contents could be meant).
+        let with_filestore = if backup_job.spec.with_filestore
+            && !crate::controller::helpers::is_ephemeral(instance)
+        {
             "true"
         } else {
+            if backup_job.spec.with_filestore {
+                info!(
+                    crd_name = %backup_job.name_any(),
+                    "withFilestore requested but the instance filestore is emptyDir; running a database-only backup"
+                );
+            }
             "false"
         };
 
@@ -153,7 +165,7 @@ impl State for BackingUp {
             }
         }
 
-        // Volumes: workspace (scratch emptyDir) + filestore PVC.  No odoo-conf —
+        // Volumes: workspace (scratch emptyDir) + filestore.  No odoo-conf —
         // neither container needs it (creds are injected via cm_env).
         let workspace_mount = VolumeMount {
             name: "workspace".into(),
@@ -171,13 +183,28 @@ impl State for BackingUp {
             empty_dir: Some(Default::default()),
             ..Default::default()
         };
-        let filestore_vol = Volume {
-            name: "filestore".into(),
-            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                claim_name: format!("{instance_name}-filestore-pvc"),
-                read_only: Some(true),
-            }),
-            ..Default::default()
+        // An ephemeral instance may never have had a filestore PVC (one
+        // created with `emptyDir: true` gets none), so referencing the PVC by
+        // name would leave the pod Pending until the deadline.  Mount a
+        // job-local emptyDir instead: the package container's read-only
+        // /var/lib/odoo is then empty, which is exactly right given
+        // BACKUP_WITH_FILESTORE is forced off above.
+        let ephemeral = crate::controller::helpers::is_ephemeral(instance);
+        let filestore_vol = if ephemeral {
+            Volume {
+                name: "filestore".into(),
+                empty_dir: Some(Default::default()),
+                ..Default::default()
+            }
+        } else {
+            Volume {
+                name: "filestore".into(),
+                persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                    claim_name: format!("{instance_name}-filestore-pvc"),
+                    read_only: Some(true),
+                }),
+                ..Default::default()
+            }
         };
 
         // The package init container runs `apk add zip` (zip format only)
@@ -241,7 +268,9 @@ impl State for BackingUp {
         // read-only here.  When the instance is stopped there are no Odoo pods
         // and the PVC is unattached, so the backup pod can bind it on any node;
         // applying the required affinity would instead leave it Pending forever.
-        if snap.ready_replicas > 0 {
+        // With an ephemeral filestore there is no PVC to co-locate with, so
+        // the affinity would be a pure scheduling constraint with no purpose.
+        if snap.ready_replicas > 0 && !ephemeral {
             builder = builder.affinity(pod_affinity);
         }
 
