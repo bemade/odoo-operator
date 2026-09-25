@@ -31,7 +31,7 @@ use crate::crd::odoo_upgrade_job::OdooUpgradeJob;
 use crate::crd::shared::Phase;
 use crate::error::Result;
 
-use super::helpers::{cron_depl_name, FIELD_MANAGER};
+use super::helpers::{cron_depl_name, job_has_failed, FIELD_MANAGER};
 use super::odoo_instance::Context;
 
 // ── JobStatus ────────────────────────────────────────────────────────────────
@@ -683,7 +683,11 @@ async fn resolve_refresh_sub_job_status(
     let live = match jobs_api.get(name).await {
         Ok(job) => {
             let succeeded = job.status.as_ref().and_then(|s| s.succeeded).unwrap_or(0) > 0;
-            let failed = job.status.as_ref().and_then(|s| s.failed).unwrap_or(0) > 0;
+            // Not `status.failed > 0`: the filestore-rename (backoffLimit 8) and
+            // neutralize (backoffLimit 5) Jobs fail pods on purpose while they
+            // wait out a JuiceFS snapshot clone or a transient error.  Only
+            // Kubernetes' own Failed condition means the retries are spent.
+            let failed = job_has_failed(&job);
             if succeeded {
                 JobStatus::Succeeded
             } else if failed || job.metadata.deletion_timestamp.is_some() {

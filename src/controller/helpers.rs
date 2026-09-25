@@ -485,9 +485,28 @@ impl OdooJobBuilder {
     }
 }
 
+/// True once Kubernetes has given up on `job`: its `Failed` condition is set,
+/// which happens only after `backoffLimit` retries are exhausted (or
+/// `activeDeadlineSeconds` / a pod failure policy ends it).
+///
+/// Use this, not `status.failed > 0`, for a Job whose `backoffLimit` exists to
+/// absorb transient pod failures: `status.failed` counts every failed pod, so
+/// it goes non-zero on the first retry the Job was designed to make.
+pub fn job_has_failed(job: &Job) -> bool {
+    job.status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .is_some_and(|conds| {
+            conds
+                .iter()
+                .any(|c| c.type_ == "Failed" && c.status == "True")
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::merge_extra_env;
+    use super::{job_has_failed, merge_extra_env};
+    use k8s_openapi::api::batch::v1::{Job, JobCondition, JobStatus};
     use k8s_openapi::api::core::v1::EnvVar;
 
     fn ev(name: &str, value: &str) -> EnvVar {
@@ -533,5 +552,56 @@ mod tests {
         let extra = vec![ev("B", "B2"), ev("A", "A2")];
         let out = merge_extra_env(&base, &extra);
         assert_eq!(out, vec![ev("A", "A2"), ev("B", "B2"), ev("C", "3")]);
+    }
+
+    fn job_with(failed_pods: i32, conditions: &[(&str, &str)]) -> Job {
+        Job {
+            status: Some(JobStatus {
+                failed: Some(failed_pods),
+                conditions: Some(
+                    conditions
+                        .iter()
+                        .map(|(t, st)| JobCondition {
+                            type_: (*t).into(),
+                            status: (*st).into(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn job_retrying_after_pod_failures_has_not_failed() {
+        // A snapshot-path rename Job whose first pods ran before the JuiceFS
+        // clone landed: failed pods are counted, backoff is still in progress.
+        assert!(!job_has_failed(&job_with(3, &[])));
+    }
+
+    #[test]
+    fn job_with_only_failure_target_has_not_failed() {
+        // K8s >= 1.31 sets FailureTarget first, Failed once the pods terminate.
+        assert!(!job_has_failed(&job_with(9, &[("FailureTarget", "True")])));
+    }
+
+    #[test]
+    fn job_with_failed_condition_has_failed() {
+        assert!(job_has_failed(&job_with(
+            9,
+            &[("FailureTarget", "True"), ("Failed", "True")]
+        )));
+    }
+
+    #[test]
+    fn job_with_false_failed_condition_has_not_failed() {
+        assert!(!job_has_failed(&job_with(1, &[("Failed", "False")])));
+    }
+
+    #[test]
+    fn job_without_status_has_not_failed() {
+        assert!(!job_has_failed(&Job::default()));
     }
 }

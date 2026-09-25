@@ -616,6 +616,42 @@ pub async fn fake_job_failed(client: &Client, ns: &str, job_name: &str) {
     .expect("failed to patch job status (failure)");
 }
 
+/// Patch a batch/v1 Job's status the way the Job controller does once its
+/// `backoffLimit` is spent: failed pods counted AND the terminal `Failed`
+/// condition set.  Sub-jobs judged by Kubernetes' Failed condition (staging
+/// refresh) ignore a bare `failed` count, which only means a pod failed and
+/// the Job may still retry.  `FailureTarget` precedes `Failed`, and
+/// `startTime` is set, because the API server rejects a Failed Job status
+/// missing either.
+pub async fn fake_job_backoff_exhausted(client: &Client, ns: &str, job_name: &str) {
+    let jobs: Api<Job> = Api::namespaced(client.clone(), ns);
+    let now = "2026-01-01T00:00:00Z";
+    let condition = |type_: &str| {
+        json!({
+            "type": type_,
+            "status": "True",
+            "reason": "BackoffLimitExceeded",
+            "message": "Job has reached the specified backoff limit",
+            "lastProbeTime": now,
+            "lastTransitionTime": now,
+        })
+    };
+    let patch = json!({
+        "status": {
+            "startTime": now,
+            "failed": 1,
+            "conditions": [condition("FailureTarget"), condition("Failed")],
+        }
+    });
+    jobs.patch_status(
+        job_name,
+        &PatchParams::apply(FIELD_MANAGER),
+        &Patch::Merge(&patch),
+    )
+    .await
+    .expect("failed to patch job status (backoff exhausted)");
+}
+
 /// Patch a benign annotation on the OdooInstance to trigger a reconcile
 /// without changing meaningful state. Use in tests that need the
 /// controller to wake up after some out-of-band change (e.g. a mock fault
