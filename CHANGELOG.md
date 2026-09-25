@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.8.0](https://github.com/bemade/odoo-operator/compare/v2.7.3...v2.8.0) (2026-09-25)
+
+
+### Features
+
+* optional ephemeral (emptyDir) filestore ([#170](https://github.com/bemade/odoo-operator/issues/170)) ([a4953b0](https://github.com/bemade/odoo-operator/commit/a4953b09d92baba960ec84ea34832ddbc55569f5))
+
+
+### Bug Fixes
+
+* **refresh:** let sub-Job backoff run before declaring the refresh failed ([#186](https://github.com/bemade/odoo-operator/issues/186)) ([2873f1b](https://github.com/bemade/odoo-operator/commit/2873f1b8c6b2fb4ffee97f7b3020a6efdc68e389))
+* **refresh:** repair rename-filestore script test and same-name rename ([#187](https://github.com/bemade/odoo-operator/issues/187)) ([861f085](https://github.com/bemade/odoo-operator/commit/861f085d237172049d4fda4ef2c765400bfbb304))
+
 ## [2.7.3](https://github.com/bemade/odoo-operator/compare/v2.7.2...v2.7.3) (2026-09-22)
 
 
