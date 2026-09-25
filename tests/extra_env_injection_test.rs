@@ -1,6 +1,6 @@
 //! Tests for `apply_extra_env` — the `spec.extraEnv` / `spec.extraEnvFrom`
 //! layering applied to an instance's Odoo containers (web, cron, init,
-//! upgrade, neutralize). Operator-tooling containers (the `mc` backup
+//! upgrade, neutralize). Operator-tooling containers (the rclone backup
 //! uploader, pg-client clone/restore steps) are deliberately NOT wrapped at
 //! their call sites, so this helper is the single place the merge semantics
 //! live; the scoping is enforced by where it is (and is not) called.

@@ -25,6 +25,15 @@ use crate::error::Result;
 /// Field manager name used for server-side apply patches.
 pub const FIELD_MANAGER: &str = "odoo-operator";
 
+/// S3 client image for the backup upload and restore download containers.
+///
+/// rclone rather than MinIO's `mc`: MinIO withdrew its public client images
+/// (`quay.io/minio/mc` answers 401, `docker.io/minio/mc` no longer exists), so
+/// every backup upload and S3 restore failed with ImagePullBackOff on any node
+/// without a cached copy.  rclone speaks plain S3 (MinIO, Ceph RGW, AWS) and
+/// is pinned to an exact release so a node's image cache can't drift.
+pub const S3_CLIENT_IMAGE: &str = "docker.io/rclone/rclone:1.71.2";
+
 /// Standard pod labels applied to every Deployment, Job, and pod template
 /// owned by an OdooInstance.  Consumed by downstream systems:
 ///   - `bemade.org/environment` — Calico network policies key on this to

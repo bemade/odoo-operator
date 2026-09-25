@@ -21,7 +21,7 @@ use crate::notify;
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{
     apply_extra_env, cm_env, cron_depl_name, ensure_job_credentials_secret, env, pg_tools_image,
-    secret_env, staging_mail_env_vars, OdooJobBuilder, FIELD_MANAGER,
+    secret_env, staging_mail_env_vars, OdooJobBuilder, FIELD_MANAGER, S3_CLIENT_IMAGE,
 };
 use crate::controller::state_machine::scale_deployment;
 
@@ -170,7 +170,7 @@ impl State for Restoring {
                     }
                     init_containers.push(Container {
                         name: "download".into(),
-                        image: Some("quay.io/minio/mc:latest".into()),
+                        image: Some(S3_CLIENT_IMAGE.into()),
                         command: Some(vec![
                             "/bin/sh".into(),
                             "-c".into(),
