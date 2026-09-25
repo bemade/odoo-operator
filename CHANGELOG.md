@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.8.1](https://github.com/bemade/odoo-operator/compare/v2.8.0...v2.8.1) (2026-09-25)
+
+
+### Bug Fixes
+
+* **backup:** upload and download with rclone instead of minio/mc ([#189](https://github.com/bemade/odoo-operator/issues/189)) ([0d088e8](https://github.com/bemade/odoo-operator/commit/0d088e80dfefbe675ebfbb9ccdd10692a0fc098d))
+
 ## [2.8.0](https://github.com/bemade/odoo-operator/compare/v2.7.3...v2.8.0) (2026-09-25)
 
 
