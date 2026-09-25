@@ -159,7 +159,9 @@ fi
 # Verify BEFORE mutating, so a partially-populated tree is never renamed.
 verify_filestore "$VERIFY_DIR"
 
-if [ "$VERIFY_DIR" = "$SRC_DIR" ]; then
+# With identical db names SRC_DIR is TGT_DIR: already in place, and merging a
+# directory into itself would fail.
+if [ "$VERIFY_DIR" = "$SRC_DIR" ] && [ "$SRC_DIR" != "$TGT_DIR" ]; then
     if [ ! -e "$TGT_DIR" ]; then
         # Fast path: atomic rename within the same filesystem.
         mv "$SRC_DIR" "$TGT_DIR"
