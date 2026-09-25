@@ -22,7 +22,7 @@ use crate::notify;
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{
     cm_env, ensure_job_credentials_secret, env, pg_tools_image, secret_env, OdooJobBuilder,
-    FIELD_MANAGER,
+    FIELD_MANAGER, S3_CLIENT_IMAGE,
 };
 
 const DUMP_SCRIPT: &str = include_str!("../../../scripts/backup-dump.sh");
@@ -256,7 +256,7 @@ impl State for BackingUp {
             ])
             .containers(vec![Container {
                 name: "upload".into(),
-                image: Some("quay.io/minio/mc:latest".into()),
+                image: Some(S3_CLIENT_IMAGE.into()),
                 command: Some(vec!["/bin/sh".into(), "-c".into(), UPLOAD_SCRIPT.into()]),
                 env: Some(upload_env),
                 volume_mounts: Some(vec![workspace_mount]),
