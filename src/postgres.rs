@@ -45,6 +45,21 @@ pub trait PostgresManager: Send + Sync {
     /// false-positive flips on transient outages.
     async fn database_exists(&self, pg: &PostgresClusterConfig, db_name: &str) -> Result<bool>;
 
+    /// Drop `db_name` if it exists and create it empty, owned by `username`.
+    ///
+    /// Connects as that tenant role (a CREATEDB role), so the database is
+    /// owned by the role that will later load into it. Used to prepare the
+    /// temp database of a staging refresh before `scripts/clone-db.sh` runs,
+    /// so that `ensure_extensions` — whose IMMUTABLE step needs the admin
+    /// connection the clone Job does not have — can run on it first.
+    async fn recreate_database(
+        &self,
+        pg: &PostgresClusterConfig,
+        username: &str,
+        password: &str,
+        db_name: &str,
+    ) -> Result<()>;
+
     /// Ensure the `report.url` system parameter in the Odoo database points to
     /// the in-cluster web service so that cron-triggered report generation can
     /// reach the wkhtmltopdf endpoint.
@@ -391,6 +406,38 @@ impl PostgresManager for PgPostgresManager {
         Ok(row.get(0))
     }
 
+    async fn recreate_database(
+        &self,
+        pg: &PostgresClusterConfig,
+        username: &str,
+        password: &str,
+        db_name: &str,
+    ) -> Result<()> {
+        let connstr = format!(
+            "host={} port={} user={} password={} dbname=postgres",
+            pg.host, pg.port, username, password
+        );
+        let (client, connection) = tokio_postgres::connect(&connstr, NoTls).await?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                warn!("postgres connection error: {e}");
+            }
+        });
+        let safe_db = quote_ident(db_name);
+        // Separate statements: neither may run inside a transaction block.
+        client
+            .execute(
+                &format!("DROP DATABASE IF EXISTS {safe_db} WITH (FORCE)"),
+                &[],
+            )
+            .await?;
+        client
+            .execute(&format!("CREATE DATABASE {safe_db}"), &[])
+            .await?;
+        info!(%db_name, owner = %username, "recreated empty database");
+        Ok(())
+    }
+
     async fn detect_server_major_version(&self, pg: &PostgresClusterConfig) -> Result<u32> {
         let connstr = format!(
             "host={} port={} user={} password={} dbname=postgres",
@@ -675,6 +722,15 @@ impl PostgresManager for NoopPostgresManager {
     }
     async fn database_exists(&self, _: &PostgresClusterConfig, _: &str) -> Result<bool> {
         Ok(true)
+    }
+    async fn recreate_database(
+        &self,
+        _: &PostgresClusterConfig,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<()> {
+        Ok(())
     }
     async fn ensure_report_url(
         &self,

@@ -84,6 +84,17 @@ pub fn db_name(instance: &OdooInstance) -> String {
     format!("odoo_{}", sanitise_uid(uid))
 }
 
+/// Whether the operator should make `unaccent` available (and indexable) in
+/// the instance's database — `spec.database.unaccent`, which defaults to true.
+pub fn wants_unaccent(instance: &OdooInstance) -> bool {
+    instance
+        .spec
+        .database
+        .as_ref()
+        .map(|d| d.unaccent)
+        .unwrap_or(true)
+}
+
 /// Generate a cryptographically random 48-hex-char password.
 pub fn generate_password() -> String {
     let mut bytes = [0u8; 24];

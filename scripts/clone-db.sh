@@ -5,6 +5,11 @@
 # restore, then swaps into the live name at the end (blue/green cutover
 # so a failure leaves the previous staging DB intact).
 #
+# The controller creates $TEMP_DB (empty, owned by TGT_USER) and installs
+# its extensions before this Job starts: making unaccent IMMUTABLE, which
+# the dump's unaccent() trigram indexes need, takes the admin connection
+# this script does not have.
+#
 # Required env vars:
 #   SRC_HOST, SRC_PORT, SRC_USER, SRC_PASSWORD, SRC_DB
 #       — source Postgres connection (the production DB)
@@ -27,13 +32,6 @@ cleanup_on_failure() {
 trap cleanup_on_failure EXIT
 
 echo "=== Clone DB: $SRC_DB@$SRC_HOST -> $TGT_DB@$TGT_HOST (via $TEMP_DB) ==="
-
-# Drop any leftover temp DB from a prior failed run.
-PGPASSWORD=$TGT_PASSWORD psql -h "$TGT_HOST" -p "$TGT_PORT" -U "$TGT_USER" \
-    -d postgres -c "DROP DATABASE IF EXISTS \"$TEMP_DB\" WITH (FORCE)"
-
-PGPASSWORD=$TGT_PASSWORD createdb -h "$TGT_HOST" -p "$TGT_PORT" \
-    -U "$TGT_USER" "$TEMP_DB"
 
 # pg_dump reads via an MVCC snapshot — source writes keep flowing.
 # --no-owner / --no-acl drop ownership & ACL statements (roles from the

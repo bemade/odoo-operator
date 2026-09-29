@@ -496,12 +496,7 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
         // does not stop the instance serving, so it must never block a
         // reconcile. Note the running workers only pick up a newly created
         // unaccent at registry load, i.e. on their next restart.
-        let with_unaccent = instance
-            .spec
-            .database
-            .as_ref()
-            .map(|d| d.unaccent)
-            .unwrap_or(true);
+        let with_unaccent = crate::helpers::wants_unaccent(instance);
         if let Err(e) = ctx
             .postgres
             .ensure_extensions(&pg_cluster, &odoo_user, &odoo_pass, &db, with_unaccent)

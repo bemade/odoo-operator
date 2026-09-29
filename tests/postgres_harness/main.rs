@@ -6,6 +6,8 @@
 
 mod harness;
 
+mod clone_db;
+
 mod database_exists;
 mod delete_role_errors;
 mod ensure_role;
