@@ -286,8 +286,8 @@ impl State for CloningFromSource {
             // for the refresh suffix.  An 8-hex-char sha256 prefix of
             // the refresh CR's UID gives us uniqueness without exceeding
             // the limit and is stable across reconciles on the same CR
-            // (important so the trap-drop at the start of clone-db.sh
-            // can clean up a leftover temp DB from a failed prior run).
+            // (important so `recreate_database` below replaces a leftover
+            // temp DB from a failed prior attempt instead of stacking one).
             let uid = refresh.metadata.uid.as_deref().unwrap_or("norun");
             let short = {
                 use sha2::{Digest, Sha256};
@@ -314,6 +314,25 @@ impl State for CloningFromSource {
                 src_major, tgt_major, %db_image,
                 "selected pg client image for staging refresh DB clone"
             );
+
+            // Prepare the temp DB here rather than in clone-db.sh. The dump
+            // recreates Odoo's trigram indexes over `unaccent(...)` but not
+            // the IMMUTABLE flag they depend on (pg_dump does not dump the
+            // volatility of an extension member function), and setting it
+            // needs the admin connection, which the clone Job does not get.
+            // Without it the load aborts with "functions in index expression
+            // must be marked IMMUTABLE". unaccent is wanted when either side
+            // wants it: the source's dump brings it along regardless.
+            let (tgt_user, tgt_pass) =
+                child_resources::read_odoo_credentials(&ctx.client, &ns, &inst_name).await?;
+            ctx.postgres
+                .recreate_database(&tgt_pg, &tgt_user, &tgt_pass, &temp_db)
+                .await?;
+            let with_unaccent = crate::helpers::wants_unaccent(instance)
+                || crate::helpers::wants_unaccent(&source_instance);
+            ctx.postgres
+                .ensure_extensions(&tgt_pg, &tgt_user, &tgt_pass, &temp_db, with_unaccent)
+                .await?;
 
             let job = build_db_clone_job(
                 &refresh.name_any(),

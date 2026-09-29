@@ -422,6 +422,16 @@ impl PostgresManager for MockPostgresManager {
             .unwrap_or(true))
     }
 
+    async fn recreate_database(
+        &self,
+        _: &PostgresClusterConfig,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> PgResult<()> {
+        Ok(())
+    }
+
     async fn ensure_report_url(
         &self,
         _: &PostgresClusterConfig,

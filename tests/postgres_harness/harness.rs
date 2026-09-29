@@ -191,3 +191,18 @@ pub async fn try_connect_as(
     client.simple_query("SELECT 1").await?;
     Ok(())
 }
+
+/// Run a shell script with `bash` inside the harness container, where the
+/// server is reachable at `127.0.0.1:5432`. Used to exercise `scripts/*.sh`
+/// against a real server with the same client tools the image ships.
+pub fn run_script(script: &str, envs: &[(&str, &str)]) -> std::process::Output {
+    let h = harness();
+    let mut cmd = Command::new("docker");
+    cmd.arg("exec");
+    for (k, v) in envs {
+        cmd.arg("-e").arg(format!("{k}={v}"));
+    }
+    cmd.args([&h.container_id, "bash", "-c", script])
+        .output()
+        .expect("failed to spawn docker exec")
+}
