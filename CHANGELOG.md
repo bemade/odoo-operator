@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.8.2](https://github.com/bemade/odoo-operator/compare/v2.8.1...v2.8.2) (2026-09-29)
+
+
+### Bug Fixes
+
+* **staging-refresh:** prepare the clone temp DB with an indexable unaccent ([#192](https://github.com/bemade/odoo-operator/issues/192)) ([0d3cde0](https://github.com/bemade/odoo-operator/commit/0d3cde07930681436273b25e462ac47191c3838c)), closes [#191](https://github.com/bemade/odoo-operator/issues/191)
+
 ## [2.8.1](https://github.com/bemade/odoo-operator/compare/v2.8.0...v2.8.1) (2026-09-25)
 
 
