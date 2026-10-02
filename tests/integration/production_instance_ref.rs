@@ -1,4 +1,6 @@
-use kube::api::{Api, PostParams};
+use k8s_openapi::api::core::v1::PersistentVolumeClaim;
+use k8s_openapi::api::storage::v1::StorageClass;
+use kube::api::{Api, DeleteParams, PostParams};
 use serde_json::json;
 
 use super::common::*;
@@ -145,4 +147,101 @@ async fn production_instance_ref_rejected_on_production() -> anyhow::Result<()> 
         "unexpected rejection message: {msg}"
     );
     Ok(())
+}
+
+/// The filestore PVC the operator creates for a fresh staging instance whose
+/// production source PVC lives on a StorageClass of `provisioner` (#195).
+///
+/// The source OdooInstance is never created: `get_pvc_source` only reads the
+/// source's `{name}-filestore-pvc`, which is created here directly.
+async fn staging_pvc_data_source_kind(provisioner: &str) -> Option<String> {
+    let ctx = TestContext::new_ns().await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+    let class = format!("{ns}-sc");
+
+    let classes: Api<StorageClass> = Api::all(c.clone());
+    let sc: StorageClass = serde_json::from_value(json!({
+        "apiVersion": "storage.k8s.io/v1",
+        "kind": "StorageClass",
+        "metadata": { "name": class },
+        "provisioner": provisioner,
+    }))
+    .unwrap();
+    classes.create(&PostParams::default(), &sc).await.unwrap();
+
+    let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(c.clone(), ns);
+    let src_pvc: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": { "name": "prod-filestore-pvc", "namespace": ns },
+        "spec": {
+            "accessModes": ["ReadWriteMany"],
+            "storageClassName": class,
+            "resources": { "requests": { "storage": "1Gi" } },
+        }
+    }))
+    .unwrap();
+    pvcs.create(&PostParams::default(), &src_pvc).await.unwrap();
+
+    let target: OdooInstance = serde_json::from_value(json!({
+        "apiVersion": "bemade.org/v1alpha1",
+        "kind": "OdooInstance",
+        "metadata": { "name": "staging", "namespace": ns },
+        "spec": {
+            "replicas": 1,
+            "cron": { "replicas": 1 },
+            "adminPassword": "admin",
+            "image": "odoo:18.0",
+            "ingress": {
+                "hosts": ["staging.example.com"],
+                "issuer": "letsencrypt",
+                "class": "nginx",
+            },
+            "filestore": { "storageSize": "1Gi", "storageClass": class },
+            "environment": "Staging",
+            "productionInstanceRef": { "name": "prod" },
+        }
+    }))
+    .unwrap();
+    let instances: Api<OdooInstance> = Api::namespaced(c.clone(), ns);
+    instances
+        .create(&PostParams::default(), &target)
+        .await
+        .unwrap();
+
+    assert!(
+        wait_for(TIMEOUT, POLL, || {
+            let api = pvcs.clone();
+            async move {
+                api.get_opt("staging-filestore-pvc")
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
+            }
+        })
+        .await,
+        "operator never created the staging filestore PVC"
+    );
+    let pvc = pvcs.get("staging-filestore-pvc").await.unwrap();
+    let _ = classes.delete(&class, &DeleteParams::default()).await;
+    pvc.spec.and_then(|s| s.data_source_ref).map(|r| r.kind)
+}
+
+/// #195: a driver that restores only from a VolumeSnapshot (JuiceFS) rejects
+/// a PersistentVolumeClaim data source and leaves the PVC Pending forever, so
+/// the staging PVC must be created empty — a refresh fills it from a snapshot.
+#[tokio::test]
+async fn staging_pvc_not_cloned_on_snapshot_only_driver() {
+    assert_eq!(staging_pvc_data_source_kind("csi.juicefs.com").await, None);
+}
+
+/// Control: on a clone-capable driver the staging PVC still clones the
+/// production PVC directly.
+#[tokio::test]
+async fn staging_pvc_cloned_on_clone_capable_driver() {
+    assert_eq!(
+        staging_pvc_data_source_kind("cephfs.csi.ceph.com").await,
+        Some("PersistentVolumeClaim".to_string())
+    );
 }

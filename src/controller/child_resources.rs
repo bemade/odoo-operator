@@ -17,6 +17,7 @@ use k8s_openapi::api::{
         HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
         IngressServiceBackend, IngressSpec as K8sIngressSpec, IngressTLS, ServiceBackendPort,
     },
+    storage::v1::StorageClass,
 };
 use k8s_openapi::apimachinery::pkg::{
     api::resource::Quantity,
@@ -397,6 +398,30 @@ pub async fn ensure_filestore_pvc(
     Ok(())
 }
 
+/// CSI provisioners that accept only a `VolumeSnapshot` as a PVC data source
+/// and reject a `PersistentVolumeClaim` one ("only VolumeSnapshot data source
+/// is supported"), which would leave a cloned PVC Pending forever.
+const SNAPSHOT_ONLY_PROVISIONERS: &[&str] = &["csi.juicefs.com"];
+
+/// Whether `class` is provisioned by a driver in `SNAPSHOT_ONLY_PROVISIONERS`.
+/// A class that cannot be read is assumed clone-capable, which keeps the
+/// behaviour from before the check existed.
+async fn is_snapshot_only_class(client: &Client, class: &str) -> bool {
+    let classes: Api<StorageClass> = Api::all(client.clone());
+    match classes.get_opt(class).await {
+        Ok(Some(sc)) => SNAPSHOT_ONLY_PROVISIONERS.contains(&sc.provisioner.as_str()),
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(
+                storage_class = %class,
+                error = %e,
+                "could not read StorageClass; assuming it can clone PVCs"
+            );
+            false
+        }
+    }
+}
+
 /// Make a snapshot from the production instance PVC if possible,
 /// returns a reference to be used in the PVC spec as a source_ref.
 async fn get_pvc_source(
@@ -447,6 +472,17 @@ async fn get_pvc_source(
             "get_pvc_source: storage class mismatch — falling back to copy"
         );
         return None;
+    }
+    if let Some(class) = prod_sc {
+        if is_snapshot_only_class(client, class).await {
+            tracing::info!(
+                name = %inst_name,
+                storage_class = %class,
+                "get_pvc_source: driver restores only from VolumeSnapshots — \
+                 creating the PVC empty; a staging refresh fills it"
+            );
+            return None;
+        }
     }
     tracing::info!(
         name = %inst_name,
