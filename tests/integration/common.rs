@@ -454,6 +454,16 @@ impl PostgresManager for MockPostgresManager {
         Ok(())
     }
 
+    async fn has_custom_unaccent(
+        &self,
+        _: &PostgresClusterConfig,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> PgResult<bool> {
+        Ok(false)
+    }
+
     async fn detect_server_major_version(&self, _: &PostgresClusterConfig) -> PgResult<u32> {
         Ok(18)
     }
