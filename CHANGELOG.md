@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.8.3](https://github.com/bemade/odoo-operator/compare/v2.8.2...v2.8.3) (2026-10-02)
+
+
+### Bug Fixes
+
+* **staging-refresh:** leave unaccent to the dump when the source provides it its own way ([#196](https://github.com/bemade/odoo-operator/issues/196)) ([e6040a1](https://github.com/bemade/odoo-operator/commit/e6040a13cd078f8714b6276e4cc563abb132a1df))
+
 ## [2.8.2](https://github.com/bemade/odoo-operator/compare/v2.8.1...v2.8.2) (2026-09-29)
 
 
