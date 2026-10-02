@@ -56,6 +56,13 @@ rules:
     resources: ["volumeattachments"]
     verbs: ["get", "list", "delete"]
 
+  # StorageClasses — read the provisioner so a staging filestore PVC is
+  # not created as a PVC clone on drivers that only restore from a
+  # VolumeSnapshot (JuiceFS).
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get"]
+
   # VolumeSnapshots — staging refresh's snapshot path creates a snapshot
   # of the source filestore PVC and uses it as the dest PVC's
   # dataSourceRef.  Required for both CephFS and JuiceFS backends; the
