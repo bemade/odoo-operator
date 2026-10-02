@@ -323,13 +323,33 @@ impl State for CloningFromSource {
             // Without it the load aborts with "functions in index expression
             // must be marked IMMUTABLE". unaccent is wanted when either side
             // wants it: the source's dump brings it along regardless.
+            //
+            // Except when the source provides unaccent its own way (Odoo.sh:
+            // the extension in its own schema behind an IMMUTABLE wrapper in
+            // `public`). The dump then defines that wrapper, already
+            // IMMUTABLE, and an extension created here in `public` would
+            // collide with it — so leave unaccent to the dump.
+            let (src_user, src_pass) =
+                child_resources::read_odoo_credentials(&ctx.client, source_ns, source_name).await?;
+            let custom_unaccent = ctx
+                .postgres
+                .has_custom_unaccent(&src_pg, &src_user, &src_pass, &source_db)
+                .await?;
             let (tgt_user, tgt_pass) =
                 child_resources::read_odoo_credentials(&ctx.client, &ns, &inst_name).await?;
             ctx.postgres
                 .recreate_database(&tgt_pg, &tgt_user, &tgt_pass, &temp_db)
                 .await?;
-            let with_unaccent = crate::helpers::wants_unaccent(instance)
-                || crate::helpers::wants_unaccent(&source_instance);
+            let with_unaccent = !custom_unaccent
+                && (crate::helpers::wants_unaccent(instance)
+                    || crate::helpers::wants_unaccent(&source_instance));
+            if custom_unaccent {
+                info!(
+                    crd_name = %refresh.name_any(),
+                    "source provides unaccent outside the extension's default layout; \
+                     leaving it to the dump"
+                );
+            }
             ctx.postgres
                 .ensure_extensions(&tgt_pg, &tgt_user, &tgt_pass, &temp_db, with_unaccent)
                 .await?;

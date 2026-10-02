@@ -102,6 +102,28 @@ pub trait PostgresManager: Send + Sync {
         with_unaccent: bool,
     ) -> Result<()>;
 
+    /// Whether `db_name` provides `unaccent` some other way than the
+    /// `unaccent` extension installed in its current schema — the layout
+    /// `ensure_extensions` produces.
+    ///
+    /// Odoo.sh, for one, installs the extension in a schema of its own and
+    /// reaches it through a plain IMMUTABLE SQL `public.unaccent(text)`
+    /// wrapper, which Odoo's trigram indexes are then built on. A dump of such
+    /// a database defines that wrapper itself, so a target that already got
+    /// the extension in `public` rejects it ("function unaccent already
+    /// exists"). The staging refresh asks this of the source to decide whether
+    /// to prepare the temp DB with unaccent or leave it to the dump.
+    ///
+    /// Connects as `username`, the role the dump will run as, so the current
+    /// schema is the one the dump and the target resolve against.
+    async fn has_custom_unaccent(
+        &self,
+        pg: &PostgresClusterConfig,
+        username: &str,
+        password: &str,
+        db_name: &str,
+    ) -> Result<bool>;
+
     /// Query the running PostgreSQL server for its major version (e.g. 16, 17, 18).
     async fn detect_server_major_version(&self, pg: &PostgresClusterConfig) -> Result<u32>;
 
@@ -401,6 +423,44 @@ impl PostgresManager for PgPostgresManager {
             .query_one(
                 "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
                 &[&db_name],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
+    async fn has_custom_unaccent(
+        &self,
+        pg: &PostgresClusterConfig,
+        username: &str,
+        password: &str,
+        db_name: &str,
+    ) -> Result<bool> {
+        let connstr = format!(
+            "host={} port={} user={} password={} dbname={}",
+            pg.host, pg.port, username, password, db_name
+        );
+        let (client, connection) = tokio_postgres::connect(&connstr, NoTls).await?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                warn!("postgres connection error: {e}");
+            }
+        });
+        // Custom when the extension lives outside the current schema, or when
+        // something in the current schema named unaccent is not an extension
+        // member (a wrapper, whichever extension it calls into).
+        let row = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_extension \
+                                 WHERE extname = 'unaccent' \
+                                   AND extnamespace <> current_schema::regnamespace) \
+                     OR EXISTS (SELECT 1 FROM pg_proc p \
+                                 WHERE p.proname = 'unaccent' \
+                                   AND p.pronamespace = current_schema::regnamespace \
+                                   AND NOT EXISTS (SELECT 1 FROM pg_depend d \
+                                                    WHERE d.classid = 'pg_proc'::regclass \
+                                                      AND d.objid = p.oid \
+                                                      AND d.deptype = 'e'))",
+                &[],
             )
             .await?;
         Ok(row.get(0))
@@ -751,6 +811,15 @@ impl PostgresManager for NoopPostgresManager {
         _: bool,
     ) -> Result<()> {
         Ok(())
+    }
+    async fn has_custom_unaccent(
+        &self,
+        _: &PostgresClusterConfig,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<bool> {
+        Ok(false)
     }
     async fn detect_server_major_version(&self, _: &PostgresClusterConfig) -> Result<u32> {
         Ok(18)
