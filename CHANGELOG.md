@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.8.4](https://github.com/bemade/odoo-operator/compare/v2.8.3...v2.8.4) (2026-10-02)
+
+
+### Bug Fixes
+
+* **filestore:** create a staging PVC empty on snapshot-only CSI drivers ([#198](https://github.com/bemade/odoo-operator/issues/198)) ([1d22a03](https://github.com/bemade/odoo-operator/commit/1d22a03be64d0fd0177cd56bc0534afc39cfc7ed)), closes [#195](https://github.com/bemade/odoo-operator/issues/195)
+
 ## [2.8.3](https://github.com/bemade/odoo-operator/compare/v2.8.2...v2.8.3) (2026-10-02)
 
 
