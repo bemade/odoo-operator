@@ -402,6 +402,27 @@ impl State for CloningFromSource {
         // to carry over).
         let filestore_skipped =
             refresh.spec.skip_filestore || is_ephemeral(instance) || is_ephemeral(&source_instance);
+
+        // The status roll-up in `state_machine.rs` only knows `skipFilestore`;
+        // for an ephemeral skip it would find neither a phase nor a Job and
+        // keep the refresh Active forever.  Record the skip as Completed.
+        if filestore_skipped
+            && !refresh.spec.skip_filestore
+            && refresh
+                .status
+                .as_ref()
+                .and_then(|s| s.filestore_phase.as_ref())
+                .is_none()
+        {
+            patch_refresh_status(
+                &ctx.client,
+                &ns,
+                &refresh.name_any(),
+                &json!({"status": {"filestorePhase": Phase::Completed}}),
+            )
+            .await?;
+        }
+
         if !filestore_skipped
             && refresh
                 .status

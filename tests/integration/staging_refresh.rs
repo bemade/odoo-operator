@@ -152,6 +152,100 @@ async fn staging_refresh_happy_path() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Refresh onto an emptyDir target without `skipFilestore`: no filestore Job
+/// is created, the skip is recorded as `filestorePhase: Completed`, and the
+/// refresh finishes once the DB and neutralize Jobs succeed.
+#[tokio::test]
+async fn staging_refresh_onto_empty_dir_target_completes() -> anyhow::Result<()> {
+    let ctx = TestContext::new("src-ephem").await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+    let source_ready = fast_track_to_running(&ctx, "src-ephem-init").await;
+
+    let target: OdooInstance = serde_json::from_value(json!({
+        "apiVersion": "bemade.org/v1alpha1",
+        "kind": "OdooInstance",
+        "metadata": { "name": "tgt-ephem", "namespace": ns },
+        "spec": {
+            "replicas": 1,
+            "cron": { "replicas": 1 },
+            "adminPassword": "admin",
+            "image": "odoo:18.0",
+            "ingress": {
+                "hosts": ["tgt-ephem.example.com"],
+                "issuer": "letsencrypt",
+                "class": "nginx",
+            },
+            "filestore": { "emptyDir": true },
+            "init": { "enabled": false },
+        }
+    }))
+    .unwrap();
+    let instances: Api<OdooInstance> = Api::namespaced(c.clone(), ns);
+    instances.create(&PostParams::default(), &target).await?;
+    assert!(
+        wait_for_phase(c, ns, "tgt-ephem", OdooInstancePhase::Uninitialized).await,
+        "expected target Uninitialized"
+    );
+
+    let refreshes: Api<OdooStagingRefreshJob> = Api::namespaced(c.clone(), ns);
+    let refresh: OdooStagingRefreshJob = serde_json::from_value(json!({
+        "apiVersion": "bemade.org/v1alpha1",
+        "kind": "OdooStagingRefreshJob",
+        "metadata": { "name": "tgt-ephem-refresh", "namespace": ns },
+        "spec": {
+            "odooInstanceRef": { "name": "tgt-ephem" },
+            "source": { "instanceName": "src-ephem" },
+            "filestoreMethod": "copy",
+        }
+    }))
+    .unwrap();
+    refreshes.create(&PostParams::default(), &refresh).await?;
+
+    assert!(
+        wait_for_phase(c, ns, "tgt-ephem", OdooInstancePhase::CloningFromSource).await,
+        "expected CloningFromSource after refresh job created"
+    );
+
+    // The skipped filestore step is recorded without a Job.
+    wait_for_filestore_phase(c, ns, "tgt-ephem-refresh", Phase::Completed).await;
+    let jobs: Api<Job> = Api::namespaced(c.clone(), ns);
+    let succeed = |job_name: String| {
+        let jobs = jobs.clone();
+        async move {
+            let patch = json!({ "status": { "succeeded": 1 } });
+            jobs.patch_status(
+                &job_name,
+                &PatchParams::apply("odoo-operator-test"),
+                &Patch::Merge(&patch),
+            )
+            .await
+            .expect("patch job status");
+        }
+    };
+    let db_job = wait_for_refresh_sub_job(c, ns, "tgt-ephem-refresh", "dbJobName").await;
+    succeed(db_job).await;
+
+    let neut_job = wait_for_refresh_sub_job(c, ns, "tgt-ephem-refresh", "neutralizeJobName").await;
+    succeed(neut_job).await;
+
+    assert!(
+        wait_for_phase(c, ns, "tgt-ephem", OdooInstancePhase::Starting).await,
+        "expected Starting after DB and neutralize succeeded on an emptyDir target"
+    );
+    let after = refreshes.get("tgt-ephem-refresh").await?;
+    assert!(
+        after
+            .status
+            .as_ref()
+            .and_then(|s| s.filestore_job_name.as_deref())
+            .is_none(),
+        "no filestore Job should be created for an emptyDir target"
+    );
+
+    source_ready.abort();
+    Ok(())
+}
+
 /// Failure path: DB clone Job fails → refresh aggregate Failed → target
 /// transitions to InitFailed.  Kept deliberately simple (doesn't test
 /// filestore-only or neutralize-only failures — the aggregate logic treats
