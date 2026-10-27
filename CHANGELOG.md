@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.8.5](https://github.com/bemade/odoo-operator/compare/v2.8.4...v2.8.5) (2026-10-27)
+
+
+### Bug Fixes
+
+* **staging-refresh:** record the ephemeral filestore skip so the refresh completes ([#202](https://github.com/bemade/odoo-operator/issues/202)) ([289b687](https://github.com/bemade/odoo-operator/commit/289b6879d801b5633f8851286357844ab7df224c)), closes [#201](https://github.com/bemade/odoo-operator/issues/201)
+
 ## [2.8.4](https://github.com/bemade/odoo-operator/compare/v2.8.3...v2.8.4) (2026-10-02)
 
 
