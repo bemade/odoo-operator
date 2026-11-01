@@ -114,3 +114,120 @@ async fn ensure_role_succeeds_without_alter_privilege_when_password_is_current(
     cleanup_role(limited_admin).await;
     Ok(())
 }
+
+/// The role's stored SCRAM verifier. SCRAM re-salts on every
+/// `ALTER ROLE ... WITH PASSWORD`, so a changed value proves an ALTER ran
+/// even when the password itself is the same.
+async fn stored_verifier(username: &str) -> String {
+    admin_client()
+        .await
+        .query_one(
+            "SELECT rolpassword FROM pg_authid WHERE rolname = $1",
+            &[&username],
+        )
+        .await
+        .expect("role must exist")
+        .get(0)
+}
+
+/// SQLSTATE of a failed login attempt, for asserting why it failed.
+async fn login_sqlstate(username: &str, password: &str) -> Option<String> {
+    try_connect_as(username, password, "postgres")
+        .await
+        .err()
+        .and_then(|e| e.code().map(|c| c.code().to_string()))
+}
+
+/// When the password probe fails for a reason other than authentication
+/// (here: the role's connection limit, rejected with SQLSTATE 53300 after
+/// the password was accepted; in production typically a saturated or briefly
+/// unreachable server), there is no evidence the password is wrong.
+/// `ensure_role` must not reset it, and must not fail the reconcile.
+#[tokio::test]
+async fn ensure_role_does_not_reset_password_when_probe_fails_without_auth_error(
+) -> anyhow::Result<()> {
+    let username = "odoo.test.ensure_role_probe_inconclusive";
+    cleanup_role(username).await;
+
+    let mgr = pg_manager();
+    let cfg = cluster_config();
+    mgr.ensure_role(&cfg, username, "steady-password")
+        .await
+        .expect("initial ensure_role failed");
+
+    let admin = admin_client().await;
+    admin
+        .simple_query(&format!(r#"ALTER ROLE "{username}" CONNECTION LIMIT 0"#))
+        .await?;
+    // Precondition: the correct password is accepted, then the connection is
+    // refused for a non-authentication reason.
+    assert_eq!(
+        login_sqlstate(username, "steady-password").await.as_deref(),
+        Some("53300"),
+        "with CONNECTION LIMIT 0 a correct-password login must fail with \
+         too_many_connections"
+    );
+
+    let before = stored_verifier(username).await;
+    mgr.ensure_role(&cfg, username, "steady-password")
+        .await
+        .expect("an inconclusive password probe must not fail ensure_role");
+    let after = stored_verifier(username).await;
+
+    assert_eq!(
+        before, after,
+        "ensure_role ran ALTER ROLE ... WITH PASSWORD although the probe \
+         failed for a non-authentication reason"
+    );
+
+    cleanup_role(username).await;
+    Ok(())
+}
+
+/// Postgres authenticates before it checks the role's connection limit, so a
+/// wrong password is still reported as an authentication failure (28P01) and
+/// `ensure_role` must still reset it (issue #119, part C).
+#[tokio::test]
+async fn ensure_role_resets_wrong_password_even_when_connection_limit_is_zero() -> anyhow::Result<()>
+{
+    let username = "odoo.test.ensure_role_probe_auth_fail";
+    cleanup_role(username).await;
+
+    let mgr = pg_manager();
+    let cfg = cluster_config();
+    mgr.ensure_role(&cfg, username, "old-password")
+        .await
+        .expect("initial ensure_role failed");
+
+    let admin = admin_client().await;
+    admin
+        .simple_query(&format!(r#"ALTER ROLE "{username}" CONNECTION LIMIT 0"#))
+        .await?;
+    // Precondition: authentication runs before the connection-limit check.
+    assert_eq!(
+        login_sqlstate(username, "new-password").await.as_deref(),
+        Some("28P01"),
+        "a wrong password must fail with invalid_password even when the \
+         role's connection limit is 0"
+    );
+
+    let before = stored_verifier(username).await;
+    mgr.ensure_role(&cfg, username, "new-password")
+        .await
+        .expect("ensure_role with a new password failed");
+    assert_ne!(
+        before,
+        stored_verifier(username).await,
+        "ensure_role must reset a password that fails authentication"
+    );
+
+    admin
+        .simple_query(&format!(r#"ALTER ROLE "{username}" CONNECTION LIMIT -1"#))
+        .await?;
+    try_connect_as(username, "new-password", "postgres")
+        .await
+        .expect("the reset password must authenticate");
+
+    cleanup_role(username).await;
+    Ok(())
+}
