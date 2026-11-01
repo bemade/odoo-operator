@@ -1,8 +1,10 @@
 #!/bin/bash
 # Neutralizes a freshly-cloned Odoo database and verifies that no active
-# mail servers remain.  Used as the post-clone barrier step of
-# OdooStagingRefreshJob, *after* both the DB clone and filestore copy
-# have succeeded.
+# mail servers remain.  Used by OdooStagingRefreshJob, *after* both the DB
+# clone and filestore copy have succeeded, as the init container of the
+# refresh's final Job: it runs against the temp DB the clone was loaded
+# into, and the cutover (scripts/cutover-db.sh, the main container) renames
+# that DB into the live name only once this script has exited 0.
 #
 # This is the same neutralize + verify sequence that restore.sh runs at
 # the end of its pipeline, extracted into a standalone script so the
@@ -10,15 +12,14 @@
 #
 # On any failure — reinit error, neutralize error, neutralization flag
 # missing, or an active mail server with a non-'invalid' smtp_host —
-# the script exits non-zero.  The operator reacts by transitioning the
-# target OdooInstance to InitFailed and leaves the live DB as-is
-# (we're working on the live DB *after* the rename cutover, so failure
-# here means staging is actively running against an un-neutralized
-# production clone — callers MUST scale down immediately).
+# the script exits non-zero, the cutover never runs, and the live staging
+# DB keeps its previous (neutralized) contents.  The temp DB is left in
+# place on purpose: the operator's spec-drift retry re-runs this Job
+# against it.
 #
 # Required env vars:
 #   HOST, PORT, USER, PASSWORD — PostgreSQL connection
-#   DB_NAME                    — target database name
+#   DB_NAME                    — database to neutralize (the refresh's temp DB)
 
 set -euo pipefail
 export PGPASSWORD=$PASSWORD

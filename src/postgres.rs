@@ -60,6 +60,23 @@ pub trait PostgresManager: Send + Sync {
         db_name: &str,
     ) -> Result<()>;
 
+    /// Drop the leftover temp databases of `target_db`'s staging refreshes:
+    /// every database named like [`crate::helpers::refresh_temp_db_name`]
+    /// gives `target_db` that `username` owns.  Returns the names dropped.
+    ///
+    /// Connects as that tenant role, so it can only ever drop the tenant's
+    /// own databases.  A refresh whose final Job failed keeps its temp DB for
+    /// the neutralize retry, and a refresh CR can be deleted or pruned with
+    /// its temp DB still present; the next refresh of the instance sweeps
+    /// them before it loads its own.
+    async fn drop_refresh_temp_databases(
+        &self,
+        pg: &PostgresClusterConfig,
+        username: &str,
+        password: &str,
+        target_db: &str,
+    ) -> Result<Vec<String>>;
+
     /// Ensure the `report.url` system parameter in the Odoo database points to
     /// the in-cluster web service so that cron-triggered report generation can
     /// reach the wkhtmltopdf endpoint.
@@ -498,6 +515,52 @@ impl PostgresManager for PgPostgresManager {
         Ok(())
     }
 
+    async fn drop_refresh_temp_databases(
+        &self,
+        pg: &PostgresClusterConfig,
+        username: &str,
+        password: &str,
+        target_db: &str,
+    ) -> Result<Vec<String>> {
+        let connstr = format!(
+            "host={} port={} user={} password={} dbname=postgres",
+            pg.host, pg.port, username, password
+        );
+        let (client, connection) = tokio_postgres::connect(&connstr, NoTls).await?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                warn!("postgres connection error: {e}");
+            }
+        });
+        let rows = client
+            .query(
+                "SELECT datname::text FROM pg_database \
+                  WHERE datdba = (SELECT oid FROM pg_roles WHERE rolname = current_user) \
+                    AND left(datname, length($1)) = $1",
+                &[&target_db],
+            )
+            .await?;
+        let mut dropped = Vec::new();
+        for row in rows {
+            let name: String = row.get(0);
+            if !crate::helpers::is_refresh_temp_db_name(target_db, &name) {
+                continue;
+            }
+            client
+                .execute(
+                    &format!(
+                        "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+                        quote_ident(&name)
+                    ),
+                    &[],
+                )
+                .await?;
+            info!(db_name = %name, owner = %username, "dropped leftover staging-refresh temp database");
+            dropped.push(name);
+        }
+        Ok(dropped)
+    }
+
     async fn detect_server_major_version(&self, pg: &PostgresClusterConfig) -> Result<u32> {
         let connstr = format!(
             "host={} port={} user={} password={} dbname=postgres",
@@ -820,6 +883,15 @@ impl PostgresManager for NoopPostgresManager {
         _: &str,
     ) -> Result<bool> {
         Ok(false)
+    }
+    async fn drop_refresh_temp_databases(
+        &self,
+        _: &PostgresClusterConfig,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<Vec<String>> {
+        Ok(vec![])
     }
     async fn detect_server_major_version(&self, _: &PostgresClusterConfig) -> Result<u32> {
         Ok(18)

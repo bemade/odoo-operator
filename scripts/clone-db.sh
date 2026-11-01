@@ -1,9 +1,12 @@
 #!/bin/bash
 # Clones a Postgres database from a source Odoo instance to a staging
 # instance by streaming pg_dump | pg_restore end-to-end through a single
-# pod — no intermediate artifact, no S3.  Uses a temp DB name for the
-# restore, then swaps into the live name at the end (blue/green cutover
-# so a failure leaves the previous staging DB intact).
+# pod — no intermediate artifact, no S3.  Loads into a temp DB and stops
+# there: the live staging DB is not touched.  The refresh's final Job
+# neutralizes the temp DB and only then swaps it into the live name
+# (scripts/neutralize.sh, then scripts/cutover-db.sh), so the live name
+# never holds an un-neutralized production copy and a failure anywhere
+# before the cutover leaves the previous staging DB intact.
 #
 # The controller creates $TEMP_DB (empty, owned by TGT_USER) and installs
 # its extensions before this Job starts: making unaccent IMMUTABLE, which
@@ -15,7 +18,8 @@
 #       — source Postgres connection (the production DB)
 #   TGT_HOST, TGT_PORT, TGT_USER, TGT_PASSWORD, TGT_DB
 #       — target Postgres connection (the staging DB)
-#   TEMP_DB  — ephemeral DB name for the restore (before rename cutover)
+#       (TGT_DB is the live name, used here for logging only)
+#   TEMP_DB  — DB the clone is loaded into (cut over later, after neutralize)
 
 set -euo pipefail
 
@@ -71,14 +75,7 @@ PGPASSWORD=$TGT_PASSWORD psql \
     -h "$TGT_HOST" -p "$TGT_PORT" -U "$TGT_USER" \
     -d "$TEMP_DB" -v ON_ERROR_STOP=1 --quiet
 
-echo "=== Cutover: drop $TGT_DB, rename $TEMP_DB -> $TGT_DB ==="
-PGPASSWORD=$TGT_PASSWORD psql -h "$TGT_HOST" -p "$TGT_PORT" -U "$TGT_USER" \
-    -d postgres -v ON_ERROR_STOP=1 <<EOSQL
-DROP DATABASE IF EXISTS "$TGT_DB" WITH (FORCE);
-ALTER DATABASE "$TEMP_DB" RENAME TO "$TGT_DB";
-EOSQL
-
-# Disarm trap — we succeeded and the temp DB is now the live one.
-TEMP_DB="__ALREADY_RENAMED__"
-
-echo "=== Clone DB complete ==="
+# No cutover here: the temp DB still has production's mail servers and
+# active crons.  On success the EXIT trap leaves it in place for the
+# neutralize + cutover Job.
+echo "=== Clone DB complete: loaded into $TEMP_DB (live $TGT_DB untouched) ==="

@@ -357,6 +357,8 @@ pub struct MockPostgresManager {
     delete_role_failures: RwLock<HashMap<String, String>>,
     // db_name -> "exists?" override. Absent → default behavior (exists=true).
     database_exists_override: RwLock<HashMap<String, bool>>,
+    // target_db -> number of drop_refresh_temp_databases calls for it.
+    refresh_temp_sweeps: RwLock<HashMap<String, usize>>,
 }
 
 impl MockPostgresManager {
@@ -382,6 +384,17 @@ impl MockPostgresManager {
             .write()
             .unwrap()
             .insert(db_name.to_string(), exists);
+    }
+
+    /// How many times the operator swept `target_db`'s leftover
+    /// staging-refresh temp databases.
+    pub fn refresh_temp_sweeps(&self, target_db: &str) -> usize {
+        self.refresh_temp_sweeps
+            .read()
+            .unwrap()
+            .get(target_db)
+            .copied()
+            .unwrap_or(0)
     }
 
     #[allow(dead_code)]
@@ -462,6 +475,22 @@ impl PostgresManager for MockPostgresManager {
         _: &str,
     ) -> PgResult<bool> {
         Ok(false)
+    }
+
+    async fn drop_refresh_temp_databases(
+        &self,
+        _: &PostgresClusterConfig,
+        _: &str,
+        _: &str,
+        target_db: &str,
+    ) -> PgResult<Vec<String>> {
+        *self
+            .refresh_temp_sweeps
+            .write()
+            .unwrap()
+            .entry(target_db.to_string())
+            .or_default() += 1;
+        Ok(vec![])
     }
 
     async fn detect_server_major_version(&self, _: &PostgresClusterConfig) -> PgResult<u32> {
