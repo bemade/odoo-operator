@@ -71,8 +71,14 @@ cargo test                            # all tests (unit + integration)
 cargo test --test integration         # integration only (needs envtest)
 cargo fmt --check && cargo clippy -- -D warnings  # lint
 make helm-crds                        # generate CRDs + sync to Helm chart
-make install                          # build + deploy to minikube
+make minikube-setup                   # local test cluster + latest released operator
+make install REV=<rev>                # build committed <rev>, upgrade the minikube operator to it
+make test-minikube                    # end-to-end smoke on the minikube cluster
 ```
+
+The minikube scripts live in `testing/minikube/` (see its README). They use a
+dedicated kubeconfig and refuse any cluster that is not the minikube profile,
+so never point them, or `kubectl`/`helm`, at the default kubeconfig.
 
 ### Testing
 

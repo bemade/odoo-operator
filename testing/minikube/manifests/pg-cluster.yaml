@@ -1,0 +1,22 @@
+# Single-instance CNPG cluster; the operator connects as the CNPG superuser
+# (enableSuperuserAccess -> Secret pg-main-superuser, user "postgres").
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pg
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pg-main
+  namespace: pg
+spec:
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql:17
+  enableSuperuserAccess: true
+  storage:
+    size: 5Gi
+    storageClass: standard
+  resources:
+    requests: {cpu: 200m, memory: 512Mi}
+    limits: {memory: 2Gi}

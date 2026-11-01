@@ -1,0 +1,43 @@
+# The demo pair: a Production source ("prod") and a Staging target
+# ("staging") for OdooStagingRefreshJob.  Both set filestore.storageClass
+# explicitly: the snapshot path is only possible when the two instances'
+# spec.filestore.storageClass values are set and equal (a class inherited
+# from the chart default does not count).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+---
+apiVersion: bemade.org/v1alpha1
+kind: OdooInstance
+metadata:
+  name: prod
+  namespace: demo
+spec:
+  image: odoo:18.0
+  environment: Production
+  adminPassword: admin
+  replicas: 1
+  cron: {replicas: 1}
+  ingress:
+    hosts: [prod.odoo-op.local]
+  filestore:
+    storageClass: csi-hostpath-sc
+    storageSize: 2Gi
+---
+apiVersion: bemade.org/v1alpha1
+kind: OdooInstance
+metadata:
+  name: staging
+  namespace: demo
+spec:
+  image: odoo:18.0
+  environment: Staging
+  adminPassword: admin
+  replicas: 1
+  cron: {replicas: 1}
+  ingress:
+    hosts: [staging.odoo-op.local]
+  filestore:
+    storageClass: csi-hostpath-sc
+    storageSize: 2Gi

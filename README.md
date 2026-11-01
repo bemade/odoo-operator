@@ -271,7 +271,7 @@ See [STATE_MACHINE.md](STATE_MACHINE.md) for the full diagram (auto-generated wi
 | `charts/odoo-operator/` | Helm chart |
 | `tests/integration/` | envtest-based integration tests (17 tests, parallel via per-test namespaces) |
 | `tests/` | Unit tests for helpers, job builder, and admission webhook |
-| `testing/` | Local dev/test fixtures (pg-clusters secret, Helm overrides) |
+| `testing/minikube/` | Local minikube test cluster: setup, end-to-end smoke test, release-to-local upgrade flow ([README](testing/minikube/README.md)) |
 | `.github/workflows/` | CI (lint + test on PRs) and release (image + Helm chart on tag push) |
 
 ## Development
@@ -289,8 +289,10 @@ cargo fmt --check && cargo clippy -- -D warnings
 # Generate CRDs and sync to Helm chart
 make helm-crds
 
-# Build and deploy to minikube
-make install
+# Local minikube test cluster (see testing/minikube/README.md)
+make minikube-setup              # cluster + dependencies + latest released operator + demo
+make test-minikube               # end-to-end smoke test (staging refreshes, neutralize, Mailpit)
+make install REV=<rev>           # build a committed revision and upgrade the cluster's operator to it
 ```
 
 ## License
