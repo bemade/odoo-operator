@@ -107,6 +107,16 @@ pub struct Context {
 
 /// Start the OdooInstance controller. Returns a future that runs forever.
 pub async fn run(ctx: Arc<Context>) {
+    run_until(ctx, std::future::pending()).await
+}
+
+/// Start the OdooInstance controller and shut it down gracefully once
+/// `shutdown` resolves: no new reconciles are started, the watches stop,
+/// in-flight reconciles run to completion, and then the future returns.
+pub async fn run_until(
+    ctx: Arc<Context>,
+    shutdown: impl std::future::Future<Output = ()> + Send + Sync + 'static,
+) {
     let client = ctx.client.clone();
     let instances: Api<OdooInstance> = Api::all(client.clone());
     let deployments: Api<Deployment> = Api::all(client.clone());
@@ -154,6 +164,7 @@ pub async fn run(ctx: Arc<Context>) {
             WatcherConfig::default(),
             map_backup_job_to_instance,
         )
+        .graceful_shutdown_on(shutdown)
         .run(reconcile, error_policy, ctx)
         .for_each(|res| async move {
             match res {

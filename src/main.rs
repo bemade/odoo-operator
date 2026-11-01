@@ -9,7 +9,8 @@ use clap::Parser;
 use k8s_openapi::api::core::v1::{Affinity, ResourceRequirements, Toleration};
 use kube::runtime::events::Reporter;
 use kube::Client;
-use tracing::info;
+use tokio::signal::unix::{signal, Signal, SignalKind};
+use tracing::{info, warn};
 use warp::Filter;
 
 use odoo_operator::controller;
@@ -40,6 +41,15 @@ fn parse_json_vec<T: serde::de::DeserializeOwned>(s: &str, field: &str) -> anyho
     }
     serde_json::from_str::<Vec<T>>(trimmed)
         .map_err(|e| anyhow::anyhow!("failed to parse --{field} as JSON array: {e}"))
+}
+
+/// Resolve on the next SIGTERM (what the kubelet sends on pod deletion) or
+/// SIGINT (Ctrl+C when run locally).
+async fn shutdown_signal(sigterm: &mut Signal) {
+    tokio::select! {
+        _ = sigterm.recv() => {},
+        _ = tokio::signal::ctrl_c() => {},
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -182,6 +192,9 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 
+    // Register for SIGTERM first thing; see the graceful-shutdown block below.
+    let mut sigterm = signal(SignalKind::terminate())?;
+
     let client = Client::try_default().await?;
 
     let default_resources = parse_json_opt::<ResourceRequirements>(
@@ -281,8 +294,32 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Graceful shutdown. Without a handler, SIGTERM is ignored (the operator
+    // is PID 1 in its container), so every pod deletion, including each
+    // upgrade's Recreate, waited out the full termination grace period and
+    // ended in SIGKILL mid-reconcile. On the first signal the controller
+    // stops starting reconciles and lets in-flight ones finish; its future
+    // then returns and the select below drops the webhook server, health
+    // probes and certificate checker. A second signal exits immediately.
+    // (`sigterm` was registered at startup, so a SIGTERM that arrived while
+    // the operator was still initialising is delivered here.)
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        shutdown_signal(&mut sigterm).await;
+        info!("shutdown signal received; draining in-flight reconciles");
+        let _ = shutdown_tx.send(());
+        shutdown_signal(&mut sigterm).await;
+        warn!("second shutdown signal received; exiting without draining");
+        std::process::exit(1);
+    });
+    let controller_shutdown = async move {
+        let _ = shutdown_rx.await;
+    };
+
     tokio::select! {
-        _ = controller::odoo_instance::run(ctx.clone()) => {},
+        _ = controller::odoo_instance::run_until(ctx.clone(), controller_shutdown) => {
+            info!("controller stopped; shutting down");
+        },
         _ = webhook::run(webhook_listener, &tls_cert, &tls_key) => {},
         _ = warp::serve(health_routes).run(health_addr) => {},
         _ = cert_repair => {},

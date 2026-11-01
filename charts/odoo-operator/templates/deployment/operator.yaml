@@ -9,7 +9,19 @@ metadata:
     app: {{ .Release.Name }}
   namespace: {{ .Release.Namespace }}
 spec:
+  # The operator is a cluster-wide singleton: exactly one pod may run at a
+  # time. There is no leader election, and every operator pod server-side
+  # applies the same child objects under the same field manager. Two pods
+  # (e.g. an old and a new version during a rolling update) each re-apply
+  # their own rendering of every tenant Deployment, so the Deployments flap
+  # between the two specs, pods churn, and the database runs out of
+  # connections. Keep replicas fixed at 1 (deliberately not a value), and
+  # use Recreate so an upgrade stops the old pod before starting the new
+  # one. The cost is a short window with no operator and no admission
+  # webhook during an upgrade; see the chart README.
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: {{ .Release.Name }}
