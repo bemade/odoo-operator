@@ -120,11 +120,18 @@ pub async fn run(ctx: Arc<Context>) {
     let refresh_jobs: Api<OdooStagingRefreshJob> = Api::all(client.clone());
     let backup_jobs: Api<OdooBackupJob> = Api::all(client.clone());
 
-    Controller::new(instances, WatcherConfig::default())
+    let controller = Controller::new(instances, WatcherConfig::default());
+    let instance_store = controller.store();
+    controller
         .owns(deployments, WatcherConfig::default())
         .owns(services, WatcherConfig::default())
         .owns(ingresses, WatcherConfig::default())
-        .owns(secrets, WatcherConfig::default())
+        // Secrets: the owned ones (like `.owns`), plus any Secret an instance
+        // names in `spec.adminPasswordSecretRef`, so a rotated master password
+        // reaches odoo.conf without waiting for an unrelated change.
+        .watches(secrets, WatcherConfig::default(), move |secret: Secret| {
+            instances_for_secret(&secret, instance_store.state())
+        })
         .owns(pvcs, WatcherConfig::default())
         // Watch job CRDs and map back to the owning OdooInstance.
         .watches(
@@ -170,6 +177,38 @@ pub async fn run(ctx: Arc<Context>) {
 }
 
 // ── Watch mappers (job → instance) ────────────────────────────────────────────
+
+/// Instances a Secret event concerns: its controlling OdooInstance owner, and
+/// every instance in its namespace whose `adminPasswordSecretRef` names it.
+fn instances_for_secret(
+    secret: &Secret,
+    instances: Vec<Arc<OdooInstance>>,
+) -> Vec<kube::runtime::reflector::ObjectRef<OdooInstance>> {
+    use kube::runtime::reflector::ObjectRef;
+    let Some(ns) = secret.namespace() else {
+        return vec![];
+    };
+    let name = secret.name_any();
+    let mut refs: Vec<ObjectRef<OdooInstance>> = secret
+        .owner_references()
+        .iter()
+        .filter(|o| o.kind == "OdooInstance" && o.controller == Some(true))
+        .map(|o| ObjectRef::new(&o.name).within(&ns))
+        .collect();
+    refs.extend(
+        instances
+            .iter()
+            .filter(|i| i.namespace().as_deref() == Some(ns.as_str()))
+            .filter(|i| {
+                i.spec
+                    .admin_password_secret_ref
+                    .as_ref()
+                    .is_some_and(|r| r.name == name)
+            })
+            .map(|i| ObjectRef::from_obj(i.as_ref())),
+    );
+    refs
+}
 
 fn map_init_job_to_instance(
     job: OdooInitJob,
@@ -314,6 +353,21 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
         return Ok(Action::requeue(Duration::from_secs(0)));
     }
 
+    // Master password generate-if-empty (#177): the value goes to an owned
+    // Secret and the spec only gets a reference to it.
+    if child_resources::ensure_admin_password_ref(
+        client,
+        &ns,
+        &name,
+        instance,
+        &controller_owner_ref(instance),
+    )
+    .await?
+    {
+        info!(%name, "master password generated into a Secret");
+        return Ok(Action::requeue(Duration::from_secs(0)));
+    }
+
     // Load postgres cluster config.
     //
     // Two different clusters matter here and they are not interchangeable:
@@ -373,8 +427,23 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
         child_resources::ensure_filestore_pvc(client, &ns, &name, instance, ctx, &oref, None)
             .await?;
     }
-    child_resources::ensure_odoo_conf_secret(client, &ns, &name, instance, &pg_cluster, &oref)
-        .await?;
+    if let Err(e) =
+        child_resources::ensure_odoo_conf_secret(client, &ns, &name, instance, &pg_cluster, &oref)
+            .await
+    {
+        if matches!(e, Error::Config(_)) {
+            publish_event(
+                ctx,
+                instance,
+                EventType::Warning,
+                "AdminPasswordUnavailable",
+                "Reconcile",
+                Some(e.to_string()),
+            )
+            .await;
+        }
+        return Err(e);
+    }
     child_resources::ensure_service(client, &ns, &name, &oref).await?;
     child_resources::ensure_routing(client, &ns, &name, instance, &oref).await?;
     if !is_migrating_filestore {

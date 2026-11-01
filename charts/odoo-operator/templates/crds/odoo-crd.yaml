@@ -42,7 +42,20 @@ spec:
             description: OdooInstance is the Schema for the odooinstances API.
             properties:
               adminPassword:
+                description: 'DEPRECATED: use `adminPasswordSecretRef`. The Odoo master password (`admin_passwd`) in plaintext. Anyone who can read this OdooInstance can read it, and it is stored verbatim in etcd, audit logs and any export of the object. Still honoured when non-empty; mutually exclusive with `adminPasswordSecretRef`. When neither is set (or this is empty), the operator generates a password into the Secret `<instance>-admin-password` and points `adminPasswordSecretRef` at it.'
                 type: string
+              adminPasswordSecretRef:
+                description: 'The Odoo master password (`admin_passwd`), read from a key of a Secret in the instance''s namespace. Preferred over `adminPassword`, with which it is mutually exclusive. Set by the operator, pointing at the generated Secret `<instance>-admin-password`, when no password is given. The operator watches the Secret: a change is rendered into odoo.conf and rolls the pods.'
+                nullable: true
+                properties:
+                  key:
+                    type: string
+                  name:
+                    type: string
+                required:
+                - key
+                - name
+                type: object
               affinity:
                 description: Affinity is a group of affinity scheduling rules.
                 nullable: true
@@ -987,12 +1000,13 @@ spec:
                 - url
                 type: object
             required:
-            - adminPassword
             - ingress
             type: object
             x-kubernetes-validations:
             - messageExpression: '''spec.productionInstanceRef is forbidden on production instances'''
               rule: self.environment != 'Production' || !has(self.productionInstanceRef)
+            - messageExpression: '''spec.adminPassword and spec.adminPasswordSecretRef are mutually exclusive'''
+              rule: '!has(self.adminPasswordSecretRef) || !has(self.adminPassword) || self.adminPassword == '''''
           status:
             description: OdooInstanceStatus defines the observed state of OdooInstance.
             nullable: true
