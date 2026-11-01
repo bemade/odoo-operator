@@ -104,7 +104,7 @@ spec:
             - source
             type: object
           status:
-            description: 'OdooStagingRefreshJobStatus captures the multi-Job orchestration state. Three underlying batch/v1 Jobs back a single refresh: one for DB clone, one for filestore copy (unless skipped), and one for neutralize.  Their names are tracked here for troubleshooting.  `rollbackSnapshot` is set only when Phase 2 (CSI snapshot) is in use.'
+            description: 'OdooStagingRefreshJobStatus captures the multi-Job orchestration state. Three underlying batch/v1 Jobs back a single refresh: one for DB clone (into `tempDbName`), one for filestore copy (unless skipped), and a final one that neutralizes the temp DB and then cuts it over into the live name.  Their names are tracked here for troubleshooting.  `rollbackSnapshot` is set only when Phase 2 (CSI snapshot) is in use.'
             nullable: true
             properties:
               completionTime:
@@ -155,6 +155,10 @@ spec:
                 - Failed
                 nullable: true
                 type: string
+              deferredCutover:
+                description: '`true` when the DB clone Job only loads `tempDbName` and the final Job (neutralize, then cutover) renames it into the live name, so the live name only ever holds a neutralized database.  Absent on a refresh whose DB clone Job an older operator created: that Job renames the temp DB into the live name itself, so the final Job neutralizes the live DB and has no cutover to do.'
+                nullable: true
+                type: boolean
               filestoreJobName:
                 description: batch/v1 Job name for the filestore copy/clone.
                 nullable: true
@@ -185,7 +189,7 @@ spec:
                 nullable: true
                 type: string
               neutralizeJobName:
-                description: batch/v1 Job name for the neutralize step.
+                description: 'batch/v1 Job name for the final step: neutralize (unless `spec.neutralize` is false), then cut the temp DB over into the live name.'
                 nullable: true
                 type: string
               neutralizeJobPhase:
@@ -218,7 +222,7 @@ spec:
                 nullable: true
                 type: string
               tempDbName:
-                description: 'Temporary DB name used for blue/green cutover.  Pattern: `<live_db>_refresh_<rfc3339_short>`.  Set before the DB Job starts and cleared after the rename cutover succeeds.'
+                description: 'Temporary DB the clone is loaded into, renamed to the live name by the cutover.  Pattern: `<live_db>_refresh_<8 hex of the CR''s UID>`. Set when the DB Job is created and kept afterwards as a record.'
                 nullable: true
                 type: string
             type: object

@@ -264,8 +264,8 @@ impl ReconcileSnapshot {
         }
 
         // ── Staging refresh jobs ────────────────────────────────────────
-        // A staging refresh drives three sub-Jobs (DB clone, filestore
-        // copy, neutralize).  The aggregate `refresh_job` is Succeeded
+        // A staging refresh drives three sub-Jobs (DB clone into a temp
+        // DB, filestore copy, final neutralize + cutover Job).  The aggregate `refresh_job` is Succeeded
         // only when all three are Succeeded (skipFilestore=true drops the
         // filestore job from the set), Failed as soon as any one is
         // Failed, and Active otherwise.  The CloningFromSource state
@@ -915,6 +915,10 @@ pub async fn execute_action(
                     &Patch::Merge(&patch_val),
                 )
                 .await?;
+                if matches!(action, FailRefreshJob) {
+                    crate::controller::states::drop_temp_db_of_failed_refresh(instance, ctx, job)
+                        .await;
+                }
                 // On success, drop the source VolumeSnapshot.  The dest
                 // PVC is fully cloned by this point — keeping the
                 // snapshot consumes metadata-engine state on JuiceFS and

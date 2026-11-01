@@ -84,6 +84,39 @@ pub fn db_name(instance: &OdooInstance) -> String {
     format!("odoo_{}", sanitise_uid(uid))
 }
 
+/// Suffix that marks a staging refresh's temp database: `<live_db>` +
+/// `_refresh_` + 8 hex chars (see [`refresh_temp_db_name`]).
+const REFRESH_TEMP_DB_INFIX: &str = "_refresh_";
+const REFRESH_TEMP_DB_HASH_LEN: usize = 8;
+
+/// Name of the temp database a staging refresh loads its clone into before
+/// the cutover renames it to `live_db`.
+///
+/// Postgres identifiers are limited to 63 bytes.  The Odoo DB name is
+/// `odoo_<36-char-uuid>` = 41 chars, leaving 22 bytes for the suffix.  An
+/// 8-hex-char sha256 prefix of the refresh CR's UID gives uniqueness without
+/// exceeding the limit and is stable across reconciles of the same CR.
+pub fn refresh_temp_db_name(live_db: &str, refresh_uid: &str) -> String {
+    let hash = sha256_hex(refresh_uid);
+    format!(
+        "{live_db}{REFRESH_TEMP_DB_INFIX}{}",
+        &hash[..REFRESH_TEMP_DB_HASH_LEN]
+    )
+}
+
+/// Whether `name` has the shape [`refresh_temp_db_name`] gives `live_db`'s
+/// temp databases, whatever the refresh.
+pub fn is_refresh_temp_db_name(live_db: &str, name: &str) -> bool {
+    name.strip_prefix(live_db)
+        .and_then(|rest| rest.strip_prefix(REFRESH_TEMP_DB_INFIX))
+        .is_some_and(|hash| {
+            hash.len() == REFRESH_TEMP_DB_HASH_LEN
+                && hash
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        })
+}
+
 /// Whether the operator should make `unaccent` available (and indexable) in
 /// the instance's database — `spec.database.unaccent`, which defaults to true.
 pub fn wants_unaccent(instance: &OdooInstance) -> bool {

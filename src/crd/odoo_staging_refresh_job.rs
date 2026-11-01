@@ -81,9 +81,10 @@ fn default_true() -> bool {
 }
 
 /// OdooStagingRefreshJobStatus captures the multi-Job orchestration state.
-/// Three underlying batch/v1 Jobs back a single refresh: one for DB clone,
-/// one for filestore copy (unless skipped), and one for neutralize.  Their
-/// names are tracked here for troubleshooting.  `rollbackSnapshot` is set
+/// Three underlying batch/v1 Jobs back a single refresh: one for DB clone
+/// (into `tempDbName`), one for filestore copy (unless skipped), and a final
+/// one that neutralizes the temp DB and then cuts it over into the live
+/// name.  Their names are tracked here for troubleshooting.  `rollbackSnapshot` is set
 /// only when Phase 2 (CSI snapshot) is in use.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -91,11 +92,20 @@ pub struct OdooStagingRefreshJobStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<Phase>,
 
-    /// Temporary DB name used for blue/green cutover.  Pattern:
-    /// `<live_db>_refresh_<rfc3339_short>`.  Set before the DB Job starts
-    /// and cleared after the rename cutover succeeds.
+    /// Temporary DB the clone is loaded into, renamed to the live name by
+    /// the cutover.  Pattern: `<live_db>_refresh_<8 hex of the CR's UID>`.
+    /// Set when the DB Job is created and kept afterwards as a record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temp_db_name: Option<String>,
+
+    /// `true` when the DB clone Job only loads `tempDbName` and the final
+    /// Job (neutralize, then cutover) renames it into the live name, so the
+    /// live name only ever holds a neutralized database.  Absent on a
+    /// refresh whose DB clone Job an older operator created: that Job
+    /// renames the temp DB into the live name itself, so the final Job
+    /// neutralizes the live DB and has no cutover to do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_cutover: Option<bool>,
 
     /// VolumeSnapshot taken from the source filestore PVC for this
     /// refresh.  Phase 2 only; `None` for rsync-based refreshes.
@@ -135,7 +145,9 @@ pub struct OdooStagingRefreshJobStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filestore_phase: Option<Phase>,
 
-    /// batch/v1 Job name for the neutralize step.
+    /// batch/v1 Job name for the final step: neutralize (unless
+    /// `spec.neutralize` is false), then cut the temp DB over into the
+    /// live name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neutralize_job_name: Option<String>,
 

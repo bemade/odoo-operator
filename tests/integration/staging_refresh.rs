@@ -1,5 +1,5 @@
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::PersistentVolumeClaim;
+use k8s_openapi::api::core::v1::{Container, PersistentVolumeClaim};
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use serde_json::json;
 use std::time::{Duration, Instant};
@@ -104,9 +104,22 @@ async fn staging_refresh_happy_path() -> anyhow::Result<()> {
         "expected CloningFromSource after refresh job created"
     );
 
-    // DB + filestore Jobs are spawned in parallel.  Fake both Succeeded.
+    // The DB clone Job comes first.  The filestore copy verifies against the
+    // clone's ir_attachment, so it waits for the DB clone to succeed.
     let db_job = wait_for_refresh_sub_job(c, ns, "target-refresh", "dbJobName").await;
-    let fs_job = wait_for_refresh_sub_job(c, ns, "target-refresh", "filestoreJobName").await;
+    for _ in 0..3 {
+        touch_instance(c, ns, "target-inst").await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(
+            refreshes
+                .get("target-refresh")
+                .await?
+                .status
+                .and_then(|s| s.filestore_job_name)
+                .is_none(),
+            "filestore copy Job launched while the DB clone was still loading"
+        );
+    }
     let jobs: Api<Job> = Api::namespaced(c.clone(), ns);
     let succeed = |job_name: String| {
         let jobs = jobs.clone();
@@ -122,6 +135,7 @@ async fn staging_refresh_happy_path() -> anyhow::Result<()> {
         }
     };
     succeed(db_job).await;
+    let fs_job = wait_for_refresh_sub_job(c, ns, "target-refresh", "filestoreJobName").await;
 
     // Copy path: filestore_phase should be Running before the Job succeeds
     // (set when the Job was created), and walk to Completed once the Job's
@@ -132,6 +146,33 @@ async fn staging_refresh_happy_path() -> anyhow::Result<()> {
 
     // Neutralize Job spawns after both succeed.
     let neut_job = wait_for_refresh_sub_job(c, ns, "target-refresh", "neutralizeJobName").await;
+
+    // Issue #199: the clone stays in the temp DB; the final Job neutralizes
+    // the temp DB (init container) and only then cuts it over (main
+    // container), so the live name only ever holds a neutralized database.
+    let target_db = odoo_operator::helpers::db_name(&instances.get("target-inst").await?);
+    let st = refreshes.get("target-refresh").await?.status.unwrap();
+    let temp_db = st.temp_db_name.clone().expect("tempDbName recorded");
+    assert_eq!(st.deferred_cutover, Some(true));
+    assert_ne!(temp_db, target_db);
+    let (inits, mains) = job_containers(c, ns, &neut_job).await;
+    assert_eq!(
+        inits.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["neutralize"],
+        "neutralize must run as the init container, before the cutover"
+    );
+    assert_eq!(env_value(&inits[0], "DB_NAME"), Some(temp_db.clone()));
+    assert_eq!(mains.len(), 1);
+    assert_eq!(mains[0].name, "cutover");
+    assert_eq!(env_value(&mains[0], "TEMP_DB"), Some(temp_db));
+    assert_eq!(env_value(&mains[0], "TGT_DB"), Some(target_db.clone()));
+    assert_eq!(
+        env_value(&mains[0], "REQUIRE_NEUTRALIZED").as_deref(),
+        Some("true")
+    );
+    // Leftover temp DBs of earlier refreshes are swept before the load.
+    assert!(mock_pg().refresh_temp_sweeps(&target_db) >= 1);
+
     succeed(neut_job).await;
 
     // Transition: CloningFromSource → Starting, dbInitialized=true.
@@ -634,9 +675,8 @@ async fn staging_refresh_survives_subjob_gc() -> anyhow::Result<()> {
         "expected CloningFromSource"
     );
 
-    // Step 1: DB and filestore Jobs spawn in parallel; succeed only the DB.
+    // Step 1: succeed the DB Job; the filestore copy Job follows it.
     let db_job = wait_for_refresh_sub_job(c, ns, "tgt-gc-refresh", "dbJobName").await;
-    let fs_job = wait_for_refresh_sub_job(c, ns, "tgt-gc-refresh", "filestoreJobName").await;
     let jobs: Api<Job> = Api::namespaced(c.clone(), ns);
     jobs.patch_status(
         &db_job,
@@ -663,6 +703,7 @@ async fn staging_refresh_survives_subjob_gc() -> anyhow::Result<()> {
         );
         tokio::time::sleep(POLL).await;
     }
+    let fs_job = wait_for_refresh_sub_job(c, ns, "tgt-gc-refresh", "filestoreJobName").await;
 
     // Step 3: simulate TTL-based GC by deleting the (succeeded) DB Job.
     jobs.delete(&db_job, &DeleteParams::default()).await?;
@@ -695,6 +736,35 @@ async fn staging_refresh_survives_subjob_gc() -> anyhow::Result<()> {
 
     source_ready.abort();
     Ok(())
+}
+
+/// Init and main containers of a batch/v1 Job's pod template.
+async fn job_containers(
+    client: &kube::Client,
+    ns: &str,
+    job_name: &str,
+) -> (Vec<Container>, Vec<Container>) {
+    let jobs: Api<Job> = Api::namespaced(client.clone(), ns);
+    let pod = jobs
+        .get(job_name)
+        .await
+        .unwrap_or_else(|e| panic!("Job {job_name} must exist: {e}"))
+        .spec
+        .unwrap()
+        .template
+        .spec
+        .unwrap();
+    (pod.init_containers.unwrap_or_default(), pod.containers)
+}
+
+/// Literal value of a container's env var (`None` if unset or `valueFrom`).
+fn env_value(container: &Container, name: &str) -> Option<String> {
+    container
+        .env
+        .as_ref()?
+        .iter()
+        .find(|e| e.name == name)
+        .and_then(|e| e.value.clone())
 }
 
 /// Wait until `status.filestorePhase` on the refresh CR matches `expected`.
@@ -971,7 +1041,10 @@ async fn staging_refresh_auto_falls_back_to_copy_on_sc_mismatch() -> anyhow::Res
         "expected CloningFromSource"
     );
 
-    // Auto + SC mismatch ⇒ Copy path ⇒ filestoreJobName is set.
+    // Auto + SC mismatch ⇒ Copy path ⇒ filestoreJobName is set once the DB
+    // clone (which the copy verifies against) has succeeded.
+    let db_job = wait_for_refresh_sub_job(c, ns, "tgt-mix-refresh", "dbJobName").await;
+    fake_job_succeeded(c, ns, &db_job).await;
     let _fs_job = wait_for_refresh_sub_job(c, ns, "tgt-mix-refresh", "filestoreJobName").await;
     wait_for_filestore_phase(c, ns, "tgt-mix-refresh", Phase::Running).await;
 
@@ -1133,6 +1206,386 @@ async fn staging_refresh_snapshot_does_not_complete_while_old_pvc_terminates() -
     // → Completed) is covered by `staging_refresh_snapshot_path_completes_
     // via_pvc_bound`.  envtest's finalizer-driven deletion path is flaky
     // enough that simulating it here brings little extra coverage.
+
+    source_ready.abort();
+    Ok(())
+}
+
+// ── Issue #199: neutralize the temp DB, then cut over ───────────────────────
+
+/// A same-namespace staging target with init disabled.  Waits for it to
+/// reach Uninitialized unless a refresh for it already exists (it then moves
+/// straight on to CloningFromSource).
+async fn create_target(
+    c: &kube::Client,
+    ns: &str,
+    name: &str,
+    filestore: serde_json::Value,
+) -> OdooInstance {
+    let created = create_target_no_wait(c, ns, name, filestore).await;
+    assert!(
+        wait_for_phase(c, ns, name, OdooInstancePhase::Uninitialized).await,
+        "expected {name} Uninitialized"
+    );
+    created
+}
+
+async fn create_target_no_wait(
+    c: &kube::Client,
+    ns: &str,
+    name: &str,
+    filestore: serde_json::Value,
+) -> OdooInstance {
+    let target: OdooInstance = serde_json::from_value(json!({
+        "apiVersion": "bemade.org/v1alpha1",
+        "kind": "OdooInstance",
+        "metadata": { "name": name, "namespace": ns },
+        "spec": {
+            "replicas": 1,
+            "cron": { "replicas": 1 },
+            "adminPassword": "admin",
+            "image": "odoo:18.0",
+            "ingress": {
+                "hosts": [format!("{name}.example.com")],
+                "issuer": "letsencrypt",
+                "class": "nginx",
+            },
+            "filestore": filestore,
+            "init": { "enabled": false },
+        }
+    }))
+    .unwrap();
+    let instances: Api<OdooInstance> = Api::namespaced(c.clone(), ns);
+    instances
+        .create(&PostParams::default(), &target)
+        .await
+        .unwrap()
+}
+
+async fn create_refresh(
+    c: &kube::Client,
+    ns: &str,
+    name: &str,
+    target: &str,
+    source: &str,
+    extra_spec: serde_json::Value,
+) {
+    let mut spec = json!({
+        "odooInstanceRef": { "name": target },
+        "source": { "instanceName": source },
+    });
+    spec.as_object_mut()
+        .unwrap()
+        .extend(extra_spec.as_object().unwrap().clone());
+    let refresh: OdooStagingRefreshJob = serde_json::from_value(json!({
+        "apiVersion": "bemade.org/v1alpha1",
+        "kind": "OdooStagingRefreshJob",
+        "metadata": { "name": name, "namespace": ns },
+        "spec": spec,
+    }))
+    .unwrap();
+    let refreshes: Api<OdooStagingRefreshJob> = Api::namespaced(c.clone(), ns);
+    refreshes
+        .create(&PostParams::default(), &refresh)
+        .await
+        .unwrap();
+}
+
+async fn refresh_status(
+    c: &kube::Client,
+    ns: &str,
+    name: &str,
+) -> odoo_operator::crd::odoo_staging_refresh_job::OdooStagingRefreshJobStatus {
+    let refreshes: Api<OdooStagingRefreshJob> = Api::namespaced(c.clone(), ns);
+    refreshes
+        .get(name)
+        .await
+        .unwrap()
+        .status
+        .unwrap_or_default()
+}
+
+/// `spec.neutralize: false` still needs the cutover, exactly once: the final
+/// Job is a real Job holding only the cutover container (no neutralize, no
+/// neutralization check), and its success completes the refresh.
+#[tokio::test]
+async fn staging_refresh_without_neutralize_still_cuts_over() -> anyhow::Result<()> {
+    let ctx = TestContext::new("src-noneut").await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+    let source_ready = fast_track_to_running(&ctx, "src-noneut-init").await;
+    let target = create_target(
+        c,
+        ns,
+        "tgt-noneut",
+        json!({ "storageSize": "1Gi", "storageClass": "standard" }),
+    )
+    .await;
+    let target_db = odoo_operator::helpers::db_name(&target);
+    create_refresh(
+        c,
+        ns,
+        "tgt-noneut-refresh",
+        "tgt-noneut",
+        "src-noneut",
+        json!({ "skipFilestore": true, "neutralize": false }),
+    )
+    .await;
+    assert!(
+        wait_for_phase(c, ns, "tgt-noneut", OdooInstancePhase::CloningFromSource).await,
+        "expected CloningFromSource"
+    );
+
+    let db_job = wait_for_refresh_sub_job(c, ns, "tgt-noneut-refresh", "dbJobName").await;
+    fake_job_succeeded(c, ns, &db_job).await;
+
+    let final_job =
+        wait_for_refresh_sub_job(c, ns, "tgt-noneut-refresh", "neutralizeJobName").await;
+    let temp_db = refresh_status(c, ns, "tgt-noneut-refresh")
+        .await
+        .temp_db_name
+        .expect("tempDbName recorded");
+    let (inits, mains) = job_containers(c, ns, &final_job).await;
+    assert!(
+        inits.is_empty(),
+        "neutralize disabled: no neutralize container"
+    );
+    assert_eq!(mains.len(), 1);
+    assert_eq!(mains[0].name, "cutover");
+    assert_eq!(env_value(&mains[0], "TEMP_DB"), Some(temp_db));
+    assert_eq!(env_value(&mains[0], "TGT_DB"), Some(target_db));
+    assert_eq!(env_value(&mains[0], "REQUIRE_NEUTRALIZED"), None);
+
+    fake_job_succeeded(c, ns, &final_job).await;
+    assert!(
+        wait_for_phase(c, ns, "tgt-noneut", OdooInstancePhase::Starting).await,
+        "expected Starting once the cutover Job succeeded"
+    );
+
+    source_ready.abort();
+    Ok(())
+}
+
+/// Snapshot path: the filestore rename Job verifies the filestore against
+/// the clone's `ir_attachment`, which lives in the temp DB until the cutover
+/// and is complete only once the DB clone Job succeeded.  So the rename Job
+/// waits for the DB clone even when its PVC is Bound, and targets the temp
+/// DB.
+#[tokio::test]
+async fn staging_refresh_rename_job_waits_for_db_clone_and_reads_temp_db() -> anyhow::Result<()> {
+    let ctx = TestContext::new("src-snapdb").await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+    let source_ready = fast_track_to_running(&ctx, "src-snapdb-init").await;
+    create_target(
+        c,
+        ns,
+        "tgt-snapdb",
+        json!({ "storageSize": "1Gi", "storageClass": "standard" }),
+    )
+    .await;
+    fake_pvc_bound(c, ns, "tgt-snapdb-filestore-pvc").await;
+    create_refresh(
+        c,
+        ns,
+        "tgt-snapdb-refresh",
+        "tgt-snapdb",
+        "src-snapdb",
+        json!({ "filestoreMethod": "snapshot" }),
+    )
+    .await;
+    assert!(
+        wait_for_phase(c, ns, "tgt-snapdb", OdooInstancePhase::CloningFromSource).await,
+        "expected CloningFromSource"
+    );
+
+    let db_job = wait_for_refresh_sub_job(c, ns, "tgt-snapdb-refresh", "dbJobName").await;
+    fake_volume_snapshot_ready(c, ns, "tgt-snapdb-refresh-src").await;
+    wait_for_filestore_phase(c, ns, "tgt-snapdb-refresh", Phase::Running).await;
+    fake_pvc_bound(c, ns, "tgt-snapdb-filestore-pvc").await;
+
+    // PVC Bound, DB clone still running: no rename Job.
+    for _ in 0..5 {
+        touch_instance(c, ns, "tgt-snapdb").await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(
+            refresh_status(c, ns, "tgt-snapdb-refresh")
+                .await
+                .filestore_job_name
+                .is_none(),
+            "rename Job launched while the DB clone was still loading"
+        );
+    }
+
+    fake_job_succeeded(c, ns, &db_job).await;
+    let fs_job = wait_for_refresh_sub_job(c, ns, "tgt-snapdb-refresh", "filestoreJobName").await;
+    let temp_db = refresh_status(c, ns, "tgt-snapdb-refresh")
+        .await
+        .temp_db_name
+        .expect("tempDbName recorded");
+    let (_, mains) = job_containers(c, ns, &fs_job).await;
+    assert_eq!(env_value(&mains[0], "DB_NAME"), Some(temp_db));
+
+    source_ready.abort();
+    Ok(())
+}
+
+/// A failed neutralize keeps the temp DB: the spec-drift retry re-runs the
+/// final Job against it.  The live DB was never touched.
+#[tokio::test]
+async fn staging_refresh_neutralize_failure_keeps_temp_db() -> anyhow::Result<()> {
+    let ctx = TestContext::new("src-neutfail").await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+    let source_ready = fast_track_to_running(&ctx, "src-neutfail-init").await;
+    let target = create_target(
+        c,
+        ns,
+        "tgt-neutfail",
+        json!({ "storageSize": "1Gi", "storageClass": "standard" }),
+    )
+    .await;
+    let target_db = odoo_operator::helpers::db_name(&target);
+    create_refresh(
+        c,
+        ns,
+        "tgt-neutfail-refresh",
+        "tgt-neutfail",
+        "src-neutfail",
+        json!({ "skipFilestore": true }),
+    )
+    .await;
+    let db_job = wait_for_refresh_sub_job(c, ns, "tgt-neutfail-refresh", "dbJobName").await;
+    let sweeps = mock_pg().refresh_temp_sweeps(&target_db);
+    assert_eq!(sweeps, 1, "one sweep before the load");
+    fake_job_succeeded(c, ns, &db_job).await;
+    let neut_job =
+        wait_for_refresh_sub_job(c, ns, "tgt-neutfail-refresh", "neutralizeJobName").await;
+    fake_job_backoff_exhausted(c, ns, &neut_job).await;
+
+    assert!(
+        wait_for_phase(c, ns, "tgt-neutfail", OdooInstancePhase::InitFailed).await,
+        "expected InitFailed after the neutralize Job failed"
+    );
+    assert_eq!(
+        mock_pg().refresh_temp_sweeps(&target_db),
+        sweeps,
+        "the temp DB must survive a neutralize failure for the retry"
+    );
+
+    source_ready.abort();
+    Ok(())
+}
+
+/// A refresh that fails before its final Job exists has no further use for
+/// the temp DB (no retry path re-runs a DB or filestore step), so the
+/// failure drops it.
+#[tokio::test]
+async fn staging_refresh_filestore_failure_drops_temp_db() -> anyhow::Result<()> {
+    let ctx = TestContext::new("src-fsfail").await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+    let source_ready = fast_track_to_running(&ctx, "src-fsfail-init").await;
+    let target = create_target(
+        c,
+        ns,
+        "tgt-fsfail",
+        json!({ "storageSize": "1Gi", "storageClass": "standard" }),
+    )
+    .await;
+    let target_db = odoo_operator::helpers::db_name(&target);
+    create_refresh(
+        c,
+        ns,
+        "tgt-fsfail-refresh",
+        "tgt-fsfail",
+        "src-fsfail",
+        json!({ "filestoreMethod": "copy" }),
+    )
+    .await;
+    let db_job = wait_for_refresh_sub_job(c, ns, "tgt-fsfail-refresh", "dbJobName").await;
+    let sweeps = mock_pg().refresh_temp_sweeps(&target_db);
+    fake_job_succeeded(c, ns, &db_job).await;
+    let fs_job = wait_for_refresh_sub_job(c, ns, "tgt-fsfail-refresh", "filestoreJobName").await;
+    fake_job_backoff_exhausted(c, ns, &fs_job).await;
+
+    assert!(
+        wait_for_phase(c, ns, "tgt-fsfail", OdooInstancePhase::InitFailed).await,
+        "expected InitFailed after the filestore Job failed"
+    );
+    assert_eq!(
+        mock_pg().refresh_temp_sweeps(&target_db),
+        sweeps + 1,
+        "the failed refresh must drop its temp DB"
+    );
+    assert!(
+        refresh_status(c, ns, "tgt-fsfail-refresh")
+            .await
+            .neutralize_job_name
+            .is_none(),
+        "no final Job after a filestore failure"
+    );
+
+    source_ready.abort();
+    Ok(())
+}
+
+/// Operator upgrade mid-refresh: a refresh whose DB clone Job an older
+/// operator created (no `deferredCutover`) already renamed the clone into
+/// the live name.  Its final Job must neutralize the live DB and not cut
+/// over — there is no temp DB left to cut over, and pointing neutralize at
+/// it would fail the refresh with an un-neutralized live DB.
+#[tokio::test]
+async fn staging_refresh_started_by_older_operator_neutralizes_live_db() -> anyhow::Result<()> {
+    let ctx = TestContext::new("src-legacy").await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+    let source_ready = fast_track_to_running(&ctx, "src-legacy-init").await;
+
+    // The in-flight refresh as the older operator left it: DB clone done,
+    // filestore skipped, no final Job yet.  Created before its target so
+    // nothing reconciles it until the status is in place.
+    create_refresh(
+        c,
+        ns,
+        "tgt-legacy-refresh",
+        "tgt-legacy",
+        "src-legacy",
+        json!({ "skipFilestore": true }),
+    )
+    .await;
+    let refreshes: Api<OdooStagingRefreshJob> = Api::namespaced(c.clone(), ns);
+    refreshes
+        .patch_status(
+            "tgt-legacy-refresh",
+            &PatchParams::apply("odoo-operator-test"),
+            &Patch::Merge(&json!({ "status": {
+                "phase": "Running",
+                "dbJobName": "tgt-legacy-refresh-db-old",
+                "dbJobPhase": "Completed",
+                "tempDbName": "odoo_legacy_refresh_0123abcd",
+            }})),
+        )
+        .await?;
+    let target = create_target_no_wait(
+        c,
+        ns,
+        "tgt-legacy",
+        json!({ "storageSize": "1Gi", "storageClass": "standard" }),
+    )
+    .await;
+    let target_db = odoo_operator::helpers::db_name(&target);
+
+    let neut_job = wait_for_refresh_sub_job(c, ns, "tgt-legacy-refresh", "neutralizeJobName").await;
+    let (inits, mains) = job_containers(c, ns, &neut_job).await;
+    assert!(inits.is_empty(), "no init container on a legacy refresh");
+    assert_eq!(
+        mains.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["neutralize"],
+        "a legacy refresh has no cutover left to do"
+    );
+    assert_eq!(env_value(&mains[0], "DB_NAME"), Some(target_db));
+
+    fake_job_succeeded(c, ns, &neut_job).await;
+    assert!(
+        wait_for_phase(c, ns, "tgt-legacy", OdooInstancePhase::Starting).await,
+        "expected Starting after the legacy refresh's neutralize succeeded"
+    );
 
     source_ready.abort();
     Ok(())

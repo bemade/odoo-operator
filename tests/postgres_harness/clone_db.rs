@@ -25,12 +25,29 @@
 //! 6. Negative control: preparing that temp DB with unaccent regardless (the
 //!    2.8.2 behaviour) fails, because the extension it creates in `public`
 //!    already provides the `unaccent(text)` the dump's wrapper defines.
+//!
+//! Issue #199 — the live name only ever holds a neutralized database:
+//!
+//! 7. `clone-db.sh` loads into the temp DB and stops there: the live staging
+//!    DB is untouched afterwards, and the clone is in the temp DB.
+//! 8. `cutover-db.sh` with `REQUIRE_NEUTRALIZED=true` swaps a neutralized temp
+//!    DB into the live name: the live name holds the clone, the old staging
+//!    data is gone, and the temp name no longer exists.
+//! 9. It refuses a temp DB that is not marked neutralized, and leaves both
+//!    the live DB and the temp DB (for the neutralize retry) as they were.
+//! 10. With no temp DB to swap in it fails and leaves the live DB as it was.
+//! 11. Without `REQUIRE_NEUTRALIZED` (`spec.neutralize: false`) it swaps the
+//!     clone in as is, also when the staging instance has no live DB yet.
+//! 12. `drop_refresh_temp_databases` drops the target's leftover temp DBs
+//!     (`<target>_refresh_<8 hex>`, owned by the tenant role) and nothing
+//!     else: not the live DB, not near-miss names, not another role's DB.
 
 use odoo_operator::postgres::PostgresManager;
 
 use super::harness::{admin_client, cluster_config, connect_as, pg_manager, run_script};
 
 const CLONE_DB_SCRIPT: &str = include_str!("../../scripts/clone-db.sh");
+const CUTOVER_DB_SCRIPT: &str = include_str!("../../scripts/cutover-db.sh");
 const PW: &str = "clone-pw";
 
 async fn reset_role_and_db(owner: &str, db: &str) {
@@ -102,8 +119,7 @@ async fn setup_odoosh_source(owner: &str, db: &str) {
 
 /// Runs off the async runtime: `docker exec` blocks, and a blocked runtime
 /// never closes the connections the preparation step dropped — they would
-/// then hold the temp DB open and fail the script's final rename, which no
-/// operator reconcile does.
+/// then hold the temp DB open, which no operator reconcile does.
 async fn run_clone(
     src_owner: &'static str,
     src_db: &'static str,
@@ -178,8 +194,8 @@ async fn clones_a_db_with_unaccent_trigram_indexes() -> anyhow::Result<()> {
     // Criterion 1.
     assert!(out.status.success(), "clone-db.sh failed:\n{stderr}");
 
-    // Criterion 2.
-    let c = connect_as(tgt_owner, PW, tgt_db).await;
+    // Criterion 2.  The clone lives in the temp DB until the cutover.
+    let c = connect_as(tgt_owner, PW, temp_db).await;
     let idx = c
         .query_opt(
             "SELECT 1 FROM pg_indexes WHERE indexname = 'mail_blacklist__email_index'",
@@ -278,7 +294,7 @@ async fn clones_a_db_with_an_odoosh_unaccent_layout() -> anyhow::Result<()> {
 
     // Criterion 5.
     assert!(out.status.success(), "clone-db.sh failed:\n{stderr}");
-    let c = connect_as(tgt_owner, PW, tgt_db).await;
+    let c = connect_as(tgt_owner, PW, temp_db).await;
     let idx = c
         .query_opt(
             "SELECT 1 FROM pg_indexes WHERE indexname = 'mail_blacklist__email_index'",
@@ -299,8 +315,9 @@ async fn clones_a_db_with_an_odoosh_unaccent_layout() -> anyhow::Result<()> {
         .await?
         .get(0);
     assert_eq!(folded, "rene@example.com");
+    drop(c);
     pg_manager()
-        .ensure_extensions(&cluster_config(), tgt_owner, PW, tgt_db, true)
+        .ensure_extensions(&cluster_config(), tgt_owner, PW, temp_db, true)
         .await?;
 
     cleanup(&[src_db, tgt_db, temp_db], &[src_owner, tgt_owner]).await;
@@ -332,5 +349,274 @@ async fn preparing_unaccent_regardless_conflicts_with_an_odoosh_source() -> anyh
     );
 
     cleanup(&[src_db, tgt_db, temp_db], &[src_owner, tgt_owner]).await;
+    Ok(())
+}
+
+// ── Issue #199: clone into the temp DB, cut over only once neutralized ──────
+
+/// The previous staging database: one marker row the refresh must not touch
+/// until the cutover.
+async fn setup_old_staging(owner: &str, db: &str) {
+    admin_client()
+        .await
+        .simple_query(&format!(r#"CREATE DATABASE "{db}" OWNER "{owner}""#))
+        .await
+        .expect("create old staging db");
+    connect_as(owner, PW, db)
+        .await
+        .batch_execute(
+            "CREATE TABLE staging_marker (v text);
+             INSERT INTO staging_marker VALUES ('old staging');",
+        )
+        .await
+        .expect("seed old staging db");
+}
+
+/// What `scripts/neutralize.sh` leaves behind that the cutover checks.  The
+/// real neutralize needs `odoo-bin`, which the harness does not have.
+async fn mark_neutralized(owner: &str, db: &str) {
+    connect_as(owner, PW, db)
+        .await
+        .batch_execute(
+            "CREATE TABLE ir_config_parameter (key varchar PRIMARY KEY, value text);
+             INSERT INTO ir_config_parameter VALUES ('database.is_neutralized', 'true');",
+        )
+        .await
+        .expect("mark temp db neutralized");
+}
+
+async fn db_exists(db: &str) -> bool {
+    admin_client()
+        .await
+        .query_opt("SELECT 1 FROM pg_database WHERE datname = $1", &[&db])
+        .await
+        .expect("query pg_database")
+        .is_some()
+}
+
+async fn has_table(owner: &str, db: &str, table: &str) -> bool {
+    connect_as(owner, PW, db)
+        .await
+        .query_one("SELECT to_regclass($1) IS NOT NULL", &[&table])
+        .await
+        .expect("probe table")
+        .get(0)
+}
+
+/// The harness's own connections close asynchronously after their client is
+/// dropped; wait them out so they cannot hold the temp DB open for the
+/// rename.  In the cluster nothing connects to the temp DB at cutover time:
+/// the neutralize container has exited before the cutover container starts.
+async fn wait_for_no_sessions(db: &str) {
+    let c = admin_client().await;
+    for _ in 0..100 {
+        let n: i64 = c
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = $1",
+                &[&db],
+            )
+            .await
+            .expect("count sessions")
+            .get(0);
+        if n == 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("sessions on {db} never closed");
+}
+
+async fn run_cutover(
+    owner: &'static str,
+    tgt_db: &'static str,
+    temp_db: &'static str,
+    require_neutralized: bool,
+) -> std::process::Output {
+    wait_for_no_sessions(temp_db).await;
+    tokio::task::spawn_blocking(move || {
+        let mut envs = vec![
+            ("HOST", "127.0.0.1"),
+            ("PORT", "5432"),
+            ("USER", owner),
+            ("PASSWORD", PW),
+            ("TEMP_DB", temp_db),
+            ("TGT_DB", tgt_db),
+        ];
+        if require_neutralized {
+            envs.push(("REQUIRE_NEUTRALIZED", "true"));
+        }
+        run_script(CUTOVER_DB_SCRIPT, &envs)
+    })
+    .await
+    .expect("cutover task panicked")
+}
+
+/// Criteria 7 and 8: the clone stops at the temp DB, and the cutover swaps
+/// it into the live name once it is neutralized.
+#[tokio::test]
+async fn clone_leaves_live_db_until_cutover_swaps_it() -> anyhow::Result<()> {
+    let (src_owner, src_db) = ("clone_src_cut", "clone_src_cut_db");
+    let (tgt_owner, tgt_db) = ("clone_tgt_cut", "clone_tgt_cut_db");
+    let temp_db = "clone_tgt_cut_db_refresh_1";
+    setup_source(src_owner, src_db).await;
+    reset_role_and_db(tgt_owner, tgt_db).await;
+    setup_old_staging(tgt_owner, tgt_db).await;
+    prepare_like_controller(src_owner, src_db, tgt_owner, temp_db).await;
+
+    let out = run_clone(src_owner, src_db, tgt_owner, tgt_db, temp_db).await;
+    assert!(
+        out.status.success(),
+        "clone-db.sh failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Criterion 7.
+    assert!(
+        has_table(tgt_owner, tgt_db, "staging_marker").await,
+        "the clone touched the live staging DB"
+    );
+    assert!(
+        !has_table(tgt_owner, tgt_db, "mail_blacklist").await,
+        "the clone landed in the live staging DB before neutralize"
+    );
+    assert!(
+        has_table(tgt_owner, temp_db, "mail_blacklist").await,
+        "the clone is missing from the temp DB"
+    );
+
+    // Criterion 8.
+    mark_neutralized(tgt_owner, temp_db).await;
+    let out = run_cutover(tgt_owner, tgt_db, temp_db, true).await;
+    assert!(
+        out.status.success(),
+        "cutover-db.sh failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(has_table(tgt_owner, tgt_db, "mail_blacklist").await);
+    assert!(!has_table(tgt_owner, tgt_db, "staging_marker").await);
+    assert!(!db_exists(temp_db).await, "temp DB survived the cutover");
+
+    cleanup(&[src_db, tgt_db, temp_db], &[src_owner, tgt_owner]).await;
+    Ok(())
+}
+
+/// Criterion 9.
+#[tokio::test]
+async fn cutover_refuses_a_temp_db_that_is_not_neutralized() -> anyhow::Result<()> {
+    let (src_owner, src_db) = ("clone_src_cutneg", "clone_src_cutneg_db");
+    let (tgt_owner, tgt_db) = ("clone_tgt_cutneg", "clone_tgt_cutneg_db");
+    let temp_db = "clone_tgt_cutneg_db_refresh_1";
+    setup_source(src_owner, src_db).await;
+    reset_role_and_db(tgt_owner, tgt_db).await;
+    setup_old_staging(tgt_owner, tgt_db).await;
+    prepare_like_controller(src_owner, src_db, tgt_owner, temp_db).await;
+    let out = run_clone(src_owner, src_db, tgt_owner, tgt_db, temp_db).await;
+    assert!(out.status.success(), "clone-db.sh failed");
+
+    let out = run_cutover(tgt_owner, tgt_db, temp_db, true).await;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "cutover of an un-neutralized DB succeeded"
+    );
+    assert!(stdout.contains("CRITICAL"), "unexpected failure:\n{stdout}");
+    assert!(has_table(tgt_owner, tgt_db, "staging_marker").await);
+    assert!(
+        has_table(tgt_owner, temp_db, "mail_blacklist").await,
+        "the temp DB must survive for the neutralize retry"
+    );
+
+    cleanup(&[src_db, tgt_db, temp_db], &[src_owner, tgt_owner]).await;
+    Ok(())
+}
+
+/// Criterion 10.
+#[tokio::test]
+async fn cutover_without_a_temp_db_keeps_the_live_db() -> anyhow::Result<()> {
+    let (tgt_owner, tgt_db) = ("clone_tgt_cutnone", "clone_tgt_cutnone_db");
+    let temp_db = "clone_tgt_cutnone_db_refresh_1";
+    reset_role_and_db(tgt_owner, tgt_db).await;
+    setup_old_staging(tgt_owner, tgt_db).await;
+
+    let out = run_cutover(tgt_owner, tgt_db, temp_db, false).await;
+    assert!(!out.status.success(), "cutover without a temp DB succeeded");
+    assert!(has_table(tgt_owner, tgt_db, "staging_marker").await);
+
+    cleanup(&[tgt_db], &[tgt_owner]).await;
+    Ok(())
+}
+
+/// Criterion 11.
+#[tokio::test]
+async fn cutover_without_neutralize_swaps_onto_a_missing_live_db() -> anyhow::Result<()> {
+    let (src_owner, src_db) = ("clone_src_cutraw", "clone_src_cutraw_db");
+    let (tgt_owner, tgt_db) = ("clone_tgt_cutraw", "clone_tgt_cutraw_db");
+    let temp_db = "clone_tgt_cutraw_db_refresh_1";
+    setup_source(src_owner, src_db).await;
+    reset_role_and_db(tgt_owner, tgt_db).await;
+    prepare_like_controller(src_owner, src_db, tgt_owner, temp_db).await;
+    let out = run_clone(src_owner, src_db, tgt_owner, tgt_db, temp_db).await;
+    assert!(out.status.success(), "clone-db.sh failed");
+    assert!(!db_exists(tgt_db).await);
+
+    let out = run_cutover(tgt_owner, tgt_db, temp_db, false).await;
+    assert!(
+        out.status.success(),
+        "cutover-db.sh failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(has_table(tgt_owner, tgt_db, "mail_blacklist").await);
+    assert!(!db_exists(temp_db).await);
+
+    cleanup(&[src_db, tgt_db, temp_db], &[src_owner, tgt_owner]).await;
+    Ok(())
+}
+
+/// Criterion 12.
+#[tokio::test]
+async fn drops_only_the_targets_leftover_temp_dbs() -> anyhow::Result<()> {
+    let (owner, live) = ("clone_sweep", "clone_sweep_db");
+    let other = "clone_sweep_other";
+    reset_role_and_db(owner, live).await;
+    reset_role_and_db(other, "clone_sweep_db_refresh_aaaaaaaa").await;
+    let stale = [
+        "clone_sweep_db_refresh_0123abcd",
+        "clone_sweep_db_refresh_deadbeef",
+    ];
+    let kept = [
+        live,
+        "clone_sweep_db_refresh_0123abcz",
+        "clone_sweep_db_refresh_0123abcd9",
+        "clone_sweep_dbx_refresh_0123abcd",
+    ];
+    let admin = admin_client().await;
+    for db in stale.iter().chain(kept.iter()) {
+        admin
+            .simple_query(&format!(r#"DROP DATABASE IF EXISTS "{db}" WITH (FORCE)"#))
+            .await?;
+        admin
+            .simple_query(&format!(r#"CREATE DATABASE "{db}" OWNER "{owner}""#))
+            .await?;
+    }
+    let foreign = "clone_sweep_db_refresh_aaaaaaaa";
+    admin
+        .simple_query(&format!(r#"CREATE DATABASE "{foreign}" OWNER "{other}""#))
+        .await?;
+
+    let mut dropped = pg_manager()
+        .drop_refresh_temp_databases(&cluster_config(), owner, PW, live)
+        .await?;
+    dropped.sort();
+    assert_eq!(dropped, stale.to_vec());
+    for db in stale {
+        assert!(!db_exists(db).await, "{db} survived the sweep");
+    }
+    for db in kept.iter().chain([&foreign]) {
+        assert!(db_exists(db).await, "{db} must not be swept");
+    }
+
+    let mut all: Vec<&str> = kept.to_vec();
+    all.push(foreign);
+    cleanup(&all, &[owner, other]).await;
     Ok(())
 }
