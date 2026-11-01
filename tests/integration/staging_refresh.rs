@@ -241,6 +241,235 @@ async fn staging_refresh_onto_empty_dir_target_completes() -> anyhow::Result<()>
             .is_none(),
         "no filestore Job should be created for an emptyDir target"
     );
+    assert_filestore_skip_recorded(c, ns, "tgt-ephem-refresh", "TargetEmptyDir").await;
+
+    source_ready.abort();
+    Ok(())
+}
+
+/// Wait until the refresh CR says WHY its filestore step was skipped: a
+/// `FilestoreSkipped` condition with `reason`, the same reason in
+/// `status.message`, and a `FilestoreSkipped` Event on the CR.  Without these
+/// a skipped step reads exactly like a filestore copy that ran and finished.
+async fn assert_filestore_skip_recorded(
+    client: &kube::Client,
+    ns: &str,
+    crd_name: &str,
+    reason: &str,
+) {
+    use k8s_openapi::api::events::v1::Event;
+    let refreshes: Api<OdooStagingRefreshJob> = Api::namespaced(client.clone(), ns);
+    let events: Api<Event> = Api::namespaced(client.clone(), ns);
+    let start = Instant::now();
+    loop {
+        let status = refreshes
+            .get(crd_name)
+            .await
+            .ok()
+            .and_then(|r| r.status)
+            .unwrap_or_default();
+        let condition = status
+            .conditions
+            .iter()
+            .any(|c| c.type_ == "FilestoreSkipped" && c.status == "True" && c.reason == reason);
+        let message = status
+            .message
+            .as_deref()
+            .is_some_and(|m| m.starts_with("filestore skipped:"));
+        let event = events
+            .list(&ListParams::default())
+            .await
+            .map(|l| {
+                l.items.iter().any(|e| {
+                    e.reason.as_deref() == Some("FilestoreSkipped")
+                        && e.regarding.as_ref().and_then(|r| r.name.as_deref()) == Some(crd_name)
+                })
+            })
+            .unwrap_or(false);
+        if condition && message && event {
+            return;
+        }
+        assert!(
+            start.elapsed() < TIMEOUT,
+            "refresh {crd_name} never recorded its filestore skip (reason {reason}): \
+             condition={condition} message={message} event={event}; status={status:?}"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Refresh FROM an emptyDir source (e.g. a production instance whose
+/// attachments live in object storage) onto a PVC-backed target: there is no
+/// source PVC to snapshot or copy, so no filestore Job runs, the skip is
+/// recorded as `filestorePhase: Completed` with its reason, and the refresh
+/// finishes on the DB and neutralize Jobs alone.  The source and target
+/// emptyDir cases share one condition today; this keeps the source side from
+/// silently breaking if they are ever split (#204).
+#[tokio::test]
+async fn staging_refresh_from_empty_dir_source_completes() -> anyhow::Result<()> {
+    let ctx = TestContext::new_ns().await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+    let instances: Api<OdooInstance> = Api::namespaced(c.clone(), ns);
+    let source: OdooInstance = serde_json::from_value(json!({
+        "apiVersion": "bemade.org/v1alpha1",
+        "kind": "OdooInstance",
+        "metadata": { "name": "src-ephem-src", "namespace": ns },
+        "spec": {
+            "replicas": 1,
+            "cron": { "replicas": 1 },
+            "adminPassword": "admin",
+            "image": "odoo:18.0",
+            "ingress": {
+                "hosts": ["src-ephem-src.example.com"],
+                "issuer": "letsencrypt",
+                "class": "nginx",
+            },
+            "filestore": { "emptyDir": true },
+            "init": { "enabled": false },
+        }
+    }))
+    .unwrap();
+    instances.create(&PostParams::default(), &source).await?;
+    let source_ready = fast_track_to_running(&ctx, "src-ephem-src-init").await;
+
+    let target: OdooInstance = serde_json::from_value(json!({
+        "apiVersion": "bemade.org/v1alpha1",
+        "kind": "OdooInstance",
+        "metadata": { "name": "tgt-pvc", "namespace": ns },
+        "spec": {
+            "replicas": 1,
+            "cron": { "replicas": 1 },
+            "adminPassword": "admin",
+            "image": "odoo:18.0",
+            "ingress": {
+                "hosts": ["tgt-pvc.example.com"],
+                "issuer": "letsencrypt",
+                "class": "nginx",
+            },
+            "filestore": { "storageSize": "1Gi", "storageClass": "standard" },
+            "init": { "enabled": false },
+        }
+    }))
+    .unwrap();
+    instances.create(&PostParams::default(), &target).await?;
+    assert!(
+        wait_for_phase(c, ns, "tgt-pvc", OdooInstancePhase::Uninitialized).await,
+        "expected target Uninitialized"
+    );
+
+    // `auto`, the default: the method a real refresh would use.  With a
+    // PVC-backed source it would pick snapshot or copy; here neither applies.
+    let refreshes: Api<OdooStagingRefreshJob> = Api::namespaced(c.clone(), ns);
+    let refresh: OdooStagingRefreshJob = serde_json::from_value(json!({
+        "apiVersion": "bemade.org/v1alpha1",
+        "kind": "OdooStagingRefreshJob",
+        "metadata": { "name": "tgt-pvc-refresh", "namespace": ns },
+        "spec": {
+            "odooInstanceRef": { "name": "tgt-pvc" },
+            "source": { "instanceName": "src-ephem-src" },
+        }
+    }))
+    .unwrap();
+    refreshes.create(&PostParams::default(), &refresh).await?;
+
+    assert!(
+        wait_for_phase(c, ns, "tgt-pvc", OdooInstancePhase::CloningFromSource).await,
+        "expected CloningFromSource after refresh job created"
+    );
+    wait_for_filestore_phase(c, ns, "tgt-pvc-refresh", Phase::Completed).await;
+    assert_filestore_skip_recorded(c, ns, "tgt-pvc-refresh", "SourceEmptyDir").await;
+
+    let jobs: Api<Job> = Api::namespaced(c.clone(), ns);
+    let db_job = wait_for_refresh_sub_job(c, ns, "tgt-pvc-refresh", "dbJobName").await;
+    fake_job_succeeded(c, ns, &db_job).await;
+    let neut_job = wait_for_refresh_sub_job(c, ns, "tgt-pvc-refresh", "neutralizeJobName").await;
+    fake_job_succeeded(c, ns, &neut_job).await;
+
+    assert!(
+        wait_for_phase(c, ns, "tgt-pvc", OdooInstancePhase::Starting).await,
+        "expected Starting after DB and neutralize succeeded from an emptyDir source"
+    );
+    let after = refreshes.get("tgt-pvc-refresh").await?;
+    let status = after.status.unwrap_or_default();
+    assert!(
+        status.filestore_job_name.is_none(),
+        "no filestore Job should be created for an emptyDir source"
+    );
+    assert!(
+        status.source_snapshot.is_none(),
+        "an emptyDir source has no PVC to snapshot"
+    );
+    // Nothing the refresh created touches a filestore: only the DB clone
+    // and neutralize Jobs exist.
+    let created: Vec<String> = jobs
+        .list(&ListParams::default())
+        .await?
+        .items
+        .into_iter()
+        .filter_map(|j| j.metadata.name)
+        .filter(|n| n.starts_with("tgt-pvc-refresh-"))
+        .collect();
+    assert!(
+        created
+            .iter()
+            .all(|n| n.starts_with("tgt-pvc-refresh-db-") || n.starts_with("tgt-pvc-refresh-neut-")),
+        "unexpected refresh Jobs for an emptyDir source: {created:?}"
+    );
+
+    source_ready.abort();
+    Ok(())
+}
+
+/// `skipFilestore: true` records its skip the same way as an emptyDir skip
+/// (#203): `filestorePhase: Completed`, a reason, and an Event.
+#[tokio::test]
+async fn staging_refresh_skip_filestore_records_the_skip() -> anyhow::Result<()> {
+    let ctx = TestContext::new("src-skip").await;
+    let (c, ns) = (&ctx.client, ctx.ns.as_str());
+    let source_ready = fast_track_to_running(&ctx, "src-skip-init").await;
+
+    let target: OdooInstance = serde_json::from_value(json!({
+        "apiVersion": "bemade.org/v1alpha1",
+        "kind": "OdooInstance",
+        "metadata": { "name": "tgt-skip", "namespace": ns },
+        "spec": {
+            "replicas": 1,
+            "cron": { "replicas": 1 },
+            "adminPassword": "admin",
+            "image": "odoo:18.0",
+            "ingress": {
+                "hosts": ["tgt-skip.example.com"],
+                "issuer": "letsencrypt",
+                "class": "nginx",
+            },
+            "filestore": { "storageSize": "1Gi", "storageClass": "standard" },
+            "init": { "enabled": false },
+        }
+    }))
+    .unwrap();
+    let instances: Api<OdooInstance> = Api::namespaced(c.clone(), ns);
+    instances.create(&PostParams::default(), &target).await?;
+    assert!(
+        wait_for_phase(c, ns, "tgt-skip", OdooInstancePhase::Uninitialized).await,
+        "expected target Uninitialized"
+    );
+
+    let refreshes: Api<OdooStagingRefreshJob> = Api::namespaced(c.clone(), ns);
+    let refresh: OdooStagingRefreshJob = serde_json::from_value(json!({
+        "apiVersion": "bemade.org/v1alpha1",
+        "kind": "OdooStagingRefreshJob",
+        "metadata": { "name": "tgt-skip-refresh", "namespace": ns },
+        "spec": {
+            "odooInstanceRef": { "name": "tgt-skip" },
+            "source": { "instanceName": "src-skip" },
+            "skipFilestore": true,
+        }
+    }))
+    .unwrap();
+    refreshes.create(&PostParams::default(), &refresh).await?;
+
+    wait_for_filestore_phase(c, ns, "tgt-skip-refresh", Phase::Completed).await;
+    assert_filestore_skip_recorded(c, ns, "tgt-skip-refresh", "SkipFilestore").await;
 
     source_ready.abort();
     Ok(())

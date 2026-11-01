@@ -6,6 +6,8 @@ use k8s_openapi::api::{
         TypedObjectReference, Volume, VolumeMount,
     },
 };
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
+use kube::runtime::events::EventType;
 use kube::{
     api::{Api, DeleteParams, Patch, PatchParams, PostParams, ResourceExt},
     core::ErrorResponse,
@@ -33,7 +35,92 @@ use crate::helpers::sha256_hex;
 const CLONE_DB_SCRIPT: &str = include_str!("../../../scripts/clone-db.sh");
 const CLONE_FILESTORE_SCRIPT: &str = include_str!("../../../scripts/clone-filestore.sh");
 const RENAME_FILESTORE_SCRIPT: &str = include_str!("../../../scripts/rename-filestore.sh");
+/// Verification helpers shared by the rename and clone scripts.  Each script
+/// sources this file when run from a checkout; in a Job pod it is prepended
+/// to the script text instead (see `with_filestore_verify_lib`), since the
+/// scripts reach the pod as a single `bash -c` string.
+const FILESTORE_VERIFY_LIB: &str = include_str!("../../../scripts/filestore-verify.sh");
 const NEUTRALIZE_SCRIPT: &str = include_str!("../../../scripts/neutralize.sh");
+
+/// Prepend the shared verification library to a filestore script, so the
+/// Job's single `bash -c` command defines `verify_filestore` before the
+/// script body runs.
+fn with_filestore_verify_lib(script: &str) -> String {
+    format!("{FILESTORE_VERIFY_LIB}\n{script}")
+}
+
+/// The point in time the snapshot-cloned filestore reflects, as RFC 3339 UTC.
+///
+/// The rename script requires every attachment last written before this
+/// moment (minus a safety margin) and tolerates newer ones: the snapshot is
+/// requested before the DB dump starts, so on a busy instance the dump
+/// references attachments the snapshot never had.
+///
+/// Takes the EARLIER of the VolumeSnapshot's `metadata.creationTimestamp`
+/// (when the snapshot was requested) and `status.creationTime` (what the CSI
+/// driver reports from `CreateSnapshot`).  Earlier is the safe direction:
+/// fewer attachments count as "newer", so the check only gets stricter.  It
+/// also matters in practice — a driver that implements snapshots as a tree
+/// walk (JuiceFS runs `juicefs clone`, minutes for a large filestore) may
+/// report the walk's *end*, while only files that existed when it *began*
+/// are guaranteed to be in the copy.  If the snapshot cannot be read, the
+/// refresh CR's own creation time is used: the snapshot is always requested
+/// after it, so it is a looser but still correct bound.
+fn filestore_point_in_time(
+    snap: Option<&VolumeSnapshot>,
+    refresh: &OdooStagingRefreshJob,
+) -> Option<String> {
+    use chrono::{DateTime, SecondsFormat, Utc};
+    let requested = snap
+        .and_then(|s| s.metadata.creation_timestamp.as_ref())
+        .map(|t| t.0);
+    let taken = snap
+        .and_then(|s| s.status.as_ref())
+        .and_then(|st| st.creation_time.as_deref())
+        .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&Utc));
+    let pit = match (requested, taken) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+    .or_else(|| refresh.metadata.creation_timestamp.as_ref().map(|t| t.0))?;
+    // Whole seconds, truncated: rounding down only makes the check stricter.
+    Some(pit.to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
+/// How long the snapshot path's rename Job may keep retrying verification
+/// while an asynchronous CSI populate lands (see `build_filestore_rename_job`).
+/// Populate time scales with file count: ~11 min was measured for 67k files,
+/// so ~25 min for 150k; two hours covers roughly 700k files at that rate.
+const RENAME_JOB_DEADLINE_SECS: i64 = 7200;
+
+/// Kubernetes' Job pod-failure backoff (kube-controller-manager defaults):
+/// retry n waits 10 s * 2^(n-1), capped at 6 min.
+const JOB_BACKOFF_BASE_SECS: i64 = 10;
+const JOB_BACKOFF_CAP_SECS: i64 = 360;
+
+/// The smallest `backoffLimit` whose cumulative backoff delay reaches
+/// `deadline_secs`, so that `activeDeadlineSeconds`, not the retry count, is
+/// what ends a Job that keeps failing.  Pod run time only makes the deadline
+/// arrive sooner, so ignoring it errs on the side of more retries.
+///
+/// For 7200 s: 10+20+40+80+160+320 = 630 s over the first six retries, then
+/// 360 s each; 630 + 19*360 = 7470 s >= 7200 s, so 25 retries (26 pods).
+const fn backoff_limit_outlasting(deadline_secs: i64) -> i32 {
+    let mut retries = 0;
+    let mut delay = JOB_BACKOFF_BASE_SECS;
+    let mut waited = 0;
+    while waited < deadline_secs {
+        waited += delay;
+        retries += 1;
+        delay = if delay * 2 > JOB_BACKOFF_CAP_SECS {
+            JOB_BACKOFF_CAP_SECS
+        } else {
+            delay * 2
+        };
+    }
+    retries
+}
 
 /// Number of hex characters of the image's sha256 we persist in the refresh
 /// CR's `neutralizeJobImageHash` to detect spec drift on retry.  16 chars
@@ -394,33 +481,62 @@ impl State for CloningFromSource {
         // Mode-agnostic gate: the start guard and completion check both
         // ride on `filestore_phase`, set to Running once kickoff succeeds
         // and Completed/Failed when the underlying work terminates.
-        //
-        // An ephemeral filestore on either end skips the step entirely, like
-        // `skipFilestore`: an emptyDir source has no PVC to snapshot or copy
-        // from, and an emptyDir target has no PVC to copy into (its filestore
-        // is declared regenerable, so there is nothing the clone would need
-        // to carry over).
-        let filestore_skipped =
-            refresh.spec.skip_filestore || is_ephemeral(instance) || is_ephemeral(&source_instance);
+        // `skipFilestore` or an emptyDir on either end skips the step; see
+        // `filestore_skip_reason`.
+        let filestore_skip = filestore_skip_reason(refresh, instance, &source_instance);
+        let filestore_skipped = filestore_skip.is_some();
 
-        // The status roll-up in `state_machine.rs` only knows `skipFilestore`;
-        // for an ephemeral skip it would find neither a phase nor a Job and
-        // keep the refresh Active forever.  Record the skip as Completed.
-        if filestore_skipped
-            && !refresh.spec.skip_filestore
-            && refresh
+        // Record the skip as Completed: the status roll-up in
+        // `state_machine.rs` only knows `skipFilestore`, and for an ephemeral
+        // skip it would find neither a phase nor a Job and keep the refresh
+        // Active forever.  Completed alone, though, reads exactly like a
+        // filestore copy that ran and finished (#203), so also say why — in
+        // a condition (durable: a later failure overwrites `message`), in
+        // `message`, and as an Event.  Once, while the phase is still unset.
+        if let Some((reason, why)) = filestore_skip.as_ref() {
+            if refresh
                 .status
                 .as_ref()
                 .and_then(|s| s.filestore_phase.as_ref())
                 .is_none()
-        {
-            patch_refresh_status(
-                &ctx.client,
-                &ns,
-                &refresh.name_any(),
-                &json!({"status": {"filestorePhase": Phase::Completed}}),
-            )
-            .await?;
+            {
+                let mut conditions: Vec<_> = refresh
+                    .status
+                    .as_ref()
+                    .map(|s| s.conditions.clone())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|c| c.type_ != "FilestoreSkipped")
+                    .collect();
+                conditions.push(Condition {
+                    type_: "FilestoreSkipped".into(),
+                    status: "True".into(),
+                    reason: (*reason).into(),
+                    message: why.clone(),
+                    last_transition_time: Time(chrono::Utc::now()),
+                    observed_generation: refresh.metadata.generation,
+                });
+                patch_refresh_status(
+                    &ctx.client,
+                    &ns,
+                    &refresh.name_any(),
+                    &json!({"status": {
+                        "filestorePhase": Phase::Completed,
+                        "message": format!("filestore skipped: {why}"),
+                        "conditions": conditions,
+                    }}),
+                )
+                .await?;
+                crate::controller::odoo_instance::publish_event(
+                    ctx,
+                    refresh,
+                    EventType::Normal,
+                    "FilestoreSkipped",
+                    "CloneFilestore",
+                    Some(format!("filestore not copied: {why}")),
+                )
+                .await;
+            }
         }
 
         if !filestore_skipped
@@ -443,6 +559,9 @@ impl State for CloningFromSource {
                     refresh,
                     &source_pvc,
                     &source_db,
+                    &target_db,
+                    &target_conf,
+                    // The database the copy is verified against.
                     &target_db,
                 );
                 let jobs_api: Api<Job> = Api::namespaced(ctx.client.clone(), &ns);
@@ -631,6 +750,14 @@ impl State for CloningFromSource {
                                 == Some("Bound")
                 );
                 if bound {
+                    let snapshots: Api<VolumeSnapshot> = Api::namespaced(ctx.client.clone(), &ns);
+                    let snap_name = refresh
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.source_snapshot.clone())
+                        .unwrap_or_else(|| format!("{}-src", refresh.name_any()));
+                    let snap = snapshots.get_opt(&snap_name).await.ok().flatten();
+                    let filestore_pit = filestore_point_in_time(snap.as_ref(), refresh);
                     let job = build_filestore_rename_job(
                         &refresh.name_any(),
                         &ns,
@@ -640,6 +767,7 @@ impl State for CloningFromSource {
                         &target_conf,
                         &source_db,
                         &target_db,
+                        filestore_pit.as_deref(),
                     );
                     let jobs_api: Api<Job> = Api::namespaced(ctx.client.clone(), &ns);
                     let created = jobs_api.create(&PostParams::default(), &job).await?;
@@ -833,6 +961,13 @@ fn build_db_clone_job(
         .build()
 }
 
+/// Copy-path filestore step: copy the source filestore PVC's
+/// `filestore/<src_db>` into the target PVC as `filestore/<tgt_db>`,
+/// replacing (not merging into) what is there, after verifying the copy.
+///
+/// `verify_db` is the database whose `ir_attachment` rows the copy must
+/// satisfy (`DB_NAME` in the script).  It is the one seam for which database
+/// that is: today the caller passes the target database.
 #[allow(clippy::too_many_arguments)]
 fn build_filestore_clone_job(
     crd_name: &str,
@@ -843,6 +978,8 @@ fn build_filestore_clone_job(
     source_pvc: &str,
     source_db: &str,
     target_db: &str,
+    target_conf: &str,
+    verify_db: &str,
 ) -> Job {
     // Target filestore is already in the standard odoo_volumes() set; we
     // just need to add a second mount for the source PVC (read-only).
@@ -867,6 +1004,14 @@ fn build_filestore_clone_job(
         env("TGT_FILESTORE", "/var/lib/odoo"),
         env("SRC_DB", source_db),
         env("TGT_DB", target_db),
+        // The script copies into a sibling dir, verifies the copy against
+        // `verify_db`'s ir_attachment, and only then swaps it in.  The
+        // connection comes from the target conf, like the rename Job's.
+        env("DB_NAME", verify_db),
+        cm_env("HOST", target_conf, "db_host"),
+        cm_env("PORT", target_conf, "db_port"),
+        cm_env("USER", target_conf, "db_user"),
+        cm_env("PASSWORD", target_conf, "db_password"),
     ];
     let mut mounts = odoo_volume_mounts();
     mounts.push(src_mount);
@@ -879,7 +1024,7 @@ fn build_filestore_clone_job(
             command: Some(vec![
                 "/bin/bash".into(),
                 "-c".into(),
-                CLONE_FILESTORE_SCRIPT.into(),
+                with_filestore_verify_lib(CLONE_FILESTORE_SCRIPT),
             ]),
             env: Some(envs),
             volume_mounts: Some(mounts),
@@ -915,8 +1060,9 @@ fn build_filestore_rename_job(
     target_conf: &str,
     source_db: &str,
     target_db: &str,
+    filestore_pit: Option<&str>,
 ) -> Job {
-    let envs = vec![
+    let mut envs = vec![
         env("SRC_DB", source_db),
         env("TGT_DB", target_db),
         env("FILESTORE", "/var/lib/odoo"),
@@ -931,27 +1077,34 @@ fn build_filestore_rename_job(
         cm_env("USER", target_conf, "db_user"),
         cm_env("PASSWORD", target_conf, "db_password"),
     ];
+    // Attachments written after the snapshot's point in time are legitimately
+    // absent from it; without this every referenced file is required, which a
+    // busy instance can never satisfy.  See `filestore_point_in_time`.
+    if let Some(pit) = filestore_pit {
+        envs.push(env("FILESTORE_PIT", pit));
+    }
     OdooJobBuilder::new(&format!("{crd_name}-fsrename-"), ns, refresh, instance)
-        .active_deadline(7200)
+        .active_deadline(RENAME_JOB_DEADLINE_SECS)
         // A PVC restored from a VolumeSnapshot can be Bound, mountable and
         // EMPTY: JuiceFS CSI reports ProvisioningSucceeded once the restore is
         // *scheduled*, then clones in a background Job (measured: ~11 min for a
-        // 67k-file filestore).  That Job rmdir()s the target subPath first, so a
-        // pod which mounted beforehand is bind-mounted to an unlinked inode and
-        // can NEVER observe the clone landing -- waiting in-pod cannot work.
-        // The only recovery is a new pod with a new mount, which is precisely
-        // what backoffLimit yields.  K8s' exponential backoff (10s, 20s, 40s,
-        // ... capped at 6 min) spans that window well inside 8 attempts.  The
-        // builder default of 0 turned a guaranteed-transient condition into a
-        // hard failure on the first attempt.
-        .backoff_limit(8)
+        // 67k-file filestore, so ~25 min for 150k).  That Job rmdir()s the
+        // target subPath first, so a pod which mounted beforehand is
+        // bind-mounted to an unlinked inode and can NEVER observe the clone
+        // landing -- waiting in-pod cannot work.  The only recovery is a new
+        // pod with a new mount, which is precisely what backoffLimit yields.
+        //
+        // The retry COUNT must not be what gives up first: K8s backoff
+        // (10 s doubling, capped at 6 min) means 8 retries wait only ~22 min,
+        // less than a large populate.  Size the limit so the deadline binds.
+        .backoff_limit(backoff_limit_outlasting(RENAME_JOB_DEADLINE_SECS))
         .containers(vec![Container {
             name: "rename-filestore".into(),
             image: Some(image.into()),
             command: Some(vec![
                 "/bin/bash".into(),
                 "-c".into(),
-                RENAME_FILESTORE_SCRIPT.into(),
+                with_filestore_verify_lib(RENAME_FILESTORE_SCRIPT),
             ]),
             env: Some(envs),
             volume_mounts: Some(odoo_volume_mounts()),
@@ -1140,6 +1293,41 @@ pub(crate) async fn maybe_retry_failed_neutralize(
     Ok(true)
 }
 
+/// Why a refresh's filestore step does not run, if it doesn't: a condition
+/// reason and a human-readable explanation.  An ephemeral filestore on either
+/// end skips it like `skipFilestore`: an emptyDir source has no PVC to
+/// snapshot or copy from, and an emptyDir target has no PVC to copy into (its
+/// filestore is declared regenerable, so there is nothing the clone would need
+/// to carry over).
+fn filestore_skip_reason(
+    refresh: &OdooStagingRefreshJob,
+    target: &OdooInstance,
+    source: &OdooInstance,
+) -> Option<(&'static str, String)> {
+    if refresh.spec.skip_filestore {
+        return Some(("SkipFilestore", "skipFilestore is set".into()));
+    }
+    match (is_ephemeral(source), is_ephemeral(target)) {
+        (true, true) => Some((
+            "SourceAndTargetEmptyDir",
+            format!(
+                "source {} and target {} both use an emptyDir filestore",
+                source.name_any(),
+                target.name_any()
+            ),
+        )),
+        (true, false) => Some((
+            "SourceEmptyDir",
+            format!("source {} uses an emptyDir filestore", source.name_any()),
+        )),
+        (false, true) => Some((
+            "TargetEmptyDir",
+            format!("target {} uses an emptyDir filestore", target.name_any()),
+        )),
+        (false, false) => None,
+    }
+}
+
 fn can_refresh_with_snapshot(source_instance: &OdooInstance, dest_instance: &OdooInstance) -> bool {
     sc(source_instance).is_some() && sc(source_instance) == sc(dest_instance)
 }
@@ -1245,6 +1433,7 @@ mod tests {
             "staging-odoo-conf",
             "odoo_src",
             "odoo_tgt",
+            Some("2026-01-01T00:00:00Z"),
         );
         let pod = job.spec.unwrap().template.spec.unwrap();
         let container = &pod.containers[0];
@@ -1277,6 +1466,7 @@ mod tests {
             "staging-odoo-conf",
             "odoo_src",
             "odoo_tgt",
+            Some("2026-01-01T00:00:00Z"),
         );
         let spec = job.spec.unwrap();
         assert!(
@@ -1290,12 +1480,220 @@ mod tests {
             .unwrap_or_default();
         let names: Vec<&str> = envs.iter().map(|e| e.name.as_str()).collect();
         for required in [
-            "SRC_DB", "TGT_DB", "DB_NAME", "HOST", "PORT", "USER", "PASSWORD",
+            "SRC_DB",
+            "TGT_DB",
+            "DB_NAME",
+            "HOST",
+            "PORT",
+            "USER",
+            "PASSWORD",
+            "FILESTORE_PIT",
         ] {
             assert!(
                 names.contains(&required),
                 "rename-filestore.sh requires ${required}; got {names:?}"
             );
         }
+    }
+
+    /// The copy Job verifies its copy against `ir_attachment` before swapping
+    /// it in, so it needs a DB connection, and the database it is handed is
+    /// the one the copy is checked against.  The script must also find
+    /// `verify_filestore` already defined in its command text.
+    #[test]
+    fn clone_job_can_verify_its_copy() {
+        let job = build_filestore_clone_job(
+            "refresh-x",
+            "ns",
+            "odoo:19",
+            &instance("staging"),
+            &refresh("refresh-x"),
+            "prod-filestore-pvc",
+            "odoo_src",
+            "odoo_tgt",
+            "staging-odoo-conf",
+            "odoo_verify",
+        );
+        let container = &job.spec.unwrap().template.spec.unwrap().containers[0];
+        let envs = container.env.clone().unwrap_or_default();
+        let value = |name: &str| {
+            envs.iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("clone-filestore.sh requires ${name}"))
+        };
+        assert_eq!(value("DB_NAME").value.as_deref(), Some("odoo_verify"));
+        for name in ["HOST", "PORT", "USER", "PASSWORD"] {
+            let cm = value(name)
+                .value_from
+                .as_ref()
+                .and_then(|v| v.config_map_key_ref.as_ref())
+                .unwrap_or_else(|| panic!("${name} must come from the target conf"));
+            assert_eq!(cm.name, "staging-odoo-conf");
+        }
+        let text = container.command.as_ref().unwrap().last().unwrap();
+        let defined = text
+            .find("verify_filestore() {")
+            .expect("verify_filestore defined");
+        let script = text
+            .find(CLONE_FILESTORE_SCRIPT)
+            .expect("clone script present");
+        assert!(
+            defined < script,
+            "verify_filestore must be defined before use"
+        );
+    }
+
+    /// The rename Job's retries exist to outwait an asynchronous CSI populate
+    /// that scales with file count (~11 min for 67k files, so ~25 min for a
+    /// 150k-file filestore).  Kubernetes delays retry n by 10 s * 2^(n-1),
+    /// capped at 6 min, so a small backoffLimit runs out long before the
+    /// deadline does: 8 retries is only ~22 min of waiting.  The deadline
+    /// must be the binding limit, and it must cover a large populate.
+    #[test]
+    fn rename_job_retries_until_its_deadline() {
+        let spec = build_filestore_rename_job(
+            "refresh-x",
+            "ns",
+            "odoo:19",
+            &instance("staging"),
+            &refresh("refresh-x"),
+            "staging-odoo-conf",
+            "odoo_src",
+            "odoo_tgt",
+            None,
+        )
+        .spec
+        .unwrap();
+        let deadline = spec
+            .active_deadline_seconds
+            .expect("rename Job has a deadline");
+        let retries = spec.backoff_limit.unwrap_or(0);
+        // kube-controller-manager's pod-failure backoff, independent of the code.
+        let waited: i64 = (0..retries).map(|n| (10_i64 << n.min(16)).min(360)).sum();
+        assert!(
+            waited >= deadline,
+            "{retries} retries wait only {waited}s, so they are exhausted before \
+             the {deadline}s deadline: the deadline must be what stops the Job"
+        );
+        assert!(
+            deadline >= 30 * 60,
+            "a {deadline}s deadline does not cover a ~25 min populate"
+        );
+    }
+
+    fn snapshot(requested: Option<&str>, taken: Option<&str>) -> VolumeSnapshot {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        use kube_custom_resources_rs::snapshot_storage_k8s_io::v1::volumesnapshots::VolumeSnapshotStatus;
+        VolumeSnapshot {
+            metadata: ObjectMeta {
+                name: Some("refresh-x-src".into()),
+                creation_timestamp: requested.map(|t| {
+                    Time(
+                        chrono::DateTime::parse_from_rfc3339(t)
+                            .unwrap()
+                            .with_timezone(&chrono::Utc),
+                    )
+                }),
+                ..Default::default()
+            },
+            spec: VolumeSnapshotSpec {
+                source: VolumeSnapshotSource {
+                    persistent_volume_claim_name: Some("prod-filestore-pvc".into()),
+                    volume_snapshot_content_name: None,
+                },
+                volume_snapshot_class_name: None,
+            },
+            status: Some(VolumeSnapshotStatus {
+                creation_time: taken.map(str::to_string),
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// A driver may report `creationTime` at the end of a minutes-long tree
+    /// walk; only files that existed when the snapshot was *requested* are
+    /// guaranteed in the clone.  Whichever is earlier wins, in either order.
+    #[test]
+    fn point_in_time_is_the_earlier_snapshot_time() {
+        let r = refresh("refresh-x");
+        let walk_ends_late = snapshot(Some("2026-01-01T12:00:05Z"), Some("2026-01-01T12:07:30Z"));
+        assert_eq!(
+            filestore_point_in_time(Some(&walk_ends_late), &r).as_deref(),
+            Some("2026-01-01T12:00:05Z")
+        );
+        let cut_reported_early =
+            snapshot(Some("2026-01-01T12:00:05Z"), Some("2026-01-01T11:59:58Z"));
+        assert_eq!(
+            filestore_point_in_time(Some(&cut_reported_early), &r).as_deref(),
+            Some("2026-01-01T11:59:58Z")
+        );
+    }
+
+    /// The script compares against Odoo's naive-UTC timestamps, so a driver
+    /// reporting a local offset must still reach it as UTC.
+    #[test]
+    fn point_in_time_is_rendered_in_utc() {
+        let snap = snapshot(None, Some("2026-01-01T07:00:00-05:00"));
+        assert_eq!(
+            filestore_point_in_time(Some(&snap), &refresh("refresh-x")).as_deref(),
+            Some("2026-01-01T12:00:00Z")
+        );
+    }
+
+    /// An unreadable snapshot falls back to the refresh CR's creation time —
+    /// always before the snapshot was requested, so still a safe bound —
+    /// rather than to strict verification, which a busy instance never passes.
+    #[test]
+    fn point_in_time_falls_back_to_refresh_creation() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        let mut r = refresh("refresh-x");
+        r.metadata.creation_timestamp = Some(Time(
+            chrono::DateTime::parse_from_rfc3339("2026-01-01T11:58:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        ));
+        assert_eq!(
+            filestore_point_in_time(None, &r).as_deref(),
+            Some("2026-01-01T11:58:00Z")
+        );
+        let snap_without_times = snapshot(None, None);
+        assert_eq!(
+            filestore_point_in_time(Some(&snap_without_times), &r).as_deref(),
+            Some("2026-01-01T11:58:00Z")
+        );
+    }
+
+    /// The filestore scripts call `verify_filestore`, defined in a separate
+    /// file they can only source from a checkout.  In a pod the definition
+    /// must already be in the `bash -c` text, ahead of the script body, or
+    /// every refresh fails on an undefined function.
+    #[test]
+    fn rename_job_command_defines_verify_before_the_script() {
+        let job = build_filestore_rename_job(
+            "refresh-x",
+            "ns",
+            "odoo:19",
+            &instance("staging"),
+            &refresh("refresh-x"),
+            "staging-odoo-conf",
+            "odoo_src",
+            "odoo_tgt",
+            None,
+        );
+        let cmd = job.spec.unwrap().template.spec.unwrap().containers[0]
+            .command
+            .clone()
+            .unwrap();
+        let text = cmd.last().unwrap();
+        let defined = text
+            .find("verify_filestore() {")
+            .expect("verify_filestore defined");
+        let script = text
+            .find(RENAME_FILESTORE_SCRIPT)
+            .expect("rename script body present");
+        assert!(
+            defined < script,
+            "verify_filestore must be defined before use"
+        );
     }
 }
