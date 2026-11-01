@@ -1,17 +1,19 @@
 //! Child resource helpers — ensure_* functions for OdooInstance infrastructure.
 //!
 //! These create/update the phase-independent Kubernetes resources that every
-//! OdooInstance needs: Secret, PG role, PVC, ConfigMap, Service, Ingress,
+//! OdooInstance needs: Secrets (incl. the rendered odoo.conf), PG role, PVC, Service, Ingress,
 //! Deployment.  They run every reconcile tick before the state machine.
 
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::{
     apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy},
+    batch::v1::Job,
     core::v1::{
         ConfigMap, Container, ContainerPort, EnvVar, ExecAction, HTTPGetAction,
-        PersistentVolumeClaim, PersistentVolumeClaimSpec, PodSpec, PodTemplateSpec, Probe, Secret,
-        Service, ServicePort, ServiceSpec, TypedObjectReference, VolumeResourceRequirements,
+        PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, PodSpec, PodTemplateSpec, Probe,
+        Secret, Service, ServicePort, ServiceSpec, TypedObjectReference,
+        VolumeResourceRequirements,
     },
     networking::v1::{
         HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
@@ -24,7 +26,11 @@ use k8s_openapi::apimachinery::pkg::{
     apis::meta::v1::{LabelSelector, OwnerReference},
     util::intstr::IntOrString,
 };
-use kube::api::{Api, ObjectMeta, Patch, PatchParams, PostParams, ResourceExt};
+use k8s_openapi::ByteString;
+use kube::api::{
+    Api, DeleteParams, ListParams, ObjectMeta, Patch, PatchParams, PostParams, Preconditions,
+    ResourceExt,
+};
 use kube::Client;
 use serde_json::json;
 
@@ -42,8 +48,9 @@ use crate::helpers::{
 use crate::postgres::PostgresClusterConfig;
 
 use super::helpers::{
-    apply_extra_env, cron_depl_name, env, image_pull_secrets, is_ephemeral, odoo_security_context,
-    odoo_volume_mounts, odoo_volumes, secret_env, FIELD_MANAGER,
+    apply_extra_env, cron_depl_name, env, image_pull_secrets, is_ephemeral, job_is_finished,
+    odoo_security_context, odoo_volume_mounts, odoo_volumes, pod_spec_references_configmap,
+    secret_env, FIELD_MANAGER,
 };
 use super::odoo_instance::Context;
 
@@ -509,7 +516,15 @@ async fn get_pvc_source(
     })
 }
 
-pub async fn ensure_config_map(
+/// Render odoo.conf into the `<name>-odoo-conf` Secret.
+///
+/// A Secret rather than a ConfigMap: the file carries `db_password` and the
+/// `admin_passwd` master password, and Odoo reads the latter only from the
+/// config file, so the file itself has to be secret (#131). Besides
+/// `odoo.conf`, the Secret carries the connection details as individual keys
+/// (`db_host`, `db_port`, `db_name`, `db_user`, `db_password`) for the Job
+/// builders, which inject them with `secretKeyRef`.
+pub async fn ensure_odoo_conf_secret(
     client: &Client,
     ns: &str,
     name: &str,
@@ -517,13 +532,12 @@ pub async fn ensure_config_map(
     pg: &PostgresClusterConfig,
     oref: &OwnerReference,
 ) -> Result<()> {
-    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
-    let cm_name = format!("{name}-odoo-conf");
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
+    let conf_name = format!("{name}-odoo-conf");
     let username = odoo_username(ns, name);
     let db = db_name(instance);
 
     // Read password from the odoo-user secret.
-    let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
     let secret = secrets.get(&format!("{name}-odoo-user")).await?;
     let data = secret.data.unwrap_or_default();
     let password = String::from_utf8_lossy(
@@ -543,31 +557,140 @@ pub async fn ensure_config_map(
         &instance.spec.config_options,
     );
 
-    let cm = ConfigMap {
+    let entries = [
+        ("odoo.conf", conf),
+        ("db_host", pg.host.clone()),
+        ("db_port", pg.port.to_string()),
+        ("db_name", db),
+        ("db_user", username),
+        ("db_password", password),
+    ];
+    let conf_secret = Secret {
         metadata: ObjectMeta {
-            name: Some(cm_name.clone()),
+            name: Some(conf_name.clone()),
             namespace: Some(ns.to_string()),
             owner_references: Some(vec![oref.clone()]),
             ..Default::default()
         },
-        data: Some(BTreeMap::from([
-            ("odoo.conf".to_string(), conf),
-            ("db_host".to_string(), pg.host.clone()),
-            ("db_port".to_string(), pg.port.to_string()),
-            ("db_name".to_string(), db),
-            ("db_user".to_string(), username),
-            ("db_password".to_string(), password),
-        ])),
+        type_: Some("Opaque".to_string()),
+        data: Some(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), ByteString(v.into_bytes())))
+                .collect(),
+        ),
         ..Default::default()
     };
 
-    cms.patch(
-        &cm_name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(&cm),
-    )
-    .await?;
+    secrets
+        .patch(
+            &conf_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(&conf_secret),
+        )
+        .await?;
     Ok(())
+}
+
+/// SHA-256 of the rendered odoo.conf, stamped on the pod templates so a
+/// config change rolls the Deployments.
+async fn odoo_conf_hash(client: &Client, ns: &str, name: &str) -> Result<String> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
+    let conf = secrets.get(&format!("{name}-odoo-conf")).await?;
+    let content = conf
+        .data
+        .as_ref()
+        .and_then(|d| d.get("odoo.conf"))
+        .map(|b| String::from_utf8_lossy(&b.0).into_owned())
+        .unwrap_or_default();
+    Ok(sha256_hex(&content))
+}
+
+/// Delete the `<name>-odoo-conf` ConfigMap that operator versions before the
+/// move to a Secret (#131) rendered odoo.conf into, once nothing needs it.
+///
+/// It holds `db_password` and `admin_passwd` in plaintext, so it must not
+/// linger; but a pod that has not started yet and mounts it, or reads a key
+/// from it, would hang on its absence. So it is deleted only when no
+/// Deployment template, no unfinished Job template and no live Pod in the
+/// namespace references it. Until then every reconcile re-checks; nothing
+/// writes to it any more. A ConfigMap of that name the instance does not own
+/// is somebody else's and is never touched.
+pub async fn delete_legacy_conf_configmap(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    instance: &OdooInstance,
+) -> Result<()> {
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+    let cm_name = format!("{name}-odoo-conf");
+    let Some(cm) = cms.get_opt(&cm_name).await? else {
+        return Ok(());
+    };
+    let owned = instance.metadata.uid.as_deref().is_some_and(|uid| {
+        cm.owner_references()
+            .iter()
+            .any(|o| o.uid == uid && o.kind == "OdooInstance")
+    });
+    if !owned {
+        return Ok(());
+    }
+
+    let lp = ListParams::default();
+    let deps: Api<Deployment> = Api::namespaced(client.clone(), ns);
+    if let Some(d) = deps.list(&lp).await?.into_iter().find(|d| {
+        d.spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .is_some_and(|p| pod_spec_references_configmap(p, &cm_name))
+    }) {
+        tracing::debug!(%name, deployment = %d.name_any(), "legacy odoo-conf ConfigMap still referenced");
+        return Ok(());
+    }
+    let jobs: Api<Job> = Api::namespaced(client.clone(), ns);
+    if let Some(j) = jobs.list(&lp).await?.into_iter().find(|j| {
+        !job_is_finished(j)
+            && j.spec
+                .as_ref()
+                .and_then(|s| s.template.spec.as_ref())
+                .is_some_and(|p| pod_spec_references_configmap(p, &cm_name))
+    }) {
+        tracing::info!(%name, job = %j.name_any(), "legacy odoo-conf ConfigMap kept until this Job finishes");
+        return Ok(());
+    }
+    let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
+    if let Some(p) = pods.list(&lp).await?.into_iter().find(|p| {
+        let done = p
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .is_some_and(|ph| ph == "Succeeded" || ph == "Failed");
+        !done
+            && p.spec
+                .as_ref()
+                .is_some_and(|s| pod_spec_references_configmap(s, &cm_name))
+    }) {
+        tracing::debug!(%name, pod = %p.name_any(), "legacy odoo-conf ConfigMap still mounted");
+        return Ok(());
+    }
+
+    // Preconditions: never delete a ConfigMap recreated or changed since we
+    // looked at it.
+    let dp = DeleteParams {
+        preconditions: Some(Preconditions {
+            uid: cm.metadata.uid.clone(),
+            resource_version: cm.metadata.resource_version.clone(),
+        }),
+        ..Default::default()
+    };
+    match cms.delete(&cm_name, &dp).await {
+        Ok(_) => {
+            tracing::info!(%name, "deleted legacy odoo-conf ConfigMap (odoo.conf now lives in a Secret)");
+            Ok(())
+        }
+        Err(kube::Error::Api(e)) if e.code == 404 || e.code == 409 => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub async fn ensure_service(
@@ -760,15 +883,7 @@ pub async fn ensure_deployment(
         .unwrap_or("/web/health");
 
     // Hash odoo.conf for rollout trigger.
-    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
-    let cm = cms.get(&format!("{name}-odoo-conf")).await?;
-    let conf_content = cm
-        .data
-        .as_ref()
-        .and_then(|d| d.get("odoo.conf"))
-        .map(|s| s.as_str())
-        .unwrap_or("");
-    let conf_hash = sha256_hex(conf_content);
+    let conf_hash = odoo_conf_hash(client, ns, name).await?;
 
     // Override PGDATABASE so the Odoo config layer (which reads env vars
     // with higher priority than the config file) uses the correct database.
@@ -1056,15 +1171,7 @@ pub async fn ensure_cron_deployment(
     let pg_env = vec![env("PGDATABASE", &db)];
 
     // Hash odoo.conf for rollout trigger.
-    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
-    let cm = cms.get(&format!("{name}-odoo-conf")).await?;
-    let conf_content = cm
-        .data
-        .as_ref()
-        .and_then(|d| d.get("odoo.conf"))
-        .map(|s| s.as_str())
-        .unwrap_or("");
-    let conf_hash = sha256_hex(conf_content);
+    let conf_hash = odoo_conf_hash(client, ns, name).await?;
 
     let mut depl_labels = BTreeMap::from([("app".to_string(), depl_name.to_string())]);
     depl_labels.extend(super::helpers::instance_labels(instance));

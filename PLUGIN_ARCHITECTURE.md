@@ -381,7 +381,7 @@ rather than a later head-scratch.
 Plugins write into well-defined CRD fields the operator already consumes
 (`spec.database`, `spec.mail.outgoing`, `spec.filestore`, …). This keeps the
 effective config legible on the instance and reuses the operator's existing
-wiring (the `<instance>-odoo-conf` ConfigMap, the neutralize job env, etc.).
+wiring (the `<instance>-odoo-conf` Secret, the neutralize job env, etc.).
 
 ### 6.2 Example: mail (the multi-tenant Mailpit goal)
 

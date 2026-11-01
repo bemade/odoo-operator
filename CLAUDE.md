@@ -44,7 +44,7 @@ Only cron scales to 0 during Upgrading (web stays up).
 ### Child Resources
 
 `src/controller/child_resources.rs` builds: Deployment (x2), Service, Ingress,
-PVC, ConfigMap, Secret, ServiceAccount, Role, RoleBinding. All use server-side
+PVC, Secrets (incl. the rendered odoo.conf), ServiceAccount, Role, RoleBinding. All use server-side
 apply with `FIELD_MANAGER = "odoo-operator"`.
 
 ### Job CRs
@@ -59,7 +59,9 @@ Failed) and the underlying Job name.
 - PostgreSQL user: `odoo.{namespace}.{instance_name}`
 - Database name: `spec.database.name` if set, else `odoo_{sanitized_uid}`
 - Cron deployment: `{instance_name}-cron` (helper: `cron_depl_name()`)
-- ConfigMap: `{instance_name}-odoo-conf`
+- odoo.conf Secret: `{instance_name}-odoo-conf` (a Secret, not a ConfigMap:
+  it holds `db_password` and `admin_passwd`; Jobs read its `db_*` keys via
+  `secret_env`)
 - PVC: `{instance_name}-filestore-pvc`
 - Secret: `{instance_name}-db-password`
 
