@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.9.0](https://github.com/bemade/odoo-operator/compare/v2.8.5...v2.9.0) (2026-11-02)
+
+
+### Features
+
+* **security:** add spec.adminPasswordSecretRef and deprecate spec.adminPassword ([#211](https://github.com/bemade/odoo-operator/issues/211)) ([11e2bc6](https://github.com/bemade/odoo-operator/commit/11e2bc61a974e7ed43a60652c1ac5b0233f7647e))
+
+
+### Bug Fixes
+
+* **chart:** run the operator as a singleton and shut down gracefully ([#206](https://github.com/bemade/odoo-operator/issues/206)) ([1ac3dd3](https://github.com/bemade/odoo-operator/commit/1ac3dd3ed6c21a52836e6f37b1b23f0ad51ee6e2))
+* **postgres:** only reset a role's password on an authentication failure ([#207](https://github.com/bemade/odoo-operator/issues/207)) ([58b55af](https://github.com/bemade/odoo-operator/commit/58b55af03d2aaf02cc9586bdbb0385de0e0cb096))
+* **security:** render odoo.conf into a Secret instead of a ConfigMap ([#210](https://github.com/bemade/odoo-operator/issues/210)) ([11e2bc6](https://github.com/bemade/odoo-operator/commit/11e2bc61a974e7ed43a60652c1ac5b0233f7647e))
+* **staging-refresh:** make the filestore step verifiable and recoverable ([#209](https://github.com/bemade/odoo-operator/issues/209)) ([11e2bc6](https://github.com/bemade/odoo-operator/commit/11e2bc61a974e7ed43a60652c1ac5b0233f7647e))
+* **staging-refresh:** neutralize the temp DB before the cutover ([#208](https://github.com/bemade/odoo-operator/issues/208)) ([518e2b6](https://github.com/bemade/odoo-operator/commit/518e2b68762392ae41bda51646ee3c68e6a4e5fc)), closes [#199](https://github.com/bemade/odoo-operator/issues/199)
+
 ## [2.8.5](https://github.com/bemade/odoo-operator/compare/v2.8.4...v2.8.5) (2026-10-27)
 
 
