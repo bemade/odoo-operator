@@ -298,20 +298,20 @@ async fn migrate_database_not_triggered_during_init() {
 
 // ─── Test 5: odoo.conf stays on the source cluster until the data moves ─────
 
-/// Read `db_host` out of the instance's odoo-conf ConfigMap.
+/// Read `db_host` out of the instance's odoo-conf Secret.
 async fn conf_db_host(client: &kube::Client, ns: &str, name: &str) -> String {
-    let cms: Api<k8s_openapi::api::core::v1::ConfigMap> = Api::namespaced(client.clone(), ns);
-    let cm = cms.get(&format!("{name}-odoo-conf")).await.unwrap();
-    cm.data
+    let secrets: Api<k8s_openapi::api::core::v1::Secret> = Api::namespaced(client.clone(), ns);
+    let conf = secrets.get(&format!("{name}-odoo-conf")).await.unwrap();
+    conf.data
         .as_ref()
         .and_then(|d| d.get("db_host"))
-        .cloned()
+        .map(|b| String::from_utf8_lossy(&b.0).into_owned())
         .unwrap_or_default()
 }
 
 /// The destination cluster's connection details must not be published while the
 /// migration is in flight.  A pod that starts in that window — including one
-/// rolled by the ConfigMap change itself — connects to the database the
+/// rolled by the conf change itself — connects to the database the
 /// migration Job is about to drop, which is how #172 failed.
 #[tokio::test]
 async fn migrate_database_conf_stays_on_source_until_switchover() {
@@ -337,7 +337,7 @@ async fn migrate_database_conf_stays_on_source_until_switchover() {
         "expected MigratingDatabase phase"
     );
 
-    // Let a few more reconciles run — the ConfigMap is rewritten on every one.
+    // Let a few more reconciles run — the conf Secret is rewritten on every one.
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(
         conf_db_host(c, ns, name).await,

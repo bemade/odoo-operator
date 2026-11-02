@@ -233,7 +233,6 @@ fn build_migration_env(
     db_name: &str,
     creds_secret: &str,
 ) -> Vec<EnvVar> {
-    use super::super::helpers::cm_env;
     vec![
         // Source cluster (admin password via secretKeyRef, never a literal).
         env("SRC_HOST", &old_pg.host),
@@ -245,12 +244,12 @@ fn build_migration_env(
         env("DST_PORT", new_pg.port.to_string()),
         env("DST_ADMIN_USER", &new_pg.admin_user),
         secret_env("DST_ADMIN_PASSWORD", creds_secret, "DST_ADMIN_PASSWORD"),
-        // Odoo role credentials.  The ConfigMap deliberately still points at
+        // Odoo role credentials.  The odoo-conf Secret deliberately still points at
         // the *source* cluster for the duration of the migration (see
         // `database_host_cluster`), but the role name and password are the same
         // on both ends, so it remains the right place to read them from.
-        cm_env("DB_USER", odoo_conf_name, "db_user"),
-        cm_env("DB_PASSWORD", odoo_conf_name, "db_password"),
+        secret_env("DB_USER", odoo_conf_name, "db_user"),
+        secret_env("DB_PASSWORD", odoo_conf_name, "db_password"),
         // Database name.
         env("DB_NAME", db_name),
     ]

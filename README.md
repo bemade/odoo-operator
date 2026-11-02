@@ -73,7 +73,6 @@ metadata:
   namespace: odoo
 spec:
   image: odoo:18.0
-  adminPassword: changeme
   replicas: 1
   ingress:
     hosts:
@@ -96,7 +95,8 @@ module. To skip auto-init (e.g. when restoring from a backup), set
 |---|---|---|
 | `image` | operator default | Odoo container image |
 | `replicas` | `1` | Number of web pods. Set to `0` to stop the instance |
-| `adminPassword` | — | Odoo master password |
+| `adminPasswordSecretRef.name` / `.key` | generated | Secret (same namespace) holding the Odoo master password. If neither this nor `adminPassword` is set, the operator generates one into `<instance>-admin-password` and sets this field |
+| `adminPassword` | — | **Deprecated**: the master password as plaintext, readable by anyone who can read the OdooInstance. Mutually exclusive with `adminPasswordSecretRef` |
 | `imagePullSecret` | — | Name of a `kubernetes.io/dockerconfigjson` secret in the operator namespace (auto-copied to instance namespace) |
 | `ingress.hosts` | — | Hostnames to expose the instance on |
 | `ingress.issuer` | operator default | cert-manager ClusterIssuer for TLS (ignored when `gatewayRef` is set) |
@@ -159,7 +159,6 @@ metadata:
   name: client-staging
   namespace: client
 spec:
-  adminPassword: admin
   image: odoo:18.0
   ingress:
     hosts: [client-staging.example.com]
