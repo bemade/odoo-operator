@@ -34,6 +34,7 @@ const CLONE_DB_SCRIPT: &str = include_str!("../../../scripts/clone-db.sh");
 const CLONE_FILESTORE_SCRIPT: &str = include_str!("../../../scripts/clone-filestore.sh");
 const RENAME_FILESTORE_SCRIPT: &str = include_str!("../../../scripts/rename-filestore.sh");
 const NEUTRALIZE_SCRIPT: &str = include_str!("../../../scripts/neutralize.sh");
+const CUTOVER_DB_SCRIPT: &str = include_str!("../../../scripts/cutover-db.sh");
 
 /// Number of hex characters of the image's sha256 we persist in the refresh
 /// CR's `neutralizeJobImageHash` to detect spec drift on retry.  16 chars
@@ -195,14 +196,73 @@ pub async fn delete_source_snapshot(ctx: &Context, ns: &str, snapshot_name: &str
     }
 }
 
+/// Drop the temp DB of a refresh that failed before its final Job existed.
+///
+/// Called from the `FailRefreshJob` transition action.  Where the temp DB of
+/// a failed refresh goes:
+/// - DB clone failed: `clone-db.sh`'s EXIT trap already dropped it.
+/// - Filestore step failed (no final Job yet): nothing will ever use the
+///   temp DB again — no retry path re-runs the DB or filestore step — and
+///   it is an un-neutralized production copy, so drop it here.
+/// - Final Job failed (neutralize or cutover): keep it.  The spec-drift
+///   retry (`maybe_retry_failed_neutralize`) re-creates the final Job
+///   against it.  If no retry comes, the instance's next refresh sweeps it
+///   (`drop_refresh_temp_databases` before its own load).
+///
+/// Best-effort: an error is logged, never returned, so cleanup can't hold
+/// the instance out of InitFailed.
+pub async fn drop_temp_db_of_failed_refresh(
+    instance: &OdooInstance,
+    ctx: &Context,
+    refresh: &OdooStagingRefreshJob,
+) {
+    let status = refresh.status.as_ref();
+    if status
+        .and_then(|s| s.neutralize_job_name.as_deref())
+        .is_some()
+        || status.and_then(|s| s.temp_db_name.as_deref()).is_none()
+    {
+        return;
+    }
+    let ns = instance.namespace().unwrap_or_default();
+    let target_db = crate::helpers::db_name(instance);
+    let result = async {
+        let (_, pg) = super::super::odoo_instance::load_postgres_cluster(ctx, instance).await?;
+        let (user, pass) =
+            child_resources::read_odoo_credentials(&ctx.client, &ns, &instance.name_any()).await?;
+        ctx.postgres
+            .drop_refresh_temp_databases(&pg, &user, &pass, &target_db)
+            .await
+    }
+    .await;
+    match result {
+        Ok(dropped) => info!(
+            crd_name = %refresh.name_any(),
+            ?dropped,
+            "dropped temp DB of failed staging refresh"
+        ),
+        Err(e) => tracing::warn!(
+            crd_name = %refresh.name_any(),
+            error = %e,
+            "failed to drop temp DB of failed staging refresh; the next refresh sweeps it"
+        ),
+    }
+}
+
 /// CloningFromSource: orchestrates the three-Job refresh pipeline.
 ///
 /// Step 1: scale staging web+cron to 0 (same as Initializing / Restoring).
-/// Step 2: if not yet created, spawn the DB clone Job and the filestore
-///         clone Job in parallel.
-/// Step 3: when both succeed, spawn the neutralize Job.  The aggregate
-///         `refresh_job` in the snapshot goes `Succeeded` when the
-///         neutralize Job succeeds, and the state machine transitions
+/// Step 2: if not yet created, spawn the DB clone Job (into the temp DB)
+///         and, once it has succeeded, the filestore step: both filestore
+///         paths verify against the clone's `ir_attachment`, so they read
+///         the temp DB and wait for it to be fully loaded.  (The snapshot
+///         path's VolumeSnapshot + PVC recreate still overlap the DB load;
+///         only its rename Job waits.)
+/// Step 3: when both succeed, spawn the final Job: neutralize the temp DB,
+///         then cut it over into the live name (see `build_final_job`).
+///         Until then the previous staging DB is untouched.  The aggregate
+///         `refresh_job` in the snapshot goes `Succeeded` when the final
+///         Job succeeds, and the state machine transitions
 ///         CloningFromSource → Starting.
 ///
 /// V1 constraint: source and target instances must be in the same
@@ -281,21 +341,11 @@ impl State for CloningFromSource {
             .and_then(|s| s.db_job_name.as_deref())
             .is_none()
         {
-            // Postgres identifiers are limited to 63 bytes.  The Odoo DB
-            // name is `odoo_<36-char-uuid>` = 41 chars, leaving 22 bytes
-            // for the refresh suffix.  An 8-hex-char sha256 prefix of
-            // the refresh CR's UID gives us uniqueness without exceeding
-            // the limit and is stable across reconciles on the same CR
-            // (important so `recreate_database` below replaces a leftover
-            // temp DB from a failed prior attempt instead of stacking one).
+            // Stable across reconciles on the same CR, so `recreate_database`
+            // below replaces a leftover temp DB from a failed prior attempt
+            // instead of stacking one.
             let uid = refresh.metadata.uid.as_deref().unwrap_or("norun");
-            let short = {
-                use sha2::{Digest, Sha256};
-                let h = Sha256::digest(uid.as_bytes());
-                let hex = format!("{h:x}");
-                hex[..8].to_string()
-            };
-            let temp_db = format!("{target_db}_refresh_{short}");
+            let temp_db = crate::helpers::refresh_temp_db_name(&target_db, uid);
 
             // Detect PG server majors on both source and target clusters and
             // run clone-db.sh with a pg client image whose tools are ≥ both
@@ -337,6 +387,21 @@ impl State for CloningFromSource {
                 .await?;
             let (tgt_user, tgt_pass) =
                 child_resources::read_odoo_credentials(&ctx.client, &ns, &inst_name).await?;
+            // Temp DBs other refreshes of this instance left behind: a failed
+            // final Job keeps its temp DB for the neutralize retry, and a
+            // refresh CR can be deleted or pruned before anything drops it.
+            // This refresh supersedes all of them.
+            let swept = ctx
+                .postgres
+                .drop_refresh_temp_databases(&tgt_pg, &tgt_user, &tgt_pass, &target_db)
+                .await?;
+            if !swept.is_empty() {
+                info!(
+                    crd_name = %refresh.name_any(),
+                    ?swept,
+                    "dropped leftover staging-refresh temp databases"
+                );
+            }
             ctx.postgres
                 .recreate_database(&tgt_pg, &tgt_user, &tgt_pass, &temp_db)
                 .await?;
@@ -353,6 +418,28 @@ impl State for CloningFromSource {
             ctx.postgres
                 .ensure_extensions(&tgt_pg, &tgt_user, &tgt_pass, &temp_db, with_unaccent)
                 .await?;
+
+            // Record, before the clone exists, that it stays in the temp DB:
+            // the final Job reads `deferredCutover` to know there is a cutover
+            // to do.  An API server still serving an older CRD schema prunes
+            // the field, and the refresh would then take the legacy path —
+            // neutralize the old staging DB and never swap the clone in.
+            // Refuse to start rather than complete with stale data.
+            let refresh_api: Api<OdooStagingRefreshJob> = Api::namespaced(ctx.client.clone(), &ns);
+            let echoed = refresh_api
+                .patch_status(
+                    &refresh.name_any(),
+                    &PatchParams::apply(FIELD_MANAGER),
+                    &Patch::Merge(&json!({ "status": { "deferredCutover": true } })),
+                )
+                .await?;
+            if echoed.status.and_then(|s| s.deferred_cutover) != Some(true) {
+                let msg = "the OdooStagingRefreshJob CRD is older than the operator \
+                           (status.deferredCutover is not stored); upgrade the CRDs \
+                           before refreshing";
+                patch_refresh_message(&ctx.client, &ns, &refresh.name_any(), msg).await?;
+                return Err(Error::Config(msg.into()));
+            }
 
             let job = build_db_clone_job(
                 &refresh.name_any(),
@@ -389,6 +476,34 @@ impl State for CloningFromSource {
             )
             .await?;
         }
+
+        // Where the clone lives until the final Job cuts it over: the temp
+        // DB, on a refresh whose DB clone Job this operator created
+        // (`deferredCutover`).  On a refresh an older operator started, the
+        // DB clone Job renamed the temp DB into the live name itself, so the
+        // clone is already in the live DB and there is no cutover left to do.
+        // (On the tick that creates the DB clone Job `refresh` predates the
+        // status patch above, but `db_done` is then false, so nothing below
+        // acts on the stale view.)
+        let temp_db: Option<&str> = refresh
+            .status
+            .as_ref()
+            .filter(|s| s.deferred_cutover == Some(true))
+            .and_then(|s| s.temp_db_name.as_deref());
+        let cloned_db = temp_db.unwrap_or(target_db.as_str());
+        let jobs_api: Api<Job> = Api::namespaced(ctx.client.clone(), &ns);
+        let db_done = sub_job_succeeded(
+            &jobs_api,
+            refresh
+                .status
+                .as_ref()
+                .and_then(|s| s.db_job_name.as_deref()),
+            refresh
+                .status
+                .as_ref()
+                .and_then(|s| s.db_job_phase.as_ref()),
+        )
+        .await;
 
         // ── Step 2b: filestore step (unless skipped) ──────────────────
         // Mode-agnostic gate: the start guard and completion check both
@@ -434,7 +549,20 @@ impl State for CloningFromSource {
             let use_copy = refresh.spec.filestore_method == FilestoreMethod::Copy
                 || (refresh.spec.filestore_method == FilestoreMethod::Auto
                     && !can_refresh_with_snapshot(&source_instance, instance));
-            if use_copy {
+            if use_copy && !db_done {
+                // The copy Job verifies the copied tree against the clone's
+                // `ir_attachment`, which is complete only once the DB clone
+                // succeeded, and is in the temp DB (`cloned_db`) until the
+                // cutover; the live DB still holds the old staging data.
+                // So the copy waits for the DB load instead of running in
+                // parallel with it.  `filestorePhase` stays unset, which
+                // brings us back here next tick.
+                tracing::debug!(
+                    crd_name = %refresh.name_any(),
+                    "filestore copy waits for the DB clone to succeed"
+                );
+            } else if use_copy {
+                // Verification DB for the copy, when it verifies: `cloned_db`.
                 let job = build_filestore_clone_job(
                     &refresh.name_any(),
                     &ns,
@@ -621,6 +749,13 @@ impl State for CloningFromSource {
                 // so a still-terminating old PVC can't masquerade as the
                 // recreated one, and wait for Bound so the Job's pod doesn't
                 // sit Pending on an absent volume.
+                //
+                // The rename Job verifies the filestore against the clone's
+                // `ir_attachment`, so it also waits for the DB clone to have
+                // succeeded (a still-loading clone has a partial
+                // ir_attachment) and reads the DB the clone is in: the temp
+                // DB, since the live DB still holds the previous staging data
+                // until the cutover.
                 let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), &ns);
                 let target_pvc = format!("{inst_name}-filestore-pvc");
                 let bound = matches!(
@@ -630,7 +765,7 @@ impl State for CloningFromSource {
                             && pvc.status.as_ref().and_then(|s| s.phase.as_deref())
                                 == Some("Bound")
                 );
-                if bound {
+                if bound && db_done {
                     let job = build_filestore_rename_job(
                         &refresh.name_any(),
                         &ns,
@@ -640,6 +775,7 @@ impl State for CloningFromSource {
                         &target_conf,
                         &source_db,
                         &target_db,
+                        cloned_db,
                     );
                     let jobs_api: Api<Job> = Api::namespaced(ctx.client.clone(), &ns);
                     let created = jobs_api.create(&PostParams::default(), &job).await?;
@@ -660,20 +796,11 @@ impl State for CloningFromSource {
             }
         }
 
-        // ── Step 3: neutralize (after DB + filestore succeed) ─────────
-        let jobs_api: Api<Job> = Api::namespaced(ctx.client.clone(), &ns);
-        let db_done = sub_job_succeeded(
-            &jobs_api,
-            refresh
-                .status
-                .as_ref()
-                .and_then(|s| s.db_job_name.as_deref()),
-            refresh
-                .status
-                .as_ref()
-                .and_then(|s| s.db_job_phase.as_ref()),
-        )
-        .await;
+        // ── Step 3: final Job — neutralize, then cut over ─────────────
+        // Runs once both the DB clone and the filestore step succeeded.  Its
+        // status slot is `neutralizeJobName` whether or not it neutralizes:
+        // the roll-up in `state_machine.rs` completes the refresh when it
+        // succeeds, and the spec-drift retry re-creates it after a failure.
         let fs_done = filestore_skipped
             || matches!(
                 refresh
@@ -689,9 +816,8 @@ impl State for CloningFromSource {
                 .as_ref()
                 .and_then(|s| s.neutralize_job_name.as_deref())
                 .is_none()
-            && refresh.spec.neutralize
         {
-            let job = build_neutralize_job(
+            match build_final_job(
                 &refresh.name_any(),
                 &ns,
                 image,
@@ -699,45 +825,51 @@ impl State for CloningFromSource {
                 refresh,
                 &target_conf,
                 &target_db,
+                temp_db,
                 &ctx.defaults,
-            );
-            let created = jobs_api.create(&PostParams::default(), &job).await?;
-            let k8s_job_name = created.name_any();
-            info!(
-                crd_name = %refresh.name_any(),
-                %k8s_job_name,
-                "created neutralize job"
-            );
-            patch_refresh_status(
-                &ctx.client,
-                &ns,
-                &refresh.name_any(),
-                &json!({
-                    "status": {
-                        "neutralizeJobName": &k8s_job_name,
-                        "neutralizeJobImageHash": neutralize_image_hash(image),
-                    }
-                }),
-            )
-            .await?;
-        } else if db_done && fs_done && !refresh.spec.neutralize {
-            // Neutralize disabled — still need a completion signal for the
-            // aggregate rollup.  Mark the neutralize sub-job as an empty
-            // succeeded sentinel by setting its name to a distinguishable
-            // value that resolve_k8s_job_status returns `Failed` for (404).
-            // Simpler: short-circuit by patching the CR phase ourselves.
-            // (Rarely used in practice since neutralize defaults true.)
-            patch_refresh_status(
-                &ctx.client,
-                &ns,
-                &refresh.name_any(),
-                &json!({
-                    "status": {
-                        "neutralizeJobName": format!("{}-neutralize-skipped", refresh.name_any()),
-                    }
-                }),
-            )
-            .await?;
+            ) {
+                Some(job) => {
+                    let created = jobs_api.create(&PostParams::default(), &job).await?;
+                    let k8s_job_name = created.name_any();
+                    info!(
+                        crd_name = %refresh.name_any(),
+                        %k8s_job_name,
+                        neutralize = refresh.spec.neutralize,
+                        cutover = temp_db.is_some(),
+                        "created final (neutralize/cutover) job"
+                    );
+                    patch_refresh_status(
+                        &ctx.client,
+                        &ns,
+                        &refresh.name_any(),
+                        &json!({
+                            "status": {
+                                "neutralizeJobName": &k8s_job_name,
+                                "neutralizeJobImageHash": neutralize_image_hash(image),
+                            }
+                        }),
+                    )
+                    .await?;
+                }
+                None => {
+                    // Nothing left to do: neutralize disabled on a refresh an
+                    // older operator started, whose DB clone Job already cut
+                    // over.  Record the step as done so the roll-up completes.
+                    patch_refresh_status(
+                        &ctx.client,
+                        &ns,
+                        &refresh.name_any(),
+                        &json!({
+                            "status": {
+                                "neutralizeJobName":
+                                    format!("{}-neutralize-skipped", refresh.name_any()),
+                                "neutralizeJobPhase": Phase::Completed,
+                            }
+                        }),
+                    )
+                    .await?;
+                }
+            }
         }
 
         Ok(())
@@ -915,6 +1047,7 @@ fn build_filestore_rename_job(
     target_conf: &str,
     source_db: &str,
     target_db: &str,
+    verify_db: &str,
 ) -> Job {
     let envs = vec![
         env("SRC_DB", source_db),
@@ -925,7 +1058,9 @@ fn build_filestore_rename_job(
         // indistinguishable from "this database has no attachments", and
         // guessing optimistically yields a green refresh with every
         // attachment silently missing.  The DB is the only authority.
-        env("DB_NAME", target_db),
+        // `verify_db` is the DB the clone is in (the temp DB until the
+        // cutover), not `target_db`, which still holds the old staging data.
+        env("DB_NAME", verify_db),
         cm_env("HOST", target_conf, "db_host"),
         cm_env("PORT", target_conf, "db_port"),
         cm_env("USER", target_conf, "db_user"),
@@ -965,8 +1100,25 @@ fn build_filestore_rename_job(
         .build()
 }
 
+/// The refresh's final Job, built once the DB clone and the filestore step
+/// have succeeded: neutralize the clone, then cut it over into the live name.
+///
+/// - `temp_db` set (the clone is in the temp DB): the cutover
+///   (`cutover-db.sh`) is the main container.  When `spec.neutralize` is
+///   true, `neutralize.sh` runs against the temp DB as the init container,
+///   so Kubernetes starts the cutover only after neutralize has verified,
+///   and the cutover re-checks the neutralization flag itself.  With
+///   neutralize disabled the cutover runs alone, so it still happens exactly
+///   once.
+/// - `temp_db` unset (a refresh an older operator started; its DB clone Job
+///   already cut over): neutralize the live DB, no cutover.  With neutralize
+///   disabled there is nothing left to do and this returns `None`.
+///
+/// One Job rather than a neutralize Job and a cutover Job keeps the status
+/// roll-up at three sub-steps, and the spec-drift retry, which re-creates
+/// this Job, re-runs both halves.
 #[allow(clippy::too_many_arguments)]
-fn build_neutralize_job(
+fn build_final_job(
     crd_name: &str,
     ns: &str,
     image: &str,
@@ -974,34 +1126,25 @@ fn build_neutralize_job(
     refresh: &OdooStagingRefreshJob,
     target_conf: &str,
     target_db: &str,
+    temp_db: Option<&str>,
     defaults: &crate::helpers::OperatorDefaults,
-) -> Job {
-    let mut envs = vec![
-        env("DB_NAME", target_db),
-        cm_env("HOST", target_conf, "db_host"),
-        cm_env("PORT", target_conf, "db_port"),
-        cm_env("USER", target_conf, "db_user"),
-        cm_env("PASSWORD", target_conf, "db_password"),
-    ];
-    envs.extend(staging_mail_env_vars(instance, defaults));
-    OdooJobBuilder::new(&format!("{crd_name}-neut-"), ns, refresh, instance)
-        // Neutralize is a small set of SQL UPDATEs (disable cron jobs,
-        // swap ir_mail_server, blank API keys / passwords).  Realistic
-        // wall time is seconds; 5 min is generous headroom for a slow
-        // DB.  The previous 30 min was masking image-pull failures as
-        // long-running jobs instead of failing fast — fixed in concert
-        // with the neutralize-image-hash retry path so an image typo
-        // surfaces in 5 min instead of 30.
-        .active_deadline(300)
-        // Allow K8s' built-in exponential backoff to absorb transient pod
-        // failures (script crashes, OOM, network blips during DB connect).
-        // ImagePullBackOff is *not* covered by backoffLimit (the Pod never
-        // exits) — that's the spec-drift retry path's responsibility, gated
-        // on `neutralizeJobImageHash`.
-        .backoff_limit(5)
-        // Neutralize runs the Odoo image; the db/filestore clone steps (pg-client
-        // and rsync tooling) deliberately do not get the instance's extra env.
-        .containers(vec![apply_extra_env(
+) -> Option<Job> {
+    let pg_env = || {
+        vec![
+            cm_env("HOST", target_conf, "db_host"),
+            cm_env("PORT", target_conf, "db_port"),
+            cm_env("USER", target_conf, "db_user"),
+            cm_env("PASSWORD", target_conf, "db_password"),
+        ]
+    };
+    let neutralize = |db: &str| {
+        let mut envs = vec![env("DB_NAME", db)];
+        envs.extend(pg_env());
+        envs.extend(staging_mail_env_vars(instance, defaults));
+        // Neutralize runs the Odoo image; the db/filestore clone steps
+        // (pg-client and rsync tooling) and the psql-only cutover
+        // deliberately do not get the instance's extra env.
+        apply_extra_env(
             Container {
                 name: "neutralize".into(),
                 image: Some(image.into()),
@@ -1015,8 +1158,64 @@ fn build_neutralize_job(
                 ..Default::default()
             },
             instance,
-        )])
-        .build()
+        )
+    };
+    let (init_containers, main) = match (temp_db, refresh.spec.neutralize) {
+        (Some(temp_db), neutralize_first) => {
+            let mut envs = pg_env();
+            envs.push(env("TEMP_DB", temp_db));
+            envs.push(env("TGT_DB", target_db));
+            if neutralize_first {
+                envs.push(env("REQUIRE_NEUTRALIZED", "true"));
+            }
+            let cutover = Container {
+                name: "cutover".into(),
+                image: Some(image.into()),
+                command: Some(vec![
+                    "/bin/bash".into(),
+                    "-c".into(),
+                    CUTOVER_DB_SCRIPT.into(),
+                ]),
+                env: Some(envs),
+                ..Default::default()
+            };
+            let inits = if neutralize_first {
+                vec![neutralize(temp_db)]
+            } else {
+                vec![]
+            };
+            (inits, cutover)
+        }
+        (None, true) => (vec![], neutralize(target_db)),
+        (None, false) => return None,
+    };
+    let prefix = if refresh.spec.neutralize {
+        "neut"
+    } else {
+        "cutover"
+    };
+    Some(
+        OdooJobBuilder::new(&format!("{crd_name}-{prefix}-"), ns, refresh, instance)
+            // Neutralize is a small set of SQL UPDATEs (disable cron jobs,
+            // swap ir_mail_server, blank API keys / passwords) and the cutover
+            // a DROP + RENAME.  Realistic wall time is seconds; 5 min is
+            // generous headroom for a slow DB.  The previous 30 min was
+            // masking image-pull failures as long-running jobs instead of
+            // failing fast — fixed in concert with the neutralize-image-hash
+            // retry path so an image typo surfaces in 5 min instead of 30.
+            .active_deadline(300)
+            // Allow K8s' built-in exponential backoff to absorb transient pod
+            // failures (script crashes, OOM, network blips during DB connect).
+            // Both halves are safe to re-run: neutralize is idempotent, and a
+            // cutover interrupted between its DROP and RENAME finishes on the
+            // next attempt.  ImagePullBackOff is *not* covered by
+            // backoffLimit (the Pod never exits) — that's the spec-drift
+            // retry path's responsibility, gated on `neutralizeJobImageHash`.
+            .backoff_limit(5)
+            .init_containers(init_containers)
+            .containers(vec![main])
+            .build(),
+    )
 }
 
 /// Spec-drift retry for the neutralize step.
@@ -1111,9 +1310,12 @@ pub(crate) async fn maybe_retry_failed_neutralize(
     // Clear the neutralize fields and reset the aggregate phase from
     // Failed back to Running.  The snapshot rollup will then re-classify
     // refresh_job as Active, the InitFailed → CloningFromSource transition
-    // fires, and the regular ensure() path creates a fresh neutralize Job
-    // from current spec.  The DB and filestore steps stay completed —
-    // we don't redo them.
+    // fires, and the regular ensure() path creates a fresh final Job
+    // (neutralize, then cutover) from current spec.  The DB and filestore
+    // steps stay completed — we don't redo them.  This works because a
+    // failed final Job leaves the temp DB in place: neither neutralize.sh
+    // nor cutover-db.sh drops it, and `drop_temp_db_of_failed_refresh`
+    // skips a refresh whose final Job was created.
     patch_refresh_status(
         &ctx.client,
         &ns,
@@ -1245,6 +1447,7 @@ mod tests {
             "staging-odoo-conf",
             "odoo_src",
             "odoo_tgt",
+            "odoo_tgt_refresh_0123abcd",
         );
         let pod = job.spec.unwrap().template.spec.unwrap();
         let container = &pod.containers[0];
@@ -1277,6 +1480,7 @@ mod tests {
             "staging-odoo-conf",
             "odoo_src",
             "odoo_tgt",
+            "odoo_tgt_refresh_0123abcd",
         );
         let spec = job.spec.unwrap();
         assert!(
@@ -1297,5 +1501,93 @@ mod tests {
                 "rename-filestore.sh requires ${required}; got {names:?}"
             );
         }
+    }
+
+    fn env_of(c: &Container, name: &str) -> Option<String> {
+        c.env
+            .as_ref()?
+            .iter()
+            .find(|e| e.name == name)
+            .and_then(|e| e.value.clone())
+    }
+
+    fn final_job(neutralize: bool, temp_db: Option<&str>) -> Option<Job> {
+        let mut r = refresh("refresh-x");
+        r.spec.neutralize = neutralize;
+        build_final_job(
+            "refresh-x",
+            "ns",
+            "odoo:19",
+            &instance("staging"),
+            &r,
+            "staging-odoo-conf",
+            "odoo_tgt",
+            temp_db,
+            &crate::helpers::OperatorDefaults::default(),
+        )
+    }
+
+    /// Issue #199: the live name only ever holds a neutralized database.
+    /// With the clone in the temp DB, neutralize runs against the temp DB as
+    /// the init container (so the cutover only starts once it has verified)
+    /// and the cutover requires the neutralization flag.  With neutralize
+    /// disabled the cutover still runs, alone.  A refresh an older operator
+    /// started (clone already in the live DB) neutralizes the live DB and
+    /// has nothing to cut over.
+    #[test]
+    fn final_job_neutralizes_the_clone_before_any_cutover() {
+        let temp = "odoo_tgt_refresh_0123abcd";
+        let pod = |j: Option<Job>| j.unwrap().spec.unwrap().template.spec.unwrap();
+
+        let p = pod(final_job(true, Some(temp)));
+        let inits = p.init_containers.unwrap_or_default();
+        assert_eq!(inits.len(), 1);
+        assert_eq!(inits[0].name, "neutralize");
+        assert_eq!(env_of(&inits[0], "DB_NAME").as_deref(), Some(temp));
+        assert_eq!(p.containers.len(), 1);
+        let cut = &p.containers[0];
+        assert_eq!(cut.name, "cutover");
+        assert_eq!(env_of(cut, "TEMP_DB").as_deref(), Some(temp));
+        assert_eq!(env_of(cut, "TGT_DB").as_deref(), Some("odoo_tgt"));
+        assert_eq!(env_of(cut, "REQUIRE_NEUTRALIZED").as_deref(), Some("true"));
+
+        let p = pod(final_job(false, Some(temp)));
+        assert!(p.init_containers.unwrap_or_default().is_empty());
+        assert_eq!(p.containers[0].name, "cutover");
+        assert_eq!(env_of(&p.containers[0], "REQUIRE_NEUTRALIZED"), None);
+
+        let p = pod(final_job(true, None));
+        assert!(p.init_containers.unwrap_or_default().is_empty());
+        assert_eq!(p.containers.len(), 1);
+        assert_eq!(p.containers[0].name, "neutralize");
+        assert_eq!(
+            env_of(&p.containers[0], "DB_NAME").as_deref(),
+            Some("odoo_tgt")
+        );
+
+        assert!(final_job(false, None).is_none());
+    }
+
+    /// The temp DB name must not change across the operator upgrade: a
+    /// refresh in flight recomputes it (and `recreate_database` replaces a
+    /// leftover of the same CR by that name).  Same formula as before the
+    /// helper existed: `<live>_refresh_` + first 8 hex of sha256(CR UID).
+    #[test]
+    fn refresh_temp_db_name_is_stable_and_recognised() {
+        let uid = "4f9c1e2a-0000-4000-8000-000000000001";
+        let name = crate::helpers::refresh_temp_db_name("odoo_tgt", uid);
+        assert_eq!(name, "odoo_tgt_refresh_5a2b05f4");
+        assert!(crate::helpers::is_refresh_temp_db_name("odoo_tgt", &name));
+        assert!(!crate::helpers::is_refresh_temp_db_name(
+            "odoo_tgt", "odoo_tgt"
+        ));
+        assert!(!crate::helpers::is_refresh_temp_db_name(
+            "odoo_tg",
+            "odoo_tgt_refresh_5a2b05f4"
+        ));
+        assert!(!crate::helpers::is_refresh_temp_db_name(
+            "odoo_tgt",
+            "odoo_tgt_refresh_5A2B05F4"
+        ));
     }
 }
