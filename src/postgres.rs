@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::NoTls;
 use tracing::{debug, info, warn};
 
@@ -199,9 +200,25 @@ impl PostgresManager for PgPostgresManager {
         // `managed.roles`) does not retain that grant across the external
         // manager's own reconciles — an unconditional ALTER then fails every
         // reconcile with "permission denied to alter role" (issue #128).
+        //
+        // Only an authentication failure is evidence that the password is
+        // wrong. Any other probe failure (server saturated, briefly
+        // unreachable, ...) says nothing about the password, so skip the
+        // ALTER and let the next reconcile re-check; resetting on such
+        // errors re-salted every tenant's password whenever the server was
+        // overloaded, and hit the #128 failure on top.
         if exists {
-            if password_authenticates(pg, username, password).await {
-                return Ok(());
+            match probe_password(pg, username, password).await {
+                PasswordProbe::Authenticates => return Ok(()),
+                PasswordProbe::Rejected => {}
+                PasswordProbe::Inconclusive(e) => {
+                    warn!(
+                        %username,
+                        "could not verify postgres role password, leaving it \
+                         unchanged until the next reconcile: {e}"
+                    );
+                    return Ok(());
+                }
             }
             let stmt = format!("ALTER ROLE {safe_user} WITH PASSWORD '{password}'");
             client.execute(&stmt, &[]).await?;
@@ -745,27 +762,53 @@ fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
+/// Outcome of logging in as a tenant role with the password the operator
+/// holds for it.
+enum PasswordProbe {
+    /// The login succeeded: the password is current.
+    Authenticates,
+    /// The server checked the password and rejected it.
+    Rejected,
+    /// The login failed for any other reason, so the password's validity is
+    /// unknown. Wrapped in the crate error so it logs the server's message
+    /// rather than tokio-postgres's bare "db error".
+    Inconclusive(crate::error::Error),
+}
+
 /// Probe whether `username`/`password` can authenticate against the cluster.
-/// Any failure (bad password, unreachable host, missing CONNECT privilege)
-/// returns `false`, in which case the caller falls back to ALTER ROLE — the
-/// pre-#128 behavior.
-async fn password_authenticates(
+///
+/// Only SQLSTATE 28P01 (`invalid_password`) counts as [`PasswordProbe::Rejected`]:
+/// Postgres raises it exactly when a password-based method (`scram-sha-256`,
+/// `md5`, `password`) compared the supplied password with the role's stored
+/// one and they differed, which is the only failure `ALTER ROLE ... WITH
+/// PASSWORD` can fix. 28000 (`invalid_authorization_specification`) is
+/// deliberately inconclusive: it covers a pg_hba.conf rejection (no matching
+/// entry, `reject`, a TLS-only entry), where the password is never checked;
+/// non-password methods (LDAP, RADIUS, cert, ...), which do not consult the
+/// stored password; and a NOLOGIN role, rejected only after the password was
+/// accepted. Every other error (connection refused, timeouts, `too many
+/// clients`, reserved slots, per-role connection limits, missing CONNECT
+/// privilege, ...) is inconclusive too.
+async fn probe_password(
     pg: &PostgresClusterConfig,
     username: &str,
     password: &str,
-) -> bool {
+) -> PasswordProbe {
     let connstr = format!(
         "host={} port={} user={} password={} dbname=postgres",
         pg.host, pg.port, username, password
     );
+    // `connect` resolves only after the server has authenticated the role
+    // and finished session startup, so success means the password is current.
     match tokio_postgres::connect(&connstr, NoTls).await {
-        Ok((client, connection)) => {
+        Ok((_client, connection)) => {
             tokio::spawn(async move {
                 let _ = connection.await;
             });
-            client.simple_query("SELECT 1").await.is_ok()
+            PasswordProbe::Authenticates
         }
-        Err(_) => false,
+        Err(e) if e.code() == Some(&SqlState::INVALID_PASSWORD) => PasswordProbe::Rejected,
+        Err(e) => PasswordProbe::Inconclusive(e.into()),
     }
 }
 
