@@ -20,7 +20,7 @@ use crate::notify;
 
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{
-    apply_extra_env, cm_env, cron_depl_name, ensure_job_credentials_secret, env, pg_tools_image,
+    apply_extra_env, cron_depl_name, ensure_job_credentials_secret, env, pg_tools_image,
     secret_env, staging_mail_env_vars, OdooJobBuilder, FIELD_MANAGER, S3_CLIENT_IMAGE,
 };
 use crate::controller::state_machine::scale_deployment;
@@ -257,10 +257,10 @@ impl State for Restoring {
 
         // ── init: load-db ───────────────────────────────────────────────
         let load_env = vec![
-            cm_env("HOST", &odoo_conf_name, "db_host"),
-            cm_env("PORT", &odoo_conf_name, "db_port"),
-            cm_env("USER", &odoo_conf_name, "db_user"),
-            cm_env("PASSWORD", &odoo_conf_name, "db_password"),
+            secret_env("HOST", &odoo_conf_name, "db_host"),
+            secret_env("PORT", &odoo_conf_name, "db_port"),
+            secret_env("USER", &odoo_conf_name, "db_user"),
+            secret_env("PASSWORD", &odoo_conf_name, "db_password"),
             env("DB_NAME", db.clone()),
             env("BACKUP_FORMAT", format_str),
         ];
@@ -276,10 +276,10 @@ impl State for Restoring {
         // ── main: neutralize (Odoo image) or alpine no-op ───────────────
         let main_container = if restore_job.spec.neutralize {
             let mut neut_env = vec![
-                cm_env("HOST", &odoo_conf_name, "db_host"),
-                cm_env("PORT", &odoo_conf_name, "db_port"),
-                cm_env("USER", &odoo_conf_name, "db_user"),
-                cm_env("PASSWORD", &odoo_conf_name, "db_password"),
+                secret_env("HOST", &odoo_conf_name, "db_host"),
+                secret_env("PORT", &odoo_conf_name, "db_port"),
+                secret_env("USER", &odoo_conf_name, "db_user"),
+                secret_env("PASSWORD", &odoo_conf_name, "db_password"),
                 env("DB_NAME", db.clone()),
             ];
             neut_env.extend(staging_mail_env_vars(instance, &ctx.defaults));
@@ -309,8 +309,8 @@ impl State for Restoring {
             }
         };
 
-        // Volumes: workspace scratch + filestore PVC.  No odoo-conf —
-        // creds flow through cm_env.
+        // Volumes: workspace scratch + filestore PVC.  No odoo-conf mount —
+        // creds flow through secretKeyRef env vars.
         let workspace_vol = Volume {
             name: "workspace".into(),
             empty_dir: Some(Default::default()),

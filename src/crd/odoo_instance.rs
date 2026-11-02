@@ -337,7 +337,13 @@ fn default_init_modules() -> Vec<String> {
     rule = Rule::new("self.environment != 'Production' || !has(self.productionInstanceRef)")
         .message(Message::Expression(
             "'spec.productionInstanceRef is forbidden on production instances'".into()
-        ))
+        )),
+    rule = Rule::new(
+        "!has(self.adminPasswordSecretRef) || !has(self.adminPassword) || self.adminPassword == ''"
+    )
+    .message(Message::Expression(
+        "'spec.adminPassword and spec.adminPasswordSecretRef are mutually exclusive'".into()
+    ))
 )]
 #[kube(
     group = "bemade.org",
@@ -361,7 +367,24 @@ pub struct OdooInstanceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_pull_secret: Option<String>,
 
+    /// DEPRECATED: use `adminPasswordSecretRef`. The Odoo master password
+    /// (`admin_passwd`) in plaintext. Anyone who can read this OdooInstance
+    /// can read it, and it is stored verbatim in etcd, audit logs and any
+    /// export of the object. Still honoured when non-empty; mutually exclusive
+    /// with `adminPasswordSecretRef`. When neither is set (or this is empty),
+    /// the operator generates a password into the Secret
+    /// `<instance>-admin-password` and points `adminPasswordSecretRef` at it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub admin_password: String,
+
+    /// The Odoo master password (`admin_passwd`), read from a key of a Secret
+    /// in the instance's namespace. Preferred over `adminPassword`, with which
+    /// it is mutually exclusive. Set by the operator, pointing at the generated
+    /// Secret `<instance>-admin-password`, when no password is given. The
+    /// operator watches the Secret: a change is rendered into odoo.conf and
+    /// rolls the pods.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_password_secret_ref: Option<super::shared::SecretKeySelector>,
 
     #[serde(default = "default_replicas")]
     pub replicas: i32,

@@ -20,6 +20,7 @@ fn test_instance(name: &str, pull_secret: Option<&str>) -> OdooInstance {
             image: None,
             image_pull_secret: pull_secret.map(|s| s.to_string()),
             admin_password: "admin".to_string(),
+            admin_password_secret_ref: None,
             replicas: 1,
             cron: CronSpec {
                 replicas: 1,
@@ -129,10 +130,11 @@ fn test_odoo_volumes_names_and_sources() {
     let pvc = vols[0].persistent_volume_claim.as_ref().unwrap();
     assert_eq!(pvc.claim_name, "my-odoo-filestore-pvc");
 
-    // ConfigMap volume
+    // odoo.conf volume: a Secret (it carries db_password and admin_passwd).
     assert_eq!(vols[1].name, "odoo-conf");
-    let cm = vols[1].config_map.as_ref().unwrap();
-    assert_eq!(cm.name, "my-odoo-odoo-conf");
+    assert!(vols[1].config_map.is_none());
+    let sec = vols[1].secret.as_ref().unwrap();
+    assert_eq!(sec.secret_name.as_deref(), Some("my-odoo-odoo-conf"));
 }
 
 #[test]
@@ -168,7 +170,7 @@ fn test_odoo_volumes_ephemeral_filestore() {
     assert!(vols[0].empty_dir.is_some());
     assert!(vols[0].persistent_volume_claim.is_none());
 
-    // ConfigMap volume unaffected
+    // odoo.conf volume unaffected
     assert_eq!(vols[1].name, "odoo-conf");
 }
 
@@ -217,20 +219,6 @@ fn test_env_accepts_string_and_str() {
     let from_str = env("A", "val");
     let from_string = env("A", String::from("val"));
     assert_eq!(from_str.value, from_string.value);
-}
-
-// ── cm_env ──────────────────────────────────────────────────────────────────
-
-#[test]
-fn test_cm_env_creates_configmap_ref_envvar() {
-    let e = cm_env("HOST", "my-odoo-odoo-conf", "db_host");
-    assert_eq!(e.name, "HOST");
-    assert!(e.value.is_none());
-
-    let vf = e.value_from.unwrap();
-    let cm_ref = vf.config_map_key_ref.unwrap();
-    assert_eq!(cm_ref.name, "my-odoo-odoo-conf");
-    assert_eq!(cm_ref.key, "db_host");
 }
 
 // ── FIELD_MANAGER ───────────────────────────────────────────────────────────

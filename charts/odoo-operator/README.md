@@ -203,7 +203,12 @@ metadata:
 spec:
   image: odoo:18.0
   replicas: 1
-  adminPassword: "admin-password"
+  # Optional: the Odoo master password, from a Secret in the same namespace.
+  # Omit it and the operator generates one into the Secret
+  # `my-odoo-admin-password` (key `password`) and fills this in.
+  adminPasswordSecretRef:
+    name: my-odoo-master
+    key: password
   ingress:
     hosts:
       - my-odoo.example.com
@@ -212,6 +217,11 @@ spec:
     cluster: main  # Optional: specify which PostgreSQL cluster to use
     name: my-odoo  # Optional: custom database name (defaults to odoo_<uid>)
 ```
+
+`spec.adminPassword` (the master password as a plaintext string) is
+**deprecated**: anyone who can read the OdooInstance can read it. It still
+works, but cannot be combined with `adminPasswordSecretRef`. See
+[Moving the master password to a Secret](#moving-the-master-password-to-a-secret).
 
 ### OdooInitJob
 
@@ -303,6 +313,34 @@ helm upgrade odoo-operator ./odoo-operator \
 The operator Deployment uses the `Recreate` strategy, so the old pod stops
 before the new one starts and OdooInstance updates are rejected by the webhook
 for those few seconds. See [One operator per cluster](#one-operator-per-cluster).
+
+### Moving the master password to a Secret
+
+Instances that still set `spec.adminPassword` keep reconciling unchanged. To
+move one to a Secret without recreating it:
+
+```bash
+# 1. Create a Secret holding the current value, in the instance's namespace.
+kubectl -n <ns> create secret generic <instance>-master \
+  --from-literal=password='<current master password>'
+
+# 2. Switch the field in one patch: set the reference, drop the literal.
+kubectl -n <ns> patch odooinstance <instance> --type merge -p \
+  '{"spec":{"adminPassword":null,"adminPasswordSecretRef":{"name":"<instance>-master","key":"password"}}}'
+
+# 3. Confirm the rendered config is unchanged: same value, so the
+#    bemade.org/odoo-conf-hash pod annotation is unchanged and no pod restarts.
+kubectl -n <ns> get deploy <instance> \
+  -o jsonpath='{.spec.template.metadata.annotations.bemade\.org/odoo-conf-hash}'
+```
+
+If you manage instances with GitOps, make the same change in the manifest
+(remove `adminPassword`, add `adminPasswordSecretRef`). An instance with
+neither set gets a generated password in the Secret `<instance>-admin-password`;
+read it with
+`kubectl -n <ns> get secret <instance>-admin-password -o jsonpath='{.data.password}' | base64 -d`.
+An instance that had `adminPassword: ""` was running with Odoo's built-in
+default master password (`admin`); after upgrading it gets a generated one.
 
 ### Upgrading to v0.10.0+ (Multi-Cluster PostgreSQL)
 

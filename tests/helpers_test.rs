@@ -134,6 +134,7 @@ fn make_instance(uid: Option<&str>, db_name: Option<&str>) -> OdooInstance {
             image: None,
             image_pull_secret: None,
             admin_password: "admin".to_string(),
+            admin_password_secret_ref: None,
             replicas: 1,
             cron: CronSpec::default(),
             ingress: IngressSpec {

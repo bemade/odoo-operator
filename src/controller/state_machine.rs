@@ -683,7 +683,7 @@ async fn resolve_refresh_sub_job_status(
     let live = match jobs_api.get(name).await {
         Ok(job) => {
             let succeeded = job.status.as_ref().and_then(|s| s.succeeded).unwrap_or(0) > 0;
-            // Not `status.failed > 0`: the filestore-rename (backoffLimit 8) and
+            // Not `status.failed > 0`: the filestore-rename (backoffLimit 25) and
             // neutralize (backoffLimit 5) Jobs fail pods on purpose while they
             // wait out a JuiceFS snapshot clone or a transient error.  Only
             // Kubernetes' own Failed condition means the retries are spent.

@@ -8,6 +8,7 @@
 
 mod common;
 
+mod admin_password;
 mod auto_init;
 mod backup_job;
 mod bootstrap;

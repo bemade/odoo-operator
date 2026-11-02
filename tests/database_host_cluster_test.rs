@@ -93,7 +93,7 @@ fn mid_migration_trusts_the_recorded_source_over_active_cluster() {
 #[test]
 fn switches_to_the_destination_once_active_cluster_moves() {
     // complete_database_migration has run: the data is on beta, so the
-    // ConfigMap should now be rewritten and the pods rolled onto it.
+    // The odoo-conf Secret should now be rewritten and the pods rolled onto it.
     let inst = instance(json!({
         "dbInitialized": true,
         "phase": "FinalizingDatabaseMigration",

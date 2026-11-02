@@ -10,9 +10,8 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::{
     batch::v1::{Job, JobSpec},
     core::v1::{
-        Affinity, ConfigMapKeySelector, Container, EnvVar, EnvVarSource, LocalObjectReference,
-        PodSecurityContext, PodSpec, PodTemplateSpec, Secret, SecretKeySelector, Volume,
-        VolumeMount,
+        Affinity, Container, EnvVar, EnvVarSource, LocalObjectReference, PodSecurityContext,
+        PodSpec, PodTemplateSpec, Secret, SecretKeySelector, Volume, VolumeMount,
     },
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -115,8 +114,13 @@ pub fn odoo_security_context() -> PodSecurityContext {
 
 /// Standard volumes shared by the instance Deployment and every job pod:
 /// the filestore (PVC, or a per-pod emptyDir when `ephemeral`) and the
-/// odoo-conf ConfigMap. This is the single seam where the filestore volume
-/// source is chosen — every pod the operator creates goes through it.
+/// `<instance>-odoo-conf` Secret holding the rendered odoo.conf. This is the
+/// single seam where the filestore volume source is chosen — every pod the
+/// operator creates goes through it.
+///
+/// odoo.conf is a Secret, not a ConfigMap, because it carries `db_password`
+/// and `admin_passwd`, and Odoo reads the master password only from the
+/// config file.
 pub fn odoo_volumes(instance_name: &str, ephemeral: bool) -> Vec<Volume> {
     let filestore = if ephemeral {
         Volume {
@@ -140,8 +144,8 @@ pub fn odoo_volumes(instance_name: &str, ephemeral: bool) -> Vec<Volume> {
         filestore,
         Volume {
             name: "odoo-conf".to_string(),
-            config_map: Some(k8s_openapi::api::core::v1::ConfigMapVolumeSource {
-                name: format!("{instance_name}-odoo-conf"),
+            secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                secret_name: Some(format!("{instance_name}-odoo-conf")),
                 ..Default::default()
             }),
             ..Default::default()
@@ -181,22 +185,6 @@ pub fn env(name: &str, value: impl Into<String>) -> EnvVar {
     EnvVar {
         name: name.into(),
         value: Some(value.into()),
-        ..Default::default()
-    }
-}
-
-/// Build an `EnvVar` that reads its value from a ConfigMap key.
-pub fn cm_env(env_name: &str, cm_name: &str, key: &str) -> EnvVar {
-    EnvVar {
-        name: env_name.into(),
-        value_from: Some(EnvVarSource {
-            config_map_key_ref: Some(ConfigMapKeySelector {
-                name: cm_name.into(),
-                key: key.into(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }),
         ..Default::default()
     }
 }
@@ -512,9 +500,58 @@ pub fn job_has_failed(job: &Job) -> bool {
         })
 }
 
+/// Whether a Job is done for good: it succeeded, or its `Failed` condition is
+/// set. A Job with failed pods but no `Failed` condition is still retrying and
+/// can start new pods.
+pub fn job_is_finished(job: &Job) -> bool {
+    let status = job.status.as_ref();
+    status.and_then(|s| s.succeeded).unwrap_or(0) > 0
+        || status
+            .and_then(|s| s.conditions.as_ref())
+            .is_some_and(|conds| {
+                conds
+                    .iter()
+                    .any(|c| c.type_ == "Complete" && c.status == "True")
+            })
+        || job_has_failed(job)
+}
+
+/// Whether a pod spec reads anything from the ConfigMap `name`: a `configMap`
+/// or projected volume, a `configMapKeyRef` env var, or a `configMapRef`
+/// `envFrom` source, in any container or init container. A pod built from such
+/// a spec cannot start while the ConfigMap is missing.
+pub fn pod_spec_references_configmap(spec: &PodSpec, name: &str) -> bool {
+    let in_volumes = spec.volumes.iter().flatten().any(|v| {
+        v.config_map.as_ref().is_some_and(|c| c.name == name)
+            || v.projected.as_ref().is_some_and(|p| {
+                p.sources
+                    .iter()
+                    .flatten()
+                    .any(|s| s.config_map.as_ref().is_some_and(|c| c.name == name))
+            })
+    });
+    let in_containers = spec
+        .containers
+        .iter()
+        .chain(spec.init_containers.iter().flatten())
+        .any(|c| {
+            c.env.iter().flatten().any(|e| {
+                e.value_from
+                    .as_ref()
+                    .and_then(|vf| vf.config_map_key_ref.as_ref())
+                    .is_some_and(|r| r.name == name)
+            }) || c
+                .env_from
+                .iter()
+                .flatten()
+                .any(|ef| ef.config_map_ref.as_ref().is_some_and(|r| r.name == name))
+        });
+    in_volumes || in_containers
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{job_has_failed, merge_extra_env};
+    use super::{job_has_failed, job_is_finished, merge_extra_env, pod_spec_references_configmap};
     use k8s_openapi::api::batch::v1::{Job, JobCondition, JobStatus};
     use k8s_openapi::api::core::v1::EnvVar;
 
@@ -612,5 +649,54 @@ mod tests {
     #[test]
     fn job_without_status_has_not_failed() {
         assert!(!job_has_failed(&Job::default()));
+    }
+
+    fn pod(v: serde_json::Value) -> k8s_openapi::api::core::v1::PodSpec {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn configmap_references_are_found_wherever_a_pod_can_read_one() {
+        let cm = "inst-odoo-conf";
+        let cases = [
+            serde_json::json!({"containers": [], "volumes": [
+                {"name": "c", "configMap": {"name": cm}}]}),
+            serde_json::json!({"containers": [], "volumes": [
+                {"name": "p", "projected": {"sources": [{"configMap": {"name": cm}}]}}]}),
+            serde_json::json!({"containers": [{"name": "a", "env": [
+                {"name": "X", "valueFrom": {"configMapKeyRef": {"name": cm, "key": "k"}}}]}]}),
+            serde_json::json!({"containers": [], "initContainers": [{"name": "i", "envFrom": [
+                {"configMapRef": {"name": cm}}]}]}),
+        ];
+        for c in cases {
+            assert!(pod_spec_references_configmap(&pod(c.clone()), cm), "{c}");
+        }
+    }
+
+    #[test]
+    fn secret_and_other_configmap_references_do_not_count() {
+        let spec = pod(serde_json::json!({
+            "containers": [{"name": "a", "env": [
+                {"name": "X", "valueFrom": {"secretKeyRef": {"name": "inst-odoo-conf", "key": "k"}}},
+                {"name": "Y", "valueFrom": {"configMapKeyRef": {"name": "other", "key": "k"}}}]}],
+            "volumes": [{"name": "s", "secret": {"secretName": "inst-odoo-conf"}}],
+        }));
+        assert!(!pod_spec_references_configmap(&spec, "inst-odoo-conf"));
+    }
+
+    #[test]
+    fn retrying_job_is_not_finished_but_succeeded_or_failed_is() {
+        assert!(!job_is_finished(&Job::default()));
+        assert!(!job_is_finished(&job_with(2, &[])));
+        assert!(job_is_finished(&job_with(9, &[("Failed", "True")])));
+        assert!(job_is_finished(&job_with(0, &[("Complete", "True")])));
+        let ok = Job {
+            status: Some(JobStatus {
+                succeeded: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(job_is_finished(&ok));
     }
 }
