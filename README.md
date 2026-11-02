@@ -51,6 +51,10 @@ helm upgrade --install odoo-operator oci://ghcr.io/bemade/odoo-operator/charts/o
   --set defaults.ingressIssuer=letsencrypt-prod
 ```
 
+Install the chart **once per cluster**: the operator is a singleton with no
+leader election, and upgrades briefly stop it (and its admission webhook). See
+[One operator per cluster](charts/odoo-operator/README.md#one-operator-per-cluster).
+
 **NOTE**: If you have a previously installed version of the chart, you may need to
 completely uninstall and reinstall it. This chart is still in early and active
 development and breaking changes are still frequent. Uninstalling the chart does not

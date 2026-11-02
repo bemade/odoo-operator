@@ -12,6 +12,16 @@ kube-rs, deployed via Helm.
 
 ## Architecture
 
+### Singleton
+
+Exactly one operator pod per cluster. There is no leader election, and two
+pods (e.g. old and new versions mid-upgrade) fight over the same SSA field
+manager and flap every child object. The chart pins `replicas: 1` (not a
+value; keep it that way) and uses `strategy: Recreate`, so an upgrade has a
+short window with no operator and no webhook (`failurePolicy: Fail`:
+OdooInstance UPDATEs are rejected meanwhile). Never run two installs against
+one cluster. On SIGTERM the controller drains in-flight reconciles and exits.
+
 ### State Machine (PLC-style)
 
 The OdooInstance lifecycle is a declarative state machine in

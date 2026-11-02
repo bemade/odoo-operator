@@ -11,6 +11,33 @@ This chart deploys:
 - ConfigMaps for operator configuration
 - Standard Kubernetes Ingress support (or Gateway API HTTPRoute)
 
+## One operator per cluster
+
+The operator is a cluster-wide singleton. Exactly one operator pod may run
+in a cluster at any time.
+
+- **No leader election.** Every operator pod reconciles every OdooInstance and
+  server-side applies the same child objects under the same field manager. Two
+  pods, especially two different versions, fight over those objects: tenant
+  Deployments flap between two specs, pods are created and killed in a loop,
+  and the database can run out of connections.
+- **`replicas` is fixed at 1** in the chart. It is not a value on purpose; do
+  not patch or scale the operator Deployment above 1.
+- **Upgrades use the `Recreate` strategy.** The old operator pod is stopped
+  before the new one starts, so there is a short window with no operator and
+  no admission webhook: the old pod's shutdown (it lets in-flight reconciles
+  finish), then the new pod's image pull and start-up until it passes its
+  readiness probe. Nothing is reconciled during that window; reconciliation
+  resumes when the new pod starts. The validating webhook has
+  `failurePolicy: Fail` and intercepts `UPDATE` on OdooInstances, so **updates
+  to OdooInstances are rejected during that window** (creates and deletes are
+  not intercepted). Retry any such write after the upgrade. Running
+  `helm upgrade --wait` makes Helm wait for the new pod before it runs the
+  chart's post-upgrade migration hook, which may itself patch OdooInstances.
+- **Never install the chart twice against the same cluster**, for example as
+  two Helm releases in different namespaces. Each release runs its own operator
+  and the two will fight exactly as described above.
+
 ## Prerequisites
 
 - Kubernetes 1.20+
@@ -269,8 +296,13 @@ spec:
 ```bash
 helm upgrade odoo-operator ./odoo-operator \
   --namespace odoo-operator \
+  --wait \
   -f my-values.yaml
 ```
+
+The operator Deployment uses the `Recreate` strategy, so the old pod stops
+before the new one starts and OdooInstance updates are rejected by the webhook
+for those few seconds. See [One operator per cluster](#one-operator-per-cluster).
 
 ### Upgrading to v0.10.0+ (Multi-Cluster PostgreSQL)
 
