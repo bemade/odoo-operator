@@ -152,6 +152,22 @@ fn validate(req: AdmissionRequest<OdooInstance>) -> AdmissionResponse {
         }
     }
 
+    // Deprecated literal master password (#177): warn when one is set on
+    // CREATE or changed on UPDATE, not on every unrelated update (including
+    // the operator's own patches) of an instance that still carries one.
+    if let Some(new) = req.object.as_ref() {
+        let new_pw = new.spec.admin_password.as_str();
+        let old_pw = req
+            .old_object
+            .as_ref()
+            .map(|o| o.spec.admin_password.as_str());
+        if !new_pw.is_empty() && old_pw != Some(new_pw) {
+            warnings.push(
+                "spec.adminPassword is deprecated: anyone who can read this OdooInstance can read the master password. Put it in a Secret and set spec.adminPasswordSecretRef instead (or set neither and the operator generates one)".to_string(),
+            );
+        }
+    }
+
     // CREATE and DELETE are always allowed (beyond rule 0).
     if req.old_object.is_none() {
         return with_warnings(AdmissionResponse::from(&req), warnings);
@@ -308,7 +324,7 @@ mod tests {
             db.insert("cluster".into(), serde_json::json!(c));
         }
         let mut spec = serde_json::json!({
-            "adminPassword": "admin",
+            "adminPasswordSecretRef": { "name": "master", "key": "password" },
             "ingress": { "hosts": ["test.example.com"] }
         });
         if !db.is_empty() {
@@ -718,5 +734,58 @@ mod tests {
             resp.warnings.is_none(),
             "unchanged retained size/class must not warn on every update"
         );
+    }
+
+    fn make_pw_request(old_pw: Option<&str>, new_pw: &str) -> AdmissionRequest<OdooInstance> {
+        let with_pw = |pw: &str| {
+            let mut obj = make_instance_json(None, None);
+            let spec = obj["spec"].as_object_mut().unwrap();
+            spec.remove("adminPasswordSecretRef");
+            spec.insert("adminPassword".into(), serde_json::json!(pw));
+            obj
+        };
+        let mut request = serde_json::json!({
+            "uid": "req-pw",
+            "kind": { "group": "bemade.org", "version": "v1alpha1", "kind": "OdooInstance" },
+            "resource": { "group": "bemade.org", "version": "v1alpha1", "resource": "odooinstances" },
+            "name": "test",
+            "namespace": "default",
+            "operation": if old_pw.is_none() { "CREATE" } else { "UPDATE" },
+            "userInfo": { "username": "test" },
+            "object": with_pw(new_pw),
+            "dryRun": false,
+        });
+        if let Some(old) = old_pw {
+            request["oldObject"] = with_pw(old);
+        }
+        let review = serde_json::json!({
+            "apiVersion": "admission.k8s.io/v1",
+            "kind": "AdmissionReview",
+            "request": request,
+        });
+        let ar: kube::core::admission::AdmissionReview<OdooInstance> =
+            serde_json::from_value(review).expect("valid AdmissionReview");
+        ar.try_into().expect("valid AdmissionRequest")
+    }
+
+    fn deprecation_warned(resp: &AdmissionResponse) -> bool {
+        resp.warnings
+            .iter()
+            .flatten()
+            .any(|w| w.contains("spec.adminPassword is deprecated"))
+    }
+
+    #[test]
+    fn test_literal_admin_password_warns_when_set_or_changed_only() {
+        let created = validate(make_pw_request(None, "pw"));
+        assert!(created.allowed && deprecation_warned(&created));
+        let changed = validate(make_pw_request(Some("old"), "new"));
+        assert!(changed.allowed && deprecation_warned(&changed));
+        // An unrelated update of an instance that still carries the literal.
+        let same = validate(make_pw_request(Some("pw"), "pw"));
+        assert!(same.allowed && !deprecation_warned(&same));
+        // Empty means unset: nothing to deprecate.
+        let empty = validate(make_pw_request(None, ""));
+        assert!(empty.allowed && !deprecation_warned(&empty));
     }
 }

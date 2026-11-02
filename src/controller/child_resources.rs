@@ -40,7 +40,7 @@ use gateway_api::apis::standard::httproutes::{
 };
 
 use crate::crd::odoo_instance::{DeploymentStrategyType, Environment, GatewayRef, OdooInstance};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::helpers::{
     build_odoo_conf, db_name, generate_password, odoo_ro_username, odoo_username, parse_quantity,
     sha256_hex,
@@ -516,6 +516,124 @@ async fn get_pvc_source(
     })
 }
 
+/// Name of the Secret the operator generates the master password into when
+/// the spec gives none.
+pub fn generated_admin_password_secret_name(name: &str) -> String {
+    format!("{name}-admin-password")
+}
+
+/// Generate-if-empty for the Odoo master password (#177).
+///
+/// When the spec sets neither `adminPassword` nor `adminPasswordSecretRef`,
+/// create (if absent) the owned Secret `<name>-admin-password` holding a
+/// random password, then point `spec.adminPasswordSecretRef` at it. The value
+/// never enters the spec. Create-if-absent before the patch makes this
+/// idempotent: if the patch fails, the next reconcile reuses the Secret
+/// instead of minting a second password. Returns true when the spec was
+/// patched (the caller requeues).
+pub async fn ensure_admin_password_ref(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    instance: &OdooInstance,
+    oref: &OwnerReference,
+) -> Result<bool> {
+    if instance.spec.admin_password_secret_ref.is_some() || !instance.spec.admin_password.is_empty()
+    {
+        return Ok(false);
+    }
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
+    let secret_name = generated_admin_password_secret_name(name);
+    if secrets.get_opt(&secret_name).await?.is_none() {
+        let secret = Secret {
+            metadata: ObjectMeta {
+                name: Some(secret_name.clone()),
+                namespace: Some(ns.to_string()),
+                owner_references: Some(vec![oref.clone()]),
+                ..Default::default()
+            },
+            type_: Some("Opaque".to_string()),
+            string_data: Some(BTreeMap::from([(
+                ADMIN_PASSWORD_KEY.to_string(),
+                generate_password(),
+            )])),
+            ..Default::default()
+        };
+        match secrets.create(&PostParams::default(), &secret).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(e)) if e.code == 409 => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let api: Api<OdooInstance> = Api::namespaced(client.clone(), ns);
+    let patch = json!({"spec": {"adminPasswordSecretRef": {
+        "name": secret_name,
+        "key": ADMIN_PASSWORD_KEY,
+    }}});
+    api.patch(
+        name,
+        &PatchParams::apply(FIELD_MANAGER),
+        &Patch::Merge(&patch),
+    )
+    .await?;
+    Ok(true)
+}
+
+/// Key of the generated master-password Secret.
+const ADMIN_PASSWORD_KEY: &str = "password";
+
+/// The master password to render as `admin_passwd`: read from
+/// `spec.adminPasswordSecretRef` when set, else the deprecated literal
+/// (rendered exactly as before; empty means none).
+///
+/// A missing Secret or key is an error, never a fallback: falling back to the
+/// literal, to generation or to no password would silently change the master
+/// password. See [`master_password_line`] for what a usable value is (a
+/// trailing newline, as `kubectl create secret --from-file` leaves, is fine).
+async fn resolve_admin_password(
+    client: &Client,
+    ns: &str,
+    instance: &OdooInstance,
+) -> Result<String> {
+    let Some(r) = instance.spec.admin_password_secret_ref.as_ref() else {
+        return Ok(instance.spec.admin_password.clone());
+    };
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
+    let secret = secrets.get_opt(&r.name).await?.ok_or_else(|| {
+        Error::config(format!(
+            "spec.adminPasswordSecretRef: Secret {ns}/{} not found",
+            r.name
+        ))
+    })?;
+    let raw = secret
+        .data
+        .and_then(|mut d| d.remove(&r.key))
+        .ok_or_else(|| {
+            Error::config(format!(
+                "spec.adminPasswordSecretRef: Secret {ns}/{} has no key {:?}",
+                r.name, r.key
+            ))
+        })?;
+    master_password_line(&raw.0).ok_or_else(|| {
+        Error::config(format!(
+            "spec.adminPasswordSecretRef: {ns}/{}[{}] must be a non-empty single line of UTF-8",
+            r.name, r.key
+        ))
+    })
+}
+
+/// A Secret value usable as `admin_passwd`: UTF-8, one trailing newline
+/// dropped, non-empty, and no other line break (which would inject lines into
+/// odoo.conf).
+fn master_password_line(raw: &[u8]) -> Option<String> {
+    let value = std::str::from_utf8(raw).ok()?;
+    let value = value
+        .strip_suffix("\r\n")
+        .or_else(|| value.strip_suffix('\n'))
+        .unwrap_or(value);
+    (!value.is_empty() && !value.contains(['\n', '\r'])).then(|| value.to_string())
+}
+
 /// Render odoo.conf into the `<name>-odoo-conf` Secret.
 ///
 /// A Secret rather than a ConfigMap: the file carries `db_password` and the
@@ -547,10 +665,11 @@ pub async fn ensure_odoo_conf_secret(
     )
     .to_string();
 
+    let admin_password = resolve_admin_password(client, ns, instance).await?;
     let conf = build_odoo_conf(
         &username,
         &password,
-        &instance.spec.admin_password,
+        &admin_password,
         &pg.host,
         pg.port,
         &db,
@@ -1439,5 +1558,26 @@ pub async fn delete_readonly_role(
     {
         Ok(_) | Err(kube::Error::Api(kube::core::ErrorResponse { code: 404, .. })) => Ok(()),
         Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::master_password_line;
+
+    #[test]
+    fn master_password_from_secret_must_be_one_line() {
+        assert_eq!(master_password_line(b"s3cret").as_deref(), Some("s3cret"));
+        // `kubectl create secret --from-file` keeps the file's newline.
+        assert_eq!(master_password_line(b"s3cret\n").as_deref(), Some("s3cret"));
+        assert_eq!(
+            master_password_line(b"s3cret\r\n").as_deref(),
+            Some("s3cret")
+        );
+        // A line break would inject options into odoo.conf.
+        assert_eq!(master_password_line(b"x\nlist_db = True"), None);
+        assert_eq!(master_password_line(b""), None);
+        assert_eq!(master_password_line(b"\n"), None);
+        assert_eq!(master_password_line(&[0xff, 0xfe]), None);
     }
 }
