@@ -12,7 +12,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use k8s_openapi::api::{
     apps::v1::Deployment,
-    core::v1::{ConfigMap, ObjectReference, PersistentVolumeClaim, Secret, Service},
+    core::v1::{ObjectReference, PersistentVolumeClaim, Secret, Service},
     networking::v1::Ingress,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
@@ -112,7 +112,6 @@ pub async fn run(ctx: Arc<Context>) {
     let deployments: Api<Deployment> = Api::all(client.clone());
     let services: Api<Service> = Api::all(client.clone());
     let ingresses: Api<Ingress> = Api::all(client.clone());
-    let configmaps: Api<ConfigMap> = Api::all(client.clone());
     let secrets: Api<Secret> = Api::all(client.clone());
     let pvcs: Api<PersistentVolumeClaim> = Api::all(client.clone());
     let init_jobs: Api<OdooInitJob> = Api::all(client.clone());
@@ -125,7 +124,6 @@ pub async fn run(ctx: Arc<Context>) {
         .owns(deployments, WatcherConfig::default())
         .owns(services, WatcherConfig::default())
         .owns(ingresses, WatcherConfig::default())
-        .owns(configmaps, WatcherConfig::default())
         .owns(secrets, WatcherConfig::default())
         .owns(pvcs, WatcherConfig::default())
         // Watch job CRDs and map back to the owning OdooInstance.
@@ -367,7 +365,7 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
     );
     // Database migration doesn't skip child resource creation — the state's
     // ensure() scales the deployments to 0, and ensure_deployment /
-    // ensure_config_map preserve the current replica count.  The connection
+    // ensure_odoo_conf_secret preserve the current replica count.  The connection
     // details they write are pinned to the source cluster for the duration
     // (see `database_host_cluster`); the switchover happens by itself once
     // `status.activeCluster` moves.
@@ -375,12 +373,21 @@ async fn reconcile_instance(instance: &OdooInstance, ctx: &Context) -> Result<Ac
         child_resources::ensure_filestore_pvc(client, &ns, &name, instance, ctx, &oref, None)
             .await?;
     }
-    child_resources::ensure_config_map(client, &ns, &name, instance, &pg_cluster, &oref).await?;
+    child_resources::ensure_odoo_conf_secret(client, &ns, &name, instance, &pg_cluster, &oref)
+        .await?;
     child_resources::ensure_service(client, &ns, &name, &oref).await?;
     child_resources::ensure_routing(client, &ns, &name, instance, &oref).await?;
     if !is_migrating_filestore {
         child_resources::ensure_deployment(client, &ns, &name, instance, ctx, &oref).await?;
         child_resources::ensure_cron_deployment(client, &ns, &name, instance, ctx, &oref).await?;
+    }
+    // Upgrade from the ConfigMap-rendered odoo.conf (#131). After the
+    // Deployments above have been moved onto the Secret; the helper itself
+    // re-checks that nothing still references the ConfigMap. Non-fatal.
+    if let Err(e) =
+        child_resources::delete_legacy_conf_configmap(client, &ns, &name, instance).await
+    {
+        warn!(%name, %e, "legacy odoo-conf ConfigMap cleanup failed — will retry");
     }
 
     // Read-only SQL access — provision or tear down based on spec opt-in.

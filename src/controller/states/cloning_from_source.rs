@@ -26,8 +26,8 @@ use crate::{controller::child_resources, crd::odoo_instance::OdooInstance};
 
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{
-    apply_extra_env, cm_env, controller_owner_ref, cron_depl_name, env, is_ephemeral,
-    odoo_volume_mounts, pg_tools_image, staging_mail_env_vars, OdooJobBuilder, FIELD_MANAGER,
+    apply_extra_env, controller_owner_ref, cron_depl_name, env, is_ephemeral, odoo_volume_mounts,
+    pg_tools_image, secret_env, staging_mail_env_vars, OdooJobBuilder, FIELD_MANAGER,
 };
 use crate::controller::state_machine::scale_deployment;
 use crate::helpers::sha256_hex;
@@ -1069,15 +1069,15 @@ fn build_db_clone_job(
     temp_db: &str,
 ) -> Job {
     let envs = vec![
-        cm_env("SRC_HOST", source_conf, "db_host"),
-        cm_env("SRC_PORT", source_conf, "db_port"),
-        cm_env("SRC_USER", source_conf, "db_user"),
-        cm_env("SRC_PASSWORD", source_conf, "db_password"),
+        secret_env("SRC_HOST", source_conf, "db_host"),
+        secret_env("SRC_PORT", source_conf, "db_port"),
+        secret_env("SRC_USER", source_conf, "db_user"),
+        secret_env("SRC_PASSWORD", source_conf, "db_password"),
         env("SRC_DB", source_db),
-        cm_env("TGT_HOST", target_conf, "db_host"),
-        cm_env("TGT_PORT", target_conf, "db_port"),
-        cm_env("TGT_USER", target_conf, "db_user"),
-        cm_env("TGT_PASSWORD", target_conf, "db_password"),
+        secret_env("TGT_HOST", target_conf, "db_host"),
+        secret_env("TGT_PORT", target_conf, "db_port"),
+        secret_env("TGT_USER", target_conf, "db_user"),
+        secret_env("TGT_PASSWORD", target_conf, "db_password"),
         env("TGT_DB", target_db),
         env("TEMP_DB", temp_db),
     ];
@@ -1141,10 +1141,10 @@ fn build_filestore_clone_job(
         // `verify_db`'s ir_attachment, and only then swaps it in.  The
         // connection comes from the target conf, like the rename Job's.
         env("DB_NAME", verify_db),
-        cm_env("HOST", target_conf, "db_host"),
-        cm_env("PORT", target_conf, "db_port"),
-        cm_env("USER", target_conf, "db_user"),
-        cm_env("PASSWORD", target_conf, "db_password"),
+        secret_env("HOST", target_conf, "db_host"),
+        secret_env("PORT", target_conf, "db_port"),
+        secret_env("USER", target_conf, "db_user"),
+        secret_env("PASSWORD", target_conf, "db_password"),
     ];
     let mut mounts = odoo_volume_mounts();
     mounts.push(src_mount);
@@ -1208,10 +1208,10 @@ fn build_filestore_rename_job(
         // `verify_db` is the DB the clone is in (the temp DB until the
         // cutover), not `target_db`, which still holds the old staging data.
         env("DB_NAME", verify_db),
-        cm_env("HOST", target_conf, "db_host"),
-        cm_env("PORT", target_conf, "db_port"),
-        cm_env("USER", target_conf, "db_user"),
-        cm_env("PASSWORD", target_conf, "db_password"),
+        secret_env("HOST", target_conf, "db_host"),
+        secret_env("PORT", target_conf, "db_port"),
+        secret_env("USER", target_conf, "db_user"),
+        secret_env("PASSWORD", target_conf, "db_password"),
     ];
     // Attachments written after the snapshot's point in time are legitimately
     // absent from it; without this every referenced file is required, which a
@@ -1285,10 +1285,10 @@ fn build_final_job(
 ) -> Option<Job> {
     let pg_env = || {
         vec![
-            cm_env("HOST", target_conf, "db_host"),
-            cm_env("PORT", target_conf, "db_port"),
-            cm_env("USER", target_conf, "db_user"),
-            cm_env("PASSWORD", target_conf, "db_password"),
+            secret_env("HOST", target_conf, "db_host"),
+            secret_env("PORT", target_conf, "db_port"),
+            secret_env("USER", target_conf, "db_user"),
+            secret_env("PASSWORD", target_conf, "db_password"),
         ]
     };
     let neutralize = |db: &str| {
@@ -1728,12 +1728,12 @@ mod tests {
         };
         assert_eq!(value("DB_NAME").value.as_deref(), Some("odoo_verify"));
         for name in ["HOST", "PORT", "USER", "PASSWORD"] {
-            let cm = value(name)
+            let sk = value(name)
                 .value_from
                 .as_ref()
-                .and_then(|v| v.config_map_key_ref.as_ref())
-                .unwrap_or_else(|| panic!("${name} must come from the target conf"));
-            assert_eq!(cm.name, "staging-odoo-conf");
+                .and_then(|v| v.secret_key_ref.as_ref())
+                .unwrap_or_else(|| panic!("${name} must come from the target conf Secret"));
+            assert_eq!(sk.name, "staging-odoo-conf");
         }
         let text = container.command.as_ref().unwrap().last().unwrap();
         let defined = text

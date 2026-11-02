@@ -21,8 +21,8 @@ use crate::notify;
 
 use super::{Context, ReconcileSnapshot, State};
 use crate::controller::helpers::{
-    cm_env, ensure_job_credentials_secret, env, pg_tools_image, secret_env, OdooJobBuilder,
-    FIELD_MANAGER, S3_CLIENT_IMAGE,
+    ensure_job_credentials_secret, env, pg_tools_image, secret_env, OdooJobBuilder, FIELD_MANAGER,
+    S3_CLIENT_IMAGE,
 };
 
 const DUMP_SCRIPT: &str = include_str!("../../../scripts/backup-dump.sh");
@@ -107,10 +107,10 @@ impl State for BackingUp {
         let dump_image = pg_tools_image(major);
 
         let dump_env = vec![
-            cm_env("HOST", &odoo_conf_name, "db_host"),
-            cm_env("PORT", &odoo_conf_name, "db_port"),
-            cm_env("USER", &odoo_conf_name, "db_user"),
-            cm_env("PASSWORD", &odoo_conf_name, "db_password"),
+            secret_env("HOST", &odoo_conf_name, "db_host"),
+            secret_env("PORT", &odoo_conf_name, "db_port"),
+            secret_env("USER", &odoo_conf_name, "db_user"),
+            secret_env("PASSWORD", &odoo_conf_name, "db_password"),
             env("DB_NAME", db.clone()),
             env("BACKUP_FORMAT", format),
         ];
@@ -166,7 +166,7 @@ impl State for BackingUp {
         }
 
         // Volumes: workspace (scratch emptyDir) + filestore.  No odoo-conf —
-        // neither container needs it (creds are injected via cm_env).
+        // neither container needs it (creds are injected via secretKeyRef).
         let workspace_mount = VolumeMount {
             name: "workspace".into(),
             mount_path: "/workspace".into(),
