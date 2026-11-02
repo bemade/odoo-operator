@@ -1,0 +1,41 @@
+# SMTP sink for staging instances: SMTP 1025, web UI 8025.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mailpit
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailpit
+  namespace: mailpit
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: mailpit}
+  template:
+    metadata:
+      labels: {app: mailpit}
+    spec:
+      containers:
+        - name: mailpit
+          image: axllent/mailpit:v1.27
+          ports:
+            - {name: smtp, containerPort: 1025}
+            - {name: http, containerPort: 8025}
+          env:
+            - {name: MP_SMTP_AUTH_ACCEPT_ANY, value: "true"}
+            - {name: MP_SMTP_AUTH_ALLOW_INSECURE, value: "true"}
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8025}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailpit
+  namespace: mailpit
+spec:
+  selector: {app: mailpit}
+  ports:
+    - {name: smtp, port: 1025, targetPort: 1025}
+    - {name: http, port: 8025, targetPort: 8025}

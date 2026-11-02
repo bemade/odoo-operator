@@ -1,5 +1,5 @@
-.PHONY: build test test-all test-cluster test-scripts test-postgres crds helm-crds check fmt clippy \
-       docker-build docker-push docker-load state-machine \
+.PHONY: build test test-all test-minikube test-scripts test-postgres crds helm-crds check fmt clippy \
+       docker-build docker-push docker-load install minikube-setup state-machine \
        release-patch release-minor release-major
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -32,12 +32,14 @@ clippy:
 test:
 	cargo test
 
-## All tests including cluster integration (requires running k8s cluster)
-test-all: test test-scripts test-postgres test-cluster
+## All tests, including the end-to-end smoke on the local minikube test
+## cluster (requires docker and `make minikube-setup` first)
+test-all: test test-scripts test-postgres test-minikube
 
-## Cluster integration tests only
-test-cluster:
-	cargo test --test integration_test -- --ignored
+## End-to-end smoke (staging refreshes, neutralize, Mailpit) on the minikube
+## test cluster; see testing/minikube/README.md
+test-minikube:
+	testing/minikube/smoke.sh
 
 ## Shell-script contract tests for scripts/* (requires docker, zip)
 test-scripts:
@@ -58,8 +60,25 @@ docker-build: ## Build docker image with the operator.
 docker-push: ## Push docker image.
 	$(CONTAINER_TOOL) push $(IMG)
 
-docker-load: docker-build ## Build and load into minikube.
-	minikube image load $(IMG)
+# ── Local minikube test cluster (testing/minikube/README.md) ─────────────────
+# These go through testing/minikube/*.sh, which only ever use the profile's
+# dedicated kubeconfig and refuse any other cluster, so they can never act on
+# the default kubeconfig context.
+
+REV ?= HEAD
+
+## Create the minikube test cluster with the latest released operator.
+minikube-setup:
+	testing/minikube/setup.sh all
+
+## Build REV (default HEAD, committed tree only) and load it into minikube.
+docker-load:
+	testing/minikube/upgrade-local.sh $(REV) --build-only
+
+## Build REV (default HEAD, committed tree only) and helm-upgrade the minikube
+## test cluster's operator to it, with REV's own chart and CRDs.
+install:
+	testing/minikube/upgrade-local.sh $(REV)
 
 # ── CRD Generation ───────────────────────────────────────────────────────────
 
@@ -123,20 +142,3 @@ release-patch release-minor release-major:
 	git tag "v$(VERSION)"
 	git push origin HEAD "v$(VERSION)"
 	@echo "Done — CI will build and publish v$(VERSION)."
-
-KUBE_CONTEXT ?= minikube
-KUBECTL := kubectl --context=$(KUBE_CONTEXT)
-
-install: docker-build helm-crds
-	$(KUBECTL) scale deployment/odoo-operator -n odoo-operator --replicas=0
-	$(KUBECTL) rollout status deployment/odoo-operator -n odoo-operator --timeout=60s || true
-
-	docker build --no-cache -t registry.bemade.org/bemade/odoo-operator:local-dev .
-	minikube image load --overwrite=true registry.bemade.org/bemade/odoo-operator:local-dev
-
-	helm upgrade odoo-operator "charts/odoo-operator" \
-	--namespace odoo-operator \
-	--kube-context=$(KUBE_CONTEXT) \
-	-f "testing/helm/values.yaml"
-
-	$(KUBECTL) rollout status deployment/odoo-operator -n odoo-operator --timeout=120s

@@ -1,0 +1,31 @@
+# Helm values for the odoo-operator chart on the local minikube test cluster.
+# Used both for the released baseline (setup.sh operator) and for a locally
+# built revision (upgrade-local.sh), so the upgrade changes only the chart and
+# the image.  operator.image and operator.imagePullPolicy are always set on
+# the command line by those scripts, never here.
+operator:
+  jobHistoryLimit: 10
+# The chart default lists a private registry; the demo needs none.
+imagePullSecrets: []
+# Pre-flight migration gate: the demo tags its source instance Production.
+productionInstancesIdentified: true
+# Created by `setup.sh pgcluster` from the CNPG superuser secret.
+postgresClustersSecretRef:
+  name: postgres-clusters
+defaults:
+  odooImage: "odoo:18.0"
+  # Provided by minikube's csi-hostpath-driver addon (snapshot-capable).
+  storageClass: "csi-hostpath-sc"
+  storageSize: "2Gi"
+  # No ingress controller or issuer in the test cluster: reach Odoo with
+  # kubectl port-forward (see README.md).
+  ingressClass: ""
+  ingressIssuer: ""
+  resources:
+    requests: {cpu: 200m, memory: 512Mi}
+    limits: {cpu: 2000m, memory: 2Gi}
+  mail:
+    # Mailpit, deployed by `setup.sh mailpit`.
+    stagingSmtpHost: "mailpit.mailpit.svc.cluster.local"
+    stagingSmtpPort: 1025
+    stagingSmtpEncryption: "none"
