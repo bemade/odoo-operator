@@ -102,6 +102,47 @@ async fn reconcile_creates_child_resources() {
     );
 }
 
+/// When a FUSE mount fails, the CSI driver remounts it on the node. Without
+/// propagation running containers keep the dead mount until deleted, so both
+/// long-running Deployments need it on the filestore (#220). Envtest has no
+/// kubelet, so this only guards the rendered spec; the recovery itself needs a
+/// real cluster.
+#[tokio::test]
+async fn deployments_propagate_filestore_mount_changes_from_the_host() {
+    let ctx = TestContext::new("test-propagation").await;
+    let c = &ctx.client;
+    let ns = &ctx.ns;
+
+    assert!(
+        wait_for_phase(c, ns, "test-propagation", OdooInstancePhase::Uninitialized).await,
+        "expected Uninitialized"
+    );
+
+    let deps: Api<Deployment> = Api::namespaced(c.clone(), ns);
+    for name in ["test-propagation", "test-propagation-cron"] {
+        let dep = deps.get(name).await.expect("deployment missing");
+        let mounts = dep
+            .spec
+            .and_then(|s| s.template.spec)
+            .map(|p| p.containers[0].volume_mounts.clone().unwrap_or_default())
+            .expect("deployment has no pod spec");
+        let propagation = |volume: &str| {
+            mounts
+                .iter()
+                .find(|m| m.name == volume)
+                .unwrap_or_else(|| panic!("{name} has no {volume} mount"))
+                .mount_propagation
+                .clone()
+        };
+        assert_eq!(
+            propagation("filestore").as_deref(),
+            Some("HostToContainer"),
+            "{name} filestore mount"
+        );
+        assert_eq!(propagation("odoo-conf"), None, "{name} odoo-conf mount");
+    }
+}
+
 /// When gatewayRef is set, the operator should create an HTTPRoute and no Ingress.
 #[tokio::test]
 async fn reconcile_creates_http_route_when_gateway_ref_set() {

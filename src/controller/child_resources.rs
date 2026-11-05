@@ -49,8 +49,8 @@ use crate::postgres::PostgresClusterConfig;
 
 use super::helpers::{
     apply_extra_env, cron_depl_name, env, image_pull_secrets, is_ephemeral, job_is_finished,
-    odoo_security_context, odoo_volume_mounts, odoo_volumes, pod_spec_references_configmap,
-    secret_env, FIELD_MANAGER,
+    odoo_deployment_volume_mounts, odoo_security_context, odoo_volumes,
+    pod_spec_references_configmap, secret_env, FIELD_MANAGER,
 };
 use super::odoo_instance::Context;
 
@@ -1088,7 +1088,7 @@ pub async fn ensure_deployment(
                                 },
                             ]),
                             env: Some(pg_env),
-                            volume_mounts: Some(odoo_volume_mounts()),
+                            volume_mounts: Some(odoo_deployment_volume_mounts()),
                             resources: instance.spec.resources.clone(),
                             startup_probe: Some(Probe {
                                 initial_delay_seconds: Some(5),
@@ -1362,7 +1362,7 @@ pub async fn ensure_cron_deployment(
                                     "--no-http".to_string(),
                                 ]),
                                 env: Some(pg_env),
-                                volume_mounts: Some(odoo_volume_mounts()),
+                                volume_mounts: Some(odoo_deployment_volume_mounts()),
                                 resources: instance.spec.cron.resources.clone(),
                                 startup_probe: Some(Probe {
                                     initial_delay_seconds: Some(5),
