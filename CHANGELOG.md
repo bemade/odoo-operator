@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.9.1](https://github.com/bemade/odoo-operator/compare/v2.9.0...v2.9.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **filestore:** propagate host mount changes into web and cron pods ([#221](https://github.com/bemade/odoo-operator/issues/221)) ([82b6a50](https://github.com/bemade/odoo-operator/commit/82b6a50acd69e1002c578bdaa4f1461c0d7024ad)), closes [#220](https://github.com/bemade/odoo-operator/issues/220)
+
 ## [2.9.0](https://github.com/bemade/odoo-operator/compare/v2.8.5...v2.9.0) (2026-11-02)
 
 
