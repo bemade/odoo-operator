@@ -169,6 +169,20 @@ pub fn odoo_volume_mounts() -> Vec<VolumeMount> {
     ]
 }
 
+/// Volume mounts for the long-running web and cron containers.
+///
+/// When a FUSE mount fails, a CSI driver such as JuiceFS remounts the volume on
+/// the node. Without propagation these containers keep the dead mount until
+/// deleted (`Transport endpoint is not connected`); with it, the recovered mount
+/// reaches them. Jobs don't need it: they fail and rerun.
+pub fn odoo_deployment_volume_mounts() -> Vec<VolumeMount> {
+    let mut mounts = odoo_volume_mounts();
+    for mount in mounts.iter_mut().filter(|m| m.name == "filestore") {
+        mount.mount_propagation = Some("HostToContainer".to_string());
+    }
+    mounts
+}
+
 /// Build the `imagePullSecrets` list from an OdooInstance spec.
 /// Returns `None` when no pull secret is configured (which omits the
 /// field from the serialised JSON, matching the K8s convention).
